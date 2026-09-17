@@ -49,6 +49,9 @@ pub struct Answer {
 
 pub trait Navigator {
     fn answer(&mut self, demand: &Demand, store: &Store) -> Answer;
+
+    /// Receive declarations from the compiled model (verbalization, signatures).
+    fn prepare(&mut self, _compiled: &crate::core::Compiled) {}
 }
 
 /// Replays a dict of tuples. Used in tests of the evaluator itself.

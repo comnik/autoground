@@ -1,4 +1,5 @@
-use super::ast::{Form, Formula, Program, Term};
+use super::ast::{Declare, Form, Formula, Program, Term};
+use super::template::{parse_template, template_slots};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -272,13 +273,7 @@ pub fn parse_atom(src: &str) -> Result<(String, Vec<Term>), ParseError> {
     let program = parse(&format!("(require {wrapped})"))?;
     match program.forms.into_iter().next() {
         Some(Form::Require(Formula::Atom { pred, args })) => {
-            let args = args
-                .into_iter()
-                .map(|t| match t {
-                    Term::Var(v) => Term::Var(v.strip_prefix('?').unwrap_or(&v).to_string()),
-                    other => other,
-                })
-                .collect();
+            let args = args.into_iter().map(strip_qmark).collect();
             Ok((pred, args))
         }
         Some(Form::Require(_)) => Err(err(
@@ -328,17 +323,49 @@ fn lower_form(s: &Sexp) -> Result<Form, ParseError> {
             let body = lower_formula(&xs[3])?;
             Ok(Form::Def { name, vars, body })
         }
+        Some(Sexp::Symbol(head)) if head == "declare" => Ok(Form::Declare(lower_declare(xs)?)),
         Some(Sexp::Symbol(head)) => Err(err(
             1,
             1,
-            format!("unknown top-level form `{head}`; expected `require` or `def`"),
+            format!("unknown top-level form `{head}`; expected `require`, `def`, or `declare`"),
         )),
         _ => Err(err(
             1,
             1,
-            "top-level form must start with `require` or `def`",
+            "top-level form must start with `require`, `def`, or `declare`",
         )),
     }
+}
+
+fn lower_declare(xs: &[Sexp]) -> Result<Declare, ParseError> {
+    if xs.len() != 3 {
+        return Err(err(
+            1,
+            1,
+            "`declare` takes a predicate name and a verbalization template string",
+        ));
+    }
+    let name = match &xs[1] {
+        Sexp::Symbol(n) => n.clone(),
+        _ => return Err(err(1, 1, "`declare` name must be a symbol")),
+    };
+    let template = match &xs[2] {
+        Sexp::String(s) => s.clone(),
+        _ => {
+            return Err(err(
+                1,
+                1,
+                "`declare` template must be a string, e.g. \"{String} is a component\"",
+            ))
+        }
+    };
+    let parts = parse_template(&template).map_err(|message| err(1, 1, message))?;
+    let slots = template_slots(&parts);
+    Ok(Declare {
+        name,
+        template,
+        slots,
+    })
 }
 
 fn lower_varlist(s: &Sexp) -> Result<Vec<String>, ParseError> {
@@ -428,12 +455,116 @@ fn lower_term(s: &Sexp) -> Result<Term, ParseError> {
     match s {
         Sexp::Symbol(v) => Ok(Term::Var(v.clone())),
         Sexp::String(c) => Ok(Term::Const(c.clone())),
+        Sexp::List(xs) => {
+            if xs.len() != 2 {
+                return Err(err(
+                    1,
+                    1,
+                    "a typed term must be `(Type \"value\")`, e.g. `(File \"ui/app.py\")`",
+                ));
+            }
+            let ty = match &xs[0] {
+                Sexp::Symbol(n) => n.clone(),
+                _ => return Err(err(1, 1, "typed term head must be a symbol")),
+            };
+            match &xs[1] {
+                Sexp::String(v) => Ok(Term::Typed {
+                    ty,
+                    value: v.clone(),
+                }),
+                _ => Err(err(
+                    1,
+                    1,
+                    "typed term argument must be a string, e.g. `(File \"ui/app.py\")`",
+                )),
+            }
+        }
         _ => Err(err(
             1,
             1,
-            "a term must be a variable (symbol) or a constant (string)",
+            "a term must be a variable, a constant, or a typed constant `(File \"path\")`",
         )),
     }
+}
+
+fn strip_qmark(t: Term) -> Term {
+    match t {
+        Term::Var(v) => Term::Var(v.strip_prefix('?').unwrap_or(&v).to_string()),
+        other => other,
+    }
+}
+
+/// A `declare` catalog plus atoms to verbalize, including bare top-level atoms
+/// and atoms nested in `require` / `def`.
+#[derive(Debug, Clone, Default)]
+pub struct VerbalizeInput {
+    pub declares: Vec<Declare>,
+    pub atoms: Vec<(String, Vec<Term>)>,
+}
+
+/// Parse source for `autoground verbalize`: `declare` / `require` / `def` plus
+/// bare atoms such as `(Component "Frontend")`.
+pub fn parse_verbalize_input(src: &str) -> Result<VerbalizeInput, ParseError> {
+    let tokens = tokenize(src)?;
+    if tokens.is_empty() {
+        return Ok(VerbalizeInput::default());
+    }
+    let mut p = Parser { tokens, i: 0 };
+    let mut sexps = Vec::new();
+    while p.peek().is_some() {
+        sexps.push(p.sexp()?);
+    }
+
+    let mut declares = Vec::new();
+    for s in &sexps {
+        if let Sexp::List(xs) = s {
+            if matches!(xs.first(), Some(Sexp::Symbol(h)) if h == "declare") {
+                declares.push(lower_declare(xs)?);
+            }
+        }
+    }
+
+    let mut atoms = Vec::new();
+    for s in &sexps {
+        let Sexp::List(xs) = s else {
+            return Err(err(1, 1, "top-level form must be a list"));
+        };
+        match xs.first() {
+            Some(Sexp::Symbol(head)) if head == "declare" => {}
+            Some(Sexp::Symbol(head)) if head == "require" => {
+                if xs.len() != 2 {
+                    return Err(err(1, 1, "`require` takes one formula"));
+                }
+                collect_atoms(&lower_formula(&xs[1])?, &mut atoms);
+            }
+            Some(Sexp::Symbol(head)) if head == "def" => {
+                if xs.len() != 4 {
+                    return Err(err(1, 1, "`def` takes a name, a variable list, and a body"));
+                }
+                collect_atoms(&lower_formula(&xs[3])?, &mut atoms);
+            }
+            Some(Sexp::Symbol(_)) => match lower_formula(s)? {
+                Formula::Atom { pred, args } => atoms.push((pred, args)),
+                _ => {
+                    return Err(err(
+                        1,
+                        1,
+                        "bare top-level form must be an atom, `declare`, `require`, or `def`",
+                    ))
+                }
+            },
+            _ => {
+                return Err(err(1, 1, "top-level form must start with a symbol"));
+            }
+        }
+    }
+    Ok(VerbalizeInput { declares, atoms })
+}
+
+fn collect_atoms(f: &Formula, out: &mut Vec<(String, Vec<Term>)>) {
+    f.walk_atoms(&mut |pred, args| {
+        out.push((pred.to_string(), args.to_vec()));
+    });
 }
 
 fn err(line: usize, col: usize, message: impl Into<String>) -> ParseError {
@@ -471,5 +602,33 @@ mod tests {
         let (pred, args) = parse_atom("component x").unwrap();
         assert_eq!(pred, "component");
         assert_eq!(args, vec![Term::Var("x".into())]);
+    }
+
+    #[test]
+    fn parse_declare_and_typed_term() {
+        let p = parse(r#"(declare File "{String} is a file in the codebase")"#).unwrap();
+        match &p.forms[0] {
+            Form::Declare(d) => {
+                assert_eq!(d.name, "File");
+                assert_eq!(d.slots, vec!["String"]);
+            }
+            other => panic!("expected declare, got {other:?}"),
+        }
+        let (pred, args) =
+            parse_atom(r#"(defines (File "ui/app.py") (Component "Frontend"))"#).unwrap();
+        assert_eq!(pred, "defines");
+        assert_eq!(
+            args,
+            vec![
+                Term::Typed {
+                    ty: "File".into(),
+                    value: "ui/app.py".into()
+                },
+                Term::Typed {
+                    ty: "Component".into(),
+                    value: "Frontend".into()
+                }
+            ]
+        );
     }
 }

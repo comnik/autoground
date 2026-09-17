@@ -104,6 +104,9 @@ pub fn run<'a>(
         last_exists_witness: None,
         last_forall_counterexample: None,
     };
+    if let Some(nav) = eng.navigator.as_mut() {
+        nav.prepare(compiled);
+    }
     let mut requires = Vec::new();
     for req in &compiled.requires {
         eng.last_exists_witness = None;
@@ -257,7 +260,9 @@ impl Engine<'_> {
             let mut any_unresolved = false;
             for t in &args {
                 match t {
-                    Term::Const(c) => demand_args.push(Arg::Bound(c.clone())),
+                    Term::Const(c) | Term::Typed { value: c, .. } => {
+                        demand_args.push(Arg::Bound(c.clone()))
+                    }
                     Term::Var(v) if env.contains_key(v) => {
                         demand_args.push(Arg::Bound(env[v].clone()));
                     }
@@ -273,9 +278,10 @@ impl Engine<'_> {
             if any_unresolved || !any_free {
                 continue;
             }
-            // file/1 and defines/2 are tests of a candidate, not generators.
-            // Generating from them would walk the whole repo (including decoy/).
-            if pred == "file" || pred == "defines" {
+            // file/1 and defines/2 (and File-first relations) are tests of a
+            // candidate, not generators. Generating from them would walk the
+            // whole repo (including decoy/).
+            if self.is_test_pred(&pred) {
                 continue;
             }
             if demand_args.iter().all(|a| matches!(a, Arg::Free(_))) {
@@ -300,7 +306,7 @@ impl Engine<'_> {
         );
         let atoms: Vec<_> = atoms
             .into_iter()
-            .filter(|(pred, _)| pred != "file" && pred != "defines")
+            .filter(|(pred, _)| !self.is_test_pred(pred))
             .collect();
         if atoms.is_empty() {
             return self.universe_closed(body);
@@ -309,7 +315,7 @@ impl Engine<'_> {
             let pattern: Vec<Option<String>> = args
                 .iter()
                 .map(|t| match t {
-                    Term::Const(c) => Some(c.clone()),
+                    Term::Const(c) | Term::Typed { value: c, .. } => Some(c.clone()),
                     Term::Var(v) if env.contains_key(v) => env.get(v).cloned(),
                     Term::Var(v) if vars.iter().any(|x| x == v) => None,
                     Term::Var(_) => None,
@@ -336,7 +342,7 @@ impl Engine<'_> {
         );
         let mut values = HashSet::new();
         for (pred, args) in atoms {
-            if pred == "file" || pred == "defines" {
+            if self.is_test_pred(&pred) {
                 continue;
             }
             for row in self.store.facts_for(&pred) {
@@ -347,7 +353,7 @@ impl Engine<'_> {
                 let mut extracted = Vec::new();
                 for (cell, t) in row.iter().zip(args.iter()) {
                     match t {
-                        Term::Const(c) if c != cell => ok = false,
+                        Term::Const(c) | Term::Typed { value: c, .. } if c != cell => ok = false,
                         Term::Var(v) if env.get(v).is_some_and(|e| e != cell) => ok = false,
                         Term::Var(v) if vars.iter().any(|x| x == v) => {
                             extracted.push(cell.clone());
@@ -369,7 +375,7 @@ impl Engine<'_> {
         let resolved: Vec<Option<String>> = args
             .iter()
             .map(|t| match t {
-                Term::Const(c) => Some(c.clone()),
+                Term::Const(c) | Term::Typed { value: c, .. } => Some(c.clone()),
                 Term::Var(v) => env.get(v).cloned(),
             })
             .collect();
@@ -468,6 +474,19 @@ impl Engine<'_> {
         v
     }
 
+    fn is_test_pred(&self, pred: &str) -> bool {
+        if pred.eq_ignore_ascii_case("file") || pred == "defines" {
+            return true;
+        }
+        let Some(d) = self.compiled.declarations.get(pred) else {
+            return false;
+        };
+        if d.slots.len() == 1 && is_file_sort(&d.slots[0]) {
+            return true;
+        }
+        d.slots.first().is_some_and(|s| is_file_sort(s))
+    }
+
     fn universe_closed(&self, body: &Formula) -> bool {
         let mut preds = HashSet::new();
         collect_edb_preds(body, &self.compiled.idb_preds, &mut preds);
@@ -484,6 +503,10 @@ impl Engine<'_> {
         }
         self.store.all_closed(&preds)
     }
+}
+
+fn is_file_sort(name: &str) -> bool {
+    name.eq_ignore_ascii_case("file")
 }
 
 fn formula_uses(f: &Formula, pred: &str) -> bool {

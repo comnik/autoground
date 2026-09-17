@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::syntax::{Form, Formula, Program};
+use crate::syntax::template::is_builtin_sort;
+use crate::syntax::{Declare, Form, Formula, Program, Term};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
@@ -29,12 +30,14 @@ pub struct Compiled {
     pub requires: Vec<Formula>,
     pub edb_preds: HashSet<String>,
     pub idb_preds: HashSet<String>,
+    pub declarations: HashMap<String, Declare>,
 }
 
 /// Classify predicates and reject unstratified IDB.
 pub fn compile(program: &Program) -> Result<Compiled, CompileError> {
     let mut defs = HashMap::new();
     let mut requires = Vec::new();
+    let mut declarations: HashMap<String, Declare> = HashMap::new();
     for form in &program.forms {
         match form {
             Form::Def { name, vars, body } => {
@@ -53,6 +56,54 @@ pub fn compile(program: &Program) -> Result<Compiled, CompileError> {
                 );
             }
             Form::Require(f) => requires.push(f.clone()),
+            Form::Declare(d) => {
+                if declarations.contains_key(&d.name) {
+                    return Err(CompileError {
+                        message: format!("duplicate declaration of `{}`", d.name),
+                    });
+                }
+                declarations.insert(d.name.clone(), d.clone());
+            }
+        }
+    }
+
+    for d in declarations.values() {
+        for slot in &d.slots {
+            if is_builtin_sort(slot) {
+                continue;
+            }
+            match declarations.get(slot) {
+                Some(ty) if ty.slots.len() == 1 => {}
+                Some(ty) => {
+                    return Err(CompileError {
+                        message: format!(
+                            "`{}` uses `{{{slot}}}` but `{slot}` has arity {}, not 1",
+                            d.name,
+                            ty.slots.len()
+                        ),
+                    });
+                }
+                None => {
+                    return Err(CompileError {
+                        message: format!(
+                            "`{}` uses `{{{slot}}}` but `{slot}` is not declared (and is not String)",
+                            d.name
+                        ),
+                    });
+                }
+            }
+        }
+        if let Some(def) = defs.get(&d.name) {
+            if def.vars.len() != d.slots.len() {
+                return Err(CompileError {
+                    message: format!(
+                        "`{}` is declared with arity {} but defined with {}",
+                        d.name,
+                        d.slots.len(),
+                        def.vars.len()
+                    ),
+                });
+            }
         }
     }
 
@@ -68,13 +119,49 @@ pub fn compile(program: &Program) -> Result<Compiled, CompileError> {
     let edb_preds: HashSet<String> = used.difference(&idb_preds).cloned().collect();
 
     check_stratification(&defs, &idb_preds)?;
+    check_declared_arities(&declarations, &defs, &requires)?;
 
     Ok(Compiled {
         defs,
         requires,
         edb_preds,
         idb_preds,
+        declarations,
     })
+}
+
+fn check_declared_arities(
+    declarations: &HashMap<String, Declare>,
+    defs: &HashMap<String, Def>,
+    requires: &[Formula],
+) -> Result<(), CompileError> {
+    let mut atoms = Vec::new();
+    for def in defs.values() {
+        collect_atoms(&def.body, &mut atoms);
+    }
+    for req in requires {
+        collect_atoms(req, &mut atoms);
+    }
+    for (pred, args) in atoms {
+        if let Some(d) = declarations.get(&pred) {
+            if args.len() != d.slots.len() {
+                return Err(CompileError {
+                    message: format!(
+                        "`{pred}` is declared with arity {} but used with {}",
+                        d.slots.len(),
+                        args.len()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_atoms(f: &Formula, out: &mut Vec<(String, Vec<Term>)>) {
+    f.walk_atoms(&mut |pred, args| {
+        out.push((pred.to_string(), args.to_vec()));
+    });
 }
 
 fn collect_preds(f: &Formula, out: &mut HashSet<String>) {
@@ -206,6 +293,27 @@ mod tests {
         assert!(c.edb_preds.contains("includes"));
         assert!(c.edb_preds.contains("defines"));
         assert_eq!(c.requires.len(), 4);
+        assert!(c.declarations.contains_key("component"));
+        assert_eq!(c.declarations["defines"].slots, vec!["file", "component"]);
+    }
+
+    #[test]
+    fn rejects_unknown_slot_type() {
+        let src = r#"(declare defines "{Widget} is related")"#;
+        let p = parse(src).unwrap();
+        let err = compile(&p).unwrap_err();
+        assert!(err.message.contains("Widget"));
+    }
+
+    #[test]
+    fn rejects_arity_mismatch() {
+        let src = r#"
+(declare component "{String} is a component in the codebase")
+(require (component "Frontend" "extra"))
+"#;
+        let p = parse(src).unwrap();
+        let err = compile(&p).unwrap_err();
+        assert!(err.message.contains("arity"));
     }
 
     #[test]

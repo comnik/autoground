@@ -8,7 +8,7 @@ use autoground::navigator::{
 };
 use autoground::report::{format_run, run_exit_code};
 use autoground::syntax::Term;
-use autoground::{compile, parse, parse_atom};
+use autoground::{compile, parse, parse_atom, verbalize_source};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -50,13 +50,16 @@ enum Commands {
     ///
     /// Examples:
     ///   autoground ground --repo examples/toy-split '(component "Frontend")'
-    ///   autoground ground --repo examples/toy-split '(component ?x)'
+    ///   autoground ground --repo examples/toy-split --model examples/layered.ag '(component "Frontend")'
     Ground {
         /// Atom to ground, e.g. `(component "Frontend")` or `(component ?x)`.
         atom: String,
         /// Repository to ground against.
         #[arg(long)]
         repo: PathBuf,
+        /// Model whose `declare` forms verbalize the atom for Jev.
+        #[arg(long)]
+        model: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = JudgeKind::Heuristic)]
         judge: JudgeKind,
         #[arg(long)]
@@ -66,6 +69,15 @@ enum Commands {
         /// Print every step instead of the interactive pager.
         #[arg(long)]
         plain: bool,
+    },
+    /// Verbalize an atom or a model using `declare` templates.
+    ///
+    /// Examples:
+    ///   autoground verbalize '(Component "Frontend")'
+    ///   autoground verbalize examples/layered.ag
+    Verbalize {
+        /// Atom, model source, or path to a `.ag` file.
+        input: String,
     },
 }
 
@@ -94,6 +106,7 @@ fn main() -> ExitCode {
         Commands::Ground {
             atom,
             repo,
+            model,
             judge,
             fixtures,
             record,
@@ -101,6 +114,7 @@ fn main() -> ExitCode {
         } => match ground_atom(
             &atom,
             &repo,
+            model.as_ref(),
             judge,
             fixtures.as_ref(),
             record.as_ref(),
@@ -112,7 +126,26 @@ fn main() -> ExitCode {
                 ExitCode::from(3)
             }
         },
+        Commands::Verbalize { input } => match verbalize_cmd(&input) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::from(3)
+            }
+        },
     }
+}
+
+fn verbalize_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let src = if Path::new(input).is_file() {
+        std::fs::read_to_string(input)?
+    } else {
+        input.to_string()
+    };
+    for line in verbalize_source(&src)? {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn run_model(
@@ -147,6 +180,7 @@ fn run_model(
 fn ground_atom(
     atom: &str,
     repo: &Path,
+    model: Option<&PathBuf>,
     judge: JudgeKind,
     fixtures: Option<&PathBuf>,
     record: Option<&PathBuf>,
@@ -156,7 +190,7 @@ fn ground_atom(
     let args: Vec<Arg> = terms
         .iter()
         .map(|t| match t {
-            Term::Const(c) => Arg::Bound(c.clone()),
+            Term::Const(c) | Term::Typed { value: c, .. } => Arg::Bound(c.clone()),
             Term::Var(v) => Arg::Free(v.clone()),
         })
         .collect();
@@ -167,6 +201,11 @@ fn ground_atom(
     };
     let store = Store::new();
     let mut nav = make_nav(repo, judge, fixtures, record)?;
+    if let Some(model) = model {
+        let src = std::fs::read_to_string(model)?;
+        let compiled = compile(&parse(&src)?)?;
+        nav.prepare(&compiled);
+    }
     let answer = nav.answer(&demand, &store);
     if !nav.errors.is_empty() {
         for e in &nav.errors {

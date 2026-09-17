@@ -73,7 +73,8 @@ impl Judge for HeuristicJudge {
     ) -> Result<DocumentJudgement, super::judge::JudgeError> {
         Ok(match state.pred.as_str() {
             "defines" => document_defines(state),
-            "component" => {
+            _ if state.args.len() >= 2 => document_defines(state),
+            _ => {
                 let label = state.args.first().map(|s| s.as_str()).unwrap_or("");
                 let name = state.path.rsplit('/').next().unwrap_or(&state.path);
                 if name_matches(name, label) {
@@ -88,10 +89,6 @@ impl Judge for HeuristicJudge {
                     }
                 }
             }
-            _ => DocumentJudgement {
-                verdict: DocumentVerdict::Unknown,
-                confidence: 0.7,
-            },
         })
     }
 }
@@ -253,6 +250,7 @@ mod tests {
                 child("backend", true, vec![]),
                 child("decoy", true, vec!["noise.py".into()]),
             ],
+            verbalization: String::new(),
         };
         let choices = j.choose(&state).unwrap();
         let t = |name: &str| {

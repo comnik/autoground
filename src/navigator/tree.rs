@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::edb::Store;
@@ -10,6 +10,7 @@ use crate::navigator::walk::{
     is_noise_name, list_dir, list_files_recursive, parent_dir, read_trimmed, repo_join,
 };
 use crate::navigator::{Answer, Arg, Demand, Navigator, Need};
+use crate::syntax::{verbalize_atom, Declare, Term};
 
 const MAX_LISTINGS: usize = 32;
 const MAX_DEPTH: usize = 8;
@@ -24,6 +25,7 @@ pub struct TreeNavigator {
     pub documents: Vec<String>,
     pub errors: Vec<String>,
     pub trace: Vec<GroundStep>,
+    declarations: HashMap<String, Declare>,
 }
 
 impl TreeNavigator {
@@ -35,6 +37,7 @@ impl TreeNavigator {
             documents: Vec::new(),
             errors: Vec::new(),
             trace: Vec::new(),
+            declarations: HashMap::new(),
         }
     }
 
@@ -66,12 +69,14 @@ impl TreeNavigator {
         }
     }
 
-    fn answer_component(&mut self, demand: &Demand, _store: &Store) -> Answer {
+    fn answer_locate(&mut self, demand: &Demand, _store: &Store) -> Answer {
+        let pred = demand.pred.as_str();
         let (args, free) = match bound_at(&demand.args, 0) {
             Some(label) => (vec![label.to_string()], false),
             None => (Vec::new(), true),
         };
-        let located = self.locate("component", &args, demand.need);
+        let located = self.locate(pred, &args, demand.need);
+        let source = format!("nav:{pred}");
         let answer = match located {
             LocateResult::Found(paths) => {
                 let bindings = if free {
@@ -97,20 +102,20 @@ impl TreeNavigator {
                     tuples,
                     close: true,
                     bindings,
-                    source: "nav:component".into(),
+                    source: source.clone(),
                 }
             }
             LocateResult::Unknown => Answer {
                 tuples: Vec::new(),
                 close: false,
                 bindings: Vec::new(),
-                source: "nav:component".into(),
+                source: source.clone(),
             },
             LocateResult::Absent => Answer {
                 tuples: Vec::new(),
                 close: demand.need == Need::Closed,
                 bindings: Vec::new(),
-                source: "nav:component".into(),
+                source: source.clone(),
             },
         };
         let status = if answer.bindings.is_empty() {
@@ -123,7 +128,7 @@ impl TreeNavigator {
             "found"
         };
         self.trace.push(GroundStep::Result {
-            pred: "component".into(),
+            pred: pred.to_string(),
             args,
             status: status.into(),
             bindings: answer.bindings.clone(),
@@ -185,44 +190,66 @@ impl TreeNavigator {
         }
     }
 
-    fn answer_defines(&mut self, demand: &Demand, store: &Store) -> Answer {
-        let (Some(file), Some(target)) = (bound_at(&demand.args, 0), bound_at(&demand.args, 1))
-        else {
+    fn answer_relation(&mut self, demand: &Demand, store: &Store) -> Answer {
+        let pred = demand.pred.as_str();
+        let source = format!("nav:{pred}");
+        let bound: Option<Vec<String>> = demand
+            .args
+            .iter()
+            .map(|a| match a {
+                Arg::Bound(s) => Some(s.clone()),
+                Arg::Free(_) => None,
+            })
+            .collect();
+        let Some(args) = bound else {
             return Answer {
-                source: "nav:defines".into(),
+                source,
                 ..Answer::default()
             };
         };
+        let Some(file_i) = self.file_arg_index(pred, &args) else {
+            return Answer {
+                source,
+                ..Answer::default()
+            };
+        };
+        let file = args[file_i].as_str();
         let path = repo_join(&self.root, file);
         if !path.is_file() {
             return Answer {
                 tuples: Vec::new(),
                 close: true,
                 bindings: Vec::new(),
-                source: "nav:defines".into(),
+                source,
             };
         }
         // Membership is `includes`. A file that sits under y does not
         // *depend on* y; treating that as defines(f, y) makes depends_on(y, y).
-        if is_member(store, target, file) {
-            self.trace.push(GroundStep::Document {
-                pred: "defines".into(),
-                args: vec![file.to_string(), target.to_string()],
-                path: file.to_string(),
-                judgement: crate::navigator::judge::DocumentJudgement {
-                    verdict: crate::navigator::judge::DocumentVerdict::False,
-                    confidence: 1.0,
-                },
-                preview: String::new(),
-                note: format!("member of {target}; defines is a dependency, not membership"),
-                exchanges: Vec::new(),
-            });
-            return Answer {
-                tuples: Vec::new(),
-                close: true,
-                bindings: Vec::new(),
-                source: "nav:defines".into(),
-            };
+        if pred == "defines" {
+            if let Some(target) = args.get(1) {
+                if is_member(store, target, file) {
+                    self.trace.push(GroundStep::Document {
+                        pred: pred.to_string(),
+                        args: args.clone(),
+                        path: file.to_string(),
+                        judgement: crate::navigator::judge::DocumentJudgement {
+                            verdict: crate::navigator::judge::DocumentVerdict::False,
+                            confidence: 1.0,
+                        },
+                        preview: String::new(),
+                        note: format!(
+                            "member of {target}; defines is a dependency, not membership"
+                        ),
+                        exchanges: Vec::new(),
+                    });
+                    return Answer {
+                        tuples: Vec::new(),
+                        close: true,
+                        bindings: Vec::new(),
+                        source,
+                    };
+                }
+            }
         }
         let (body, _trimmed) = match read_trimmed(&self.root, file, BODY_BUDGET) {
             Ok(v) => v,
@@ -231,14 +258,15 @@ impl TreeNavigator {
                     tuples: Vec::new(),
                     close: false,
                     bindings: Vec::new(),
-                    source: "nav:defines".into(),
+                    source,
                 };
             }
         };
         self.documents.push(file.to_string());
+        let verbalization = self.verbalize(pred, &args);
         let judgement = match self.judge.document(&DocumentState {
-            pred: "defines".into(),
-            args: vec![file.to_string(), target.to_string()],
+            pred: pred.to_string(),
+            args: args.clone(),
             path: file.to_string(),
             body: body.clone(),
             bindings: store
@@ -246,6 +274,7 @@ impl TreeNavigator {
                 .into_iter()
                 .map(|b| (b.constant, b.entity))
                 .collect(),
+            verbalization,
         }) {
             Ok(j) => j,
             Err(e) => {
@@ -254,20 +283,20 @@ impl TreeNavigator {
                     tuples: Vec::new(),
                     close: false,
                     bindings: Vec::new(),
-                    source: "nav:defines".into(),
+                    source,
                 };
             }
         };
         let note = if judgement.closed_true() {
-            format!("depends on {target}")
+            "holds".into()
         } else if judgement.closed_false() {
-            format!("no dependency on {target}")
+            "does not hold".into()
         } else {
             "undecided".into()
         };
         self.trace.push(GroundStep::Document {
-            pred: "defines".into(),
-            args: vec![file.to_string(), target.to_string()],
+            pred: pred.to_string(),
+            args: args.clone(),
             path: file.to_string(),
             judgement: judgement.clone(),
             preview: preview_body(&body),
@@ -276,26 +305,40 @@ impl TreeNavigator {
         });
         if judgement.closed_true() {
             Answer {
-                tuples: vec![vec![file.to_string(), target.to_string()]],
+                tuples: vec![args],
                 close: true,
                 bindings: Vec::new(),
-                source: "nav:defines".into(),
+                source,
             }
         } else if judgement.closed_false() {
             Answer {
                 tuples: Vec::new(),
                 close: true,
                 bindings: Vec::new(),
-                source: "nav:defines".into(),
+                source,
             }
         } else {
             Answer {
                 tuples: Vec::new(),
                 close: false,
                 bindings: Vec::new(),
-                source: "nav:defines".into(),
+                source,
             }
         }
+    }
+
+    fn file_arg_index(&self, pred: &str, args: &[String]) -> Option<usize> {
+        if let Some(d) = self.declarations.get(pred) {
+            if let Some(i) = d.slots.iter().position(|s| s.eq_ignore_ascii_case("file")) {
+                return Some(i);
+            }
+        }
+        args.iter().position(|a| repo_join(&self.root, a).is_file())
+    }
+
+    fn verbalize(&self, pred: &str, args: &[String]) -> String {
+        let terms: Vec<Term> = args.iter().cloned().map(Term::Const).collect();
+        verbalize_atom(pred, &terms, &self.declarations)
     }
 
     fn locate(&mut self, pred: &str, args: &[String], need: Need) -> LocateResult {
@@ -323,11 +366,13 @@ impl TreeNavigator {
             };
             self.listings.push(dir.clone());
             listings += 1;
+            let verbalization = self.verbalize(pred, args);
             let choices = match self.judge.choose(&ListingState {
                 pred: pred.to_string(),
                 args: args.to_vec(),
                 dir: dir.clone(),
                 children: children.clone(),
+                verbalization,
             }) {
                 Ok(c) => c,
                 Err(e) => {
@@ -398,7 +443,7 @@ impl TreeNavigator {
                                 FileConfirm::Entire => {
                                     wholes.push(child.rel_path.clone());
                                     effects.push(format!(
-                                        "{}: whole file, entire component",
+                                        "{}: whole file, entire denotation",
                                         child.name
                                     ));
                                 }
@@ -415,7 +460,7 @@ impl TreeNavigator {
                                 }
                                 FileConfirm::NotEntire => {
                                     effects
-                                        .push(format!("{}: not the whole component", child.name));
+                                        .push(format!("{}: not the whole denotation", child.name));
                                 }
                             }
                         }
@@ -467,12 +512,14 @@ impl TreeNavigator {
             Err(_) => return FileConfirm::Undecided,
         };
         self.documents.push(rel.to_string());
+        let verbalization = self.verbalize(pred, args);
         let j = match self.judge.document(&DocumentState {
             pred: pred.to_string(),
             args: args.to_vec(),
             path: rel.to_string(),
             body: body.clone(),
             bindings: Vec::new(),
+            verbalization,
         }) {
             Ok(j) => j,
             Err(e) => {
@@ -488,8 +535,8 @@ impl TreeNavigator {
             FileConfirm::Undecided
         };
         let note = match confirm {
-            FileConfirm::Entire => "entire component".into(),
-            FileConfirm::NotEntire => "not the whole component".into(),
+            FileConfirm::Entire => "entire denotation".into(),
+            FileConfirm::NotEntire => "not the whole denotation".into(),
             FileConfirm::Undecided => "unconfirmed; may lift parent directory".into(),
         };
         self.trace.push(GroundStep::Document {
@@ -561,16 +608,16 @@ fn tightest_wholes(mut paths: Vec<String>) -> Vec<String> {
 }
 
 impl Navigator for TreeNavigator {
+    fn prepare(&mut self, compiled: &crate::core::Compiled) {
+        self.declarations = compiled.declarations.clone();
+    }
+
     fn answer(&mut self, demand: &Demand, store: &Store) -> Answer {
         match demand.pred.as_str() {
-            "file" => self.answer_file(demand),
-            "component" => self.answer_component(demand, store),
+            "file" | "File" => self.answer_file(demand),
             "includes" => self.answer_includes(demand, store),
-            "defines" => self.answer_defines(demand, store),
-            _ => Answer {
-                source: format!("nav:{}", demand.pred),
-                ..Answer::default()
-            },
+            _ if demand.args.len() <= 1 => self.answer_locate(demand, store),
+            _ => self.answer_relation(demand, store),
         }
     }
 }

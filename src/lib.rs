@@ -12,4 +12,7 @@ pub use eval::{run, Outcome, RunResult, Value};
 pub use navigator::{
     FixtureJudge, GroundStep, HeuristicJudge, JevJudge, RecordingJudge, TreeNavigator,
 };
-pub use syntax::{parse, parse_atom, print_program, ParseError, Program};
+pub use syntax::{
+    parse, parse_atom, print_program, verbalize_atom, verbalize_source, Declare, ParseError,
+    Program,
+};

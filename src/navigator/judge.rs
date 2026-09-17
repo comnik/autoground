@@ -14,6 +14,8 @@ pub struct ListingState {
     pub args: Vec<String>,
     pub dir: String,
     pub children: Vec<Child>,
+    /// Human sentence for the demanded atom, from `declare` templates.
+    pub verbalization: String,
 }
 
 /// One file presented to the judge. Separate request from listings.
@@ -25,6 +27,8 @@ pub struct DocumentState {
     pub body: String,
     /// Current bindings for other constants (e.g. Backend roots when judging defines).
     pub bindings: Vec<(String, String)>,
+    /// Human sentence for the demanded atom, from `declare` templates.
+    pub verbalization: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

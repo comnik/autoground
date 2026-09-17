@@ -54,6 +54,21 @@ fn ground_frontend_on_split_has_readable_steps() {
 }
 
 #[test]
+fn locate_is_generic_over_predicate_name() {
+    let mut nav = TreeNavigator::heuristic("examples/toy-layered");
+    let demand = Demand {
+        pred: "Service".into(),
+        args: vec![Arg::Bound("Frontend".into())],
+        need: Need::Truth,
+    };
+    let answer = nav.answer(&demand, &Store::new());
+    assert_eq!(
+        answer.bindings,
+        vec![("Frontend".to_string(), "frontend".to_string())]
+    );
+}
+
+#[test]
 fn parse_ground_atom_question_mark() {
     let (pred, args) = parse_atom("(component ?x)").unwrap();
     assert_eq!(pred, "component");

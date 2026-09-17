@@ -1,4 +1,5 @@
 use super::ast::{Form, Formula, Program, Term};
+use super::template::quote_const;
 
 /// Pretty-print a program. Comments are not reconstructed.
 pub fn print_program(program: &Program) -> String {
@@ -38,6 +39,13 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
             out.push('\n');
             write_indent(indent + 1, out);
             print_formula(body, indent + 1, out);
+            out.push(')');
+        }
+        Form::Declare(d) => {
+            out.push_str("(declare ");
+            out.push_str(&d.name);
+            out.push(' ');
+            out.push_str(&quote_const(&d.template));
             out.push(')');
         }
     }
@@ -117,17 +125,13 @@ fn print_quant(head: &str, vars: &[String], body: &Formula, indent: usize, out: 
 fn print_term(t: &Term, out: &mut String) {
     match t {
         Term::Var(v) => out.push_str(v),
-        Term::Const(c) => {
-            out.push('"');
-            for ch in c.chars() {
-                match ch {
-                    '"' => out.push_str("\\\""),
-                    '\\' => out.push_str("\\\\"),
-                    '\n' => out.push_str("\\n"),
-                    _ => out.push(ch),
-                }
-            }
-            out.push('"');
+        Term::Const(c) => out.push_str(&quote_const(c)),
+        Term::Typed { ty, value } => {
+            out.push('(');
+            out.push_str(ty);
+            out.push(' ');
+            out.push_str(&quote_const(value));
+            out.push(')');
         }
     }
 }
@@ -146,6 +150,15 @@ mod tests {
     #[test]
     fn round_trip_simple() {
         let src = "(require (and (component \"Frontend\") (component \"Backend\")))\n";
+        let p = parse(src).unwrap();
+        let printed = print_program(&p);
+        let p2 = parse(&printed).unwrap();
+        assert_eq!(p, p2);
+    }
+
+    #[test]
+    fn round_trip_declare() {
+        let src = "(declare Component \"{String} is a component in the codebase\")\n";
         let p = parse(src).unwrap();
         let printed = print_program(&p);
         let p2 = parse(&printed).unwrap();

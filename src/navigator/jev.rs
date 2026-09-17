@@ -138,28 +138,21 @@ pub fn listing_request(
     chunk: &[Child],
     id_base: usize,
 ) -> Value {
-    let atom = format_atom(&state.pred, &state.args);
+    let atom = atom_text(&state.pred, &state.args, &state.verbalization);
     let mut questions = serde_json::Map::new();
     for (i, child) in chunk.iter().enumerate() {
-        let kind = if child.is_dir { "directory" } else { "file" };
-        let sample = if child.sample.is_empty() {
-            String::new()
-        } else {
-            format!(" Listing sample: {}.", child.sample.join(", "))
-        };
         questions.insert(
             format!("c{}", id_base + i),
             json!({
                 "type": "choice",
                 "instructions": format!(
-                    "Locating {atom}. For the {kind} named `{}` (path `{}`).{sample} Choose one navigation transition. Prefer binding a component directory over opening its source files. Descend only into containers like src/ or lib/.",
-                    child.name, child.rel_path
+                    "Locate proof or disproof for: {atom} in path {}. Choose one navigation transition. Stop at whole directories where appropriate.",
+                    child.rel_path
                 ),
                 "criteria": {
-                    "skip": "Not this component and does not contain it. Use for decoy/, tmp/, unrelated trees, and ordinary source files that are not the entire component.",
-                    "descend": "This directory is a container (src/, lib/, packages/) whose own name is not the component. The component is nested inside. Do not descend into a directory that is itself the component or a piece of it (ui/, api/, frontend/, backend/). Never descend into decoy/.",
-                    "part": "Bind this directory as one root of a split component (e.g. Backend = api/ plus server/). Do not choose part for a single source file; membership of files is handled later.",
-                    "whole": "Bind this path as the complete component. For a directory (ui/ is Frontend), do not open files. For a file, only if the entire component is that one file (e.g. app.js), not a file that merely belongs to the component."
+                    "skip": "Not a witness of the atom and does not contain one.",
+                    "descend": "This location is not itself evidence, but is likely to contain one nested inside.",
+                    "investigate": "This location contains evidence and should be examined closely.",
                 }
             }),
         );
@@ -181,31 +174,29 @@ pub fn listing_request(
 }
 
 pub fn document_request(model: &str, state: &DocumentState) -> Value {
-    let atom = format_atom(&state.pred, &state.args);
-    let (instructions, criteria) = match state.pred.as_str() {
-        "defines" => {
-            let target = state.args.get(1).map(|s| s.as_str()).unwrap_or("?");
-            (
-                format!(
-                    "Does this file depend on component `{target}` as something outside itself? Atom is {atom}. A file that implements `{target}` does not count. Choose true, false, or unknown."
-                ),
-                json!({
-                    "true": "This file imports, calls, or references the other component's code as a dependency.",
-                    "false": "No such dependency. Files that belong to or implement that component are false.",
-                    "unknown": "Cannot tell from this file."
-                }),
-            )
-        }
-        _ => (
+    let atom = atom_text(&state.pred, &state.args, &state.verbalization);
+    let (instructions, criteria) = if state.args.len() >= 2 {
+        (
             format!(
-                "Is this single file the entire component for {atom}? Not merely a file that belongs to it. Choose true, false, or unknown."
+                "Does this file make the following true? {atom}. A file that implements or belongs to a mentioned entity does not count as an external relation. Choose true, false, or unknown."
             ),
             json!({
-                "true": "The whole component is this one file (e.g. a single-file app.js).",
-                "false": "This file is not the whole component.",
+                "true": "The atom holds of this file.",
+                "false": "The atom does not hold. Files that belong to or implement a mentioned entity are false for an external relation.",
+                "unknown": "Cannot tell from this file."
+            }),
+        )
+    } else {
+        (
+            format!(
+                "Is this single file the entire denotation of: {atom}? Not merely a file that belongs to it. Choose true, false, or unknown."
+            ),
+            json!({
+                "true": "The whole denotation is this one file (e.g. a single-file app.js).",
+                "false": "This file is not the whole denotation.",
                 "unknown": "Cannot tell."
             }),
-        ),
+        )
     };
     json!({
         "model": model,
@@ -310,6 +301,14 @@ fn format_atom(pred: &str, args: &[String]) -> String {
     }
 }
 
+fn atom_text(pred: &str, args: &[String], verbalization: &str) -> String {
+    if verbalization.is_empty() {
+        format_atom(pred, args)
+    } else {
+        verbalization.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +330,7 @@ mod tests {
             args: vec!["Frontend".into()],
             dir: "".into(),
             children: vec![child("frontend", true), child("decoy", true)],
+            verbalization: "\"Frontend\" is a component in the codebase".into(),
         };
         let body = listing_request("jev-latest", &state, &state.children, 0);
         assert_eq!(body["model"], "jev-latest");
@@ -338,8 +338,12 @@ mod tests {
         assert_eq!(body["questions"]["c1"]["type"], "choice");
         assert!(body["state"]["children"].as_array().unwrap().len() == 2);
         let instr = body["questions"]["c0"]["instructions"].as_str().unwrap();
-        assert!(instr.contains("frontend"));
-        assert!(instr.contains("component"));
+        assert_eq!(
+            instr,
+            "Locate proof or disproof for: \"Frontend\" is a component in the codebase in path frontend. Choose one navigation transition. Stop at whole directories where appropriate."
+        );
+        assert!(!instr.contains("Listing sample"));
+        assert_eq!(body["state"]["children"][0]["sample"], json!(["app.py"]));
         assert!(!body["state"].get("body").is_some());
     }
 
@@ -351,6 +355,7 @@ mod tests {
             path: "ui/app.py".into(),
             body: "from api import client".into(),
             bindings: vec![("Backend".into(), "api".into())],
+            verbalization: "file \"ui/app.py\" (partially) defines component \"Backend\"".into(),
         };
         let body = document_request("jev-latest", &state);
         assert_eq!(body["questions"]["ground"]["type"], "choice");
@@ -360,6 +365,10 @@ mod tests {
         assert!(criteria.contains_key("unknown"));
         assert!(body["state"].get("children").is_none());
         assert_eq!(body["state"]["path"], "ui/app.py");
+        let instr = body["questions"]["ground"]["instructions"]
+            .as_str()
+            .unwrap();
+        assert!(instr.contains("file \"ui/app.py\" (partially) defines component \"Backend\""));
     }
 
     #[test]
@@ -416,6 +425,7 @@ mod tests {
             args: vec!["Frontend".into()],
             dir: "".into(),
             children: vec![child("frontend", true)],
+            verbalization: String::new(),
         };
         let transport = SeqTransport {
             responses: vec![json!({
