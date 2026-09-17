@@ -2,7 +2,7 @@ use std::io::{stdout, IsTerminal, Write};
 
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute, queue,
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
@@ -11,6 +11,99 @@ use crossterm::{
 use super::step::{format_jev, format_step};
 use crate::navigator::judge::{DocumentVerdict, TAU_CONFIDENCE};
 use crate::navigator::trace::GroundStep;
+
+struct RawMode;
+
+impl RawMode {
+    fn enter() -> std::io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+struct AlternateScreen;
+
+impl AlternateScreen {
+    fn enter(out: &mut impl Write) -> std::io::Result<Self> {
+        execute!(out, EnterAlternateScreen, cursor::Hide)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for AlternateScreen {
+    fn drop(&mut self) {
+        let _ = execute!(stdout(), LeaveAlternateScreen, cursor::Show);
+    }
+}
+
+/// Print the run summary. On a TTY, left/right open the grounding debug pager.
+pub fn present_run(summary: &str, steps: &[GroundStep], repo_name: &str) -> std::io::Result<()> {
+    print!("{summary}");
+    stdout().flush()?;
+    if !stdout().is_terminal() {
+        return Ok(());
+    }
+    if steps.is_empty() {
+        return Ok(());
+    }
+
+    println!("  ← →  debug    q  quit");
+    stdout().flush()?;
+
+    let _raw = RawMode::enter()?;
+    let mut out = stdout();
+    loop {
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if is_quit_key(&key) {
+                    break;
+                }
+                if is_debug_key(&key) {
+                    debug_view(&mut out, steps, repo_name)?;
+                }
+            }
+            Event::Resize(_, _) => {}
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn is_debug_key(key: &event::KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('h')
+            | KeyCode::Char('l')
+            | KeyCode::Char('p')
+            | KeyCode::Char('n')
+            | KeyCode::Char(' ')
+    )
+}
+
+fn is_quit_key(key: &event::KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => true,
+        KeyCode::Char('c') | KeyCode::Char('C')
+            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn debug_view(out: &mut impl Write, steps: &[GroundStep], repo_name: &str) -> std::io::Result<()> {
+    let _alt = AlternateScreen::enter(out)?;
+    page_loop(out, steps, repo_name)
+}
 
 /// Interactive pager: left/right (or h/l, p/n) flip through steps. q quits.
 /// `v` toggles the Jev request/response under the tree.
@@ -25,12 +118,8 @@ pub fn page_trace(steps: &[GroundStep], repo_name: &str) -> std::io::Result<()> 
     }
 
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
-    terminal::enable_raw_mode()?;
-    let result = page_loop(&mut stdout, steps, repo_name);
-    terminal::disable_raw_mode()?;
-    execute!(stdout, LeaveAlternateScreen, cursor::Show)?;
-    result
+    let _raw = RawMode::enter()?;
+    debug_view(&mut stdout, steps, repo_name)
 }
 
 fn page_loop(out: &mut impl Write, steps: &[GroundStep], repo_name: &str) -> std::io::Result<()> {

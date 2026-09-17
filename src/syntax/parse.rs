@@ -260,7 +260,7 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
     Ok(tokens)
 }
 
-/// Parse a single atom, as used by `autoground ground`.
+/// Parse a single atom.
 /// Accepts `(component "Frontend")`, `component "Frontend"`, and
 /// `(component ?x)` / `(component x)`.
 pub fn parse_atom(src: &str) -> Result<(String, Vec<Term>), ParseError> {

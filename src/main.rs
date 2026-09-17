@@ -3,12 +3,9 @@ use std::process::ExitCode;
 
 use autoground::edb::Store;
 use autoground::eval::run;
-use autoground::navigator::{
-    Arg, Demand, FixtureJudge, JevJudge, Navigator, Need, RecordingJudge, TreeNavigator,
-};
-use autoground::report::{format_run, run_exit_code};
-use autoground::syntax::Term;
-use autoground::{compile, parse, parse_atom, verbalize_source};
+use autoground::navigator::{FixtureJudge, JevJudge, RecordingJudge, TreeNavigator};
+use autoground::report::{allocate_record_path, format_run, run_exit_code};
+use autoground::{compile, parse, verbalize_source};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -33,9 +30,17 @@ enum JudgeKind {
 enum Commands {
     /// Parse a model and evaluate its requires against EDB, optionally grounding
     /// from a repository via the navigator.
+    ///
+    /// Prints the evaluation result and grounding. On a TTY, left/right opens
+    /// the step-by-step debug view. A judge recording is always written under
+    /// `/tmp/autoground/`.
+    ///
+    /// Examples:
+    ///   autoground run examples/layered.ag --repo examples/toy-layered
+    ///   autoground run --repo examples/toy-split '(require (component "Frontend"))'
     Run {
-        /// Path to a `.ag` model.
-        model: PathBuf,
+        /// Path to a `.ag` model, or a model source string.
+        model: String,
         /// Repository to ground against.
         #[arg(long)]
         repo: Option<PathBuf>,
@@ -43,32 +48,6 @@ enum Commands {
         judge: JudgeKind,
         #[arg(long)]
         fixtures: Option<PathBuf>,
-        #[arg(long)]
-        record: Option<PathBuf>,
-    },
-    /// Ground a single atom and step through the walk.
-    ///
-    /// Examples:
-    ///   autoground ground --repo examples/toy-split '(component "Frontend")'
-    ///   autoground ground --repo examples/toy-split --model examples/layered.ag '(component "Frontend")'
-    Ground {
-        /// Atom to ground, e.g. `(component "Frontend")` or `(component ?x)`.
-        atom: String,
-        /// Repository to ground against.
-        #[arg(long)]
-        repo: PathBuf,
-        /// Model whose `declare` forms verbalize the atom for Jev.
-        #[arg(long)]
-        model: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = JudgeKind::Heuristic)]
-        judge: JudgeKind,
-        #[arg(long)]
-        fixtures: Option<PathBuf>,
-        #[arg(long)]
-        record: Option<PathBuf>,
-        /// Print every step instead of the interactive pager.
-        #[arg(long)]
-        plain: bool,
     },
     /// Verbalize an atom or a model using `declare` templates.
     ///
@@ -89,37 +68,7 @@ fn main() -> ExitCode {
             repo,
             judge,
             fixtures,
-            record,
-        } => match run_model(
-            &model,
-            repo.as_ref(),
-            judge,
-            fixtures.as_ref(),
-            record.as_ref(),
-        ) {
-            Ok(code) => ExitCode::from(code as u8),
-            Err(err) => {
-                eprintln!("{err}");
-                ExitCode::from(3)
-            }
-        },
-        Commands::Ground {
-            atom,
-            repo,
-            model,
-            judge,
-            fixtures,
-            record,
-            plain,
-        } => match ground_atom(
-            &atom,
-            &repo,
-            model.as_ref(),
-            judge,
-            fixtures.as_ref(),
-            record.as_ref(),
-            plain,
-        ) {
+        } => match run_model(&model, repo.as_ref(), judge, fixtures.as_ref()) {
             Ok(code) => ExitCode::from(code as u8),
             Err(err) => {
                 eprintln!("{err}");
@@ -137,11 +86,7 @@ fn main() -> ExitCode {
 }
 
 fn verbalize_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let src = if Path::new(input).is_file() {
-        std::fs::read_to_string(input)?
-    } else {
-        input.to_string()
-    };
+    let src = model_source(input)?;
     for line in verbalize_source(&src)? {
         println!("{line}");
     }
@@ -149,90 +94,72 @@ fn verbalize_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_model(
-    model: &PathBuf,
+    model: &str,
     repo: Option<&PathBuf>,
     judge: JudgeKind,
     fixtures: Option<&PathBuf>,
-    record: Option<&PathBuf>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
-    let src = std::fs::read_to_string(model)?;
+    let src = model_source(model)?;
     let program = parse(&src)?;
     let compiled = compile(&program)?;
     let mut store = Store::new();
-    let result = if let Some(repo) = repo {
-        let mut nav = make_nav(repo, judge, fixtures, record)?;
+    let repo_name = repo
+        .and_then(|r| r.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("repo");
+    let record_path = allocate_record_path()?;
+
+    let (result, steps, judge_failed) = if let Some(repo) = repo {
+        let mut nav = make_nav(repo, judge, fixtures, &record_path)?;
         let result = run(&compiled, &mut store, Some(&mut nav));
-        if !nav.errors.is_empty() {
+        let failed = !nav.errors.is_empty();
+        if failed {
             for e in &nav.errors {
                 eprintln!("judge error: {e}");
             }
-            print!("{}", format_run(&compiled, &store, &result));
-            return Ok(3);
         }
-        result
+        let steps = std::mem::take(&mut nav.trace);
+        drop(nav);
+        (result, steps, failed)
     } else {
-        run(&compiled, &mut store, None)
+        std::fs::write(
+            &record_path,
+            "{\n  \"listings\": [],\n  \"documents\": []\n}\n",
+        )?;
+        (run(&compiled, &mut store, None), Vec::new(), false)
     };
-    print!("{}", format_run(&compiled, &store, &result));
-    Ok(run_exit_code(&result.outcome))
+
+    let mut printed = format_run(&compiled, &store, &result);
+    printed.push_str(&format!("trace: {}\n", record_path.display()));
+    autoground::report::tui::present_run(&printed, &steps, repo_name)?;
+    if judge_failed {
+        Ok(3)
+    } else {
+        Ok(run_exit_code(&result.outcome))
+    }
 }
 
-fn ground_atom(
-    atom: &str,
-    repo: &Path,
-    model: Option<&PathBuf>,
-    judge: JudgeKind,
-    fixtures: Option<&PathBuf>,
-    record: Option<&PathBuf>,
-    plain: bool,
-) -> Result<i32, Box<dyn std::error::Error>> {
-    let (pred, terms) = parse_atom(atom)?;
-    let args: Vec<Arg> = terms
-        .iter()
-        .map(|t| match t {
-            Term::Const(c) | Term::Typed { value: c, .. } => Arg::Bound(c.clone()),
-            Term::Var(v) => Arg::Free(v.clone()),
-        })
-        .collect();
-    let demand = Demand {
-        pred,
-        args,
-        need: Need::Truth,
-    };
-    let store = Store::new();
-    let mut nav = make_nav(repo, judge, fixtures, record)?;
-    if let Some(model) = model {
-        let src = std::fs::read_to_string(model)?;
-        let compiled = compile(&parse(&src)?)?;
-        nav.prepare(&compiled);
+/// Read `input` as a `.ag` file when it names one, otherwise treat it as source.
+fn model_source(input: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let path = Path::new(input);
+    if path.is_file() {
+        return Ok(std::fs::read_to_string(path)?);
     }
-    let answer = nav.answer(&demand, &store);
-    if !nav.errors.is_empty() {
-        for e in &nav.errors {
-            eprintln!("judge error: {e}");
-        }
-        return Ok(3);
+    let trimmed = input.trim_start();
+    if trimmed.starts_with('(') {
+        return Ok(input.to_string());
     }
-    let repo_name = repo.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
-    if plain {
-        print!(
-            "{}",
-            autoground::report::step::format_trace(&nav.trace, repo_name)
-        );
-        if nav.trace.is_empty() {
-            eprintln!("(no steps recorded; bindings: {:?})", answer.bindings);
-        }
-        return Ok(if answer.bindings.is_empty() { 1 } else { 0 });
+    if input.ends_with(".ag") || path.exists() {
+        return Err(format!("model file not found: {input}").into());
     }
-    autoground::report::tui::page_trace(&nav.trace, repo_name)?;
-    Ok(if answer.bindings.is_empty() { 1 } else { 0 })
+    Ok(input.to_string())
 }
 
 fn make_nav(
     repo: &Path,
     judge: JudgeKind,
     fixtures: Option<&PathBuf>,
-    record: Option<&PathBuf>,
+    record: &Path,
 ) -> Result<TreeNavigator, Box<dyn std::error::Error>> {
     let inner: Box<dyn autoground::navigator::Judge> = if let Some(path) = fixtures {
         Box::new(FixtureJudge::load(path)?)
@@ -242,10 +169,8 @@ fn make_nav(
             JudgeKind::Jev => Box::new(JevJudge::from_env()?),
         }
     };
-    let boxed: Box<dyn autoground::navigator::Judge> = if let Some(path) = record {
-        Box::new(RecordingJudge::new(inner, path))
-    } else {
-        inner
-    };
-    Ok(TreeNavigator::new(repo, boxed))
+    Ok(TreeNavigator::new(
+        repo,
+        Box::new(RecordingJudge::new(inner, record)),
+    ))
 }

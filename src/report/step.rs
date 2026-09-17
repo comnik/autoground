@@ -115,6 +115,15 @@ fn header(pred: &str, args: &[String], kind: &str, index: usize, total: usize) -
 }
 
 pub fn format_trace(steps: &[GroundStep], repo_name: &str) -> String {
+    format_trace_with_jev(steps, repo_name, false)
+}
+
+/// Full walk, including Jev request/response payloads for each step.
+pub fn format_trace_verbose(steps: &[GroundStep], repo_name: &str) -> String {
+    format_trace_with_jev(steps, repo_name, true)
+}
+
+fn format_trace_with_jev(steps: &[GroundStep], repo_name: &str, verbose: bool) -> String {
     if steps.is_empty() {
         return "no grounding steps\n".into();
     }
@@ -125,6 +134,9 @@ pub fn format_trace(steps: &[GroundStep], repo_name: &str) -> String {
             out.push_str("\n────────────────────────────────\n\n");
         }
         out.push_str(&format_step(step, i, n, repo_name));
+        if verbose && !step.exchanges().is_empty() {
+            out.push_str(&format_jev(step));
+        }
     }
     out
 }
@@ -217,5 +229,18 @@ mod tests {
     fn verbose_without_exchange_notes_absence() {
         let step = listing_with(Vec::new());
         assert!(format_jev(&step).contains("no Jev request"));
+    }
+
+    #[test]
+    fn verbose_trace_includes_jev_payloads() {
+        let step = listing_with(vec![JudgeExchange {
+            request: json!({"model": "jev-latest"}),
+            response: json!({"answers": {"c0": {"choice": "investigate"}}}),
+        }]);
+        let quiet = format_trace(std::slice::from_ref(&step), "toy");
+        let verbose = format_trace_verbose(std::slice::from_ref(&step), "toy");
+        assert!(!quiet.contains("Jev request"));
+        assert!(verbose.contains("Jev request"));
+        assert!(verbose.contains("jev-latest"));
     }
 }

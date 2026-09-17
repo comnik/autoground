@@ -1,7 +1,7 @@
 (declare component "{String} is a component in the codebase")
 (declare file "{String} is a file in the codebase")
 (declare includes "{component} includes {file}")
-(declare defines "{file} (partially) defines {component}")
+(declare belongs_to "{file} belongs to {component}")
 
 (require
   (and
@@ -19,7 +19,7 @@
         (and
           (file f)
           (includes x f)
-          (defines f y))))))
+          (belongs_to f y))))))
 
 ;; A relationship `depends_on` connecting the two components.
 (require

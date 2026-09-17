@@ -1,9 +1,42 @@
 pub mod step;
 pub mod tui;
 
+use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::core::Compiled;
 use crate::edb::Store;
 use crate::eval::{Outcome, RunResult, Value};
+
+pub const DEFAULT_TRACE_DIR: &str = "/tmp/autoground";
+
+/// Create a new uniquely named file under `dir` and return its path.
+pub fn allocate_unique_file(dir: &Path, ext: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let ext = ext.trim_start_matches('.');
+    for n in 0u32..10_000 {
+        let path = dir.join(format!("trace-{nanos}-{pid}-{n}.{ext}"));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique trace filename",
+    ))
+}
+
+pub fn allocate_record_path() -> std::io::Result<PathBuf> {
+    allocate_unique_file(Path::new(DEFAULT_TRACE_DIR), "json")
+}
 
 /// Human-readable summary of a run.
 pub fn format_run(compiled: &Compiled, store: &Store, result: &RunResult) -> String {
@@ -63,5 +96,22 @@ pub fn run_exit_code(outcome: &Outcome) -> i32 {
         Outcome::Grounded => 0,
         Outcome::Ungrounded => 1,
         Outcome::Violated => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocate_unique_file_uses_distinct_names() {
+        let dir =
+            std::env::temp_dir().join(format!("autoground-trace-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = allocate_unique_file(&dir, "json").unwrap();
+        let b = allocate_unique_file(&dir, "json").unwrap();
+        assert_ne!(a, b);
+        assert!(a.extension().is_some_and(|e| e == "json"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
