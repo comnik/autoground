@@ -1,0 +1,34 @@
+{
+  "listings": [
+    {
+      "pred": "component",
+      "args": ["Frontend"],
+      "dir": "",
+      "choices": {
+        "frontend": "whole",
+        "backend": "skip",
+        "decoy": "skip"
+      }
+    },
+    {
+      "pred": "component",
+      "args": ["Backend"],
+      "dir": "",
+      "choices": {
+        "frontend": "skip",
+        "backend": "whole",
+        "decoy": "skip"
+      }
+    }
+  ],
+  "documents": [
+    {"pred": "defines", "args": ["frontend/app.py", "Backend"], "path": "frontend/app.py", "verdict": "true", "confidence": 0.88},
+    {"pred": "defines", "args": ["frontend/app.py", "Frontend"], "path": "frontend/app.py", "verdict": "false", "confidence": 0.85},
+    {"pred": "defines", "args": ["frontend/__init__.py", "Backend"], "path": "frontend/__init__.py", "verdict": "false", "confidence": 0.85},
+    {"pred": "defines", "args": ["frontend/__init__.py", "Frontend"], "path": "frontend/__init__.py", "verdict": "false", "confidence": 0.85},
+    {"pred": "defines", "args": ["backend/api.py", "Frontend"], "path": "backend/api.py", "verdict": "false", "confidence": 0.85},
+    {"pred": "defines", "args": ["backend/api.py", "Backend"], "path": "backend/api.py", "verdict": "false", "confidence": 0.85},
+    {"pred": "defines", "args": ["backend/__init__.py", "Frontend"], "path": "backend/__init__.py", "verdict": "false", "confidence": 0.85},
+    {"pred": "defines", "args": ["backend/__init__.py", "Backend"], "path": "backend/__init__.py", "verdict": "false", "confidence": 0.85}
+  ]
+}

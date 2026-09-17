@@ -1,0 +1,5 @@
+/target
+.autoground/
+**/*.rs.bk
+.clj-kondo/
+.lsp/

@@ -1,0 +1,81 @@
+{
+  "listings": [
+    {
+      "pred": "component",
+      "args": ["Frontend"],
+      "dir": "",
+      "choices": {
+        "api": "descend",
+        "decoy": "descend",
+        "ui": "descend",
+        "server": "descend"
+      }
+    },
+    {
+      "pred": "component",
+      "args": ["Frontend"],
+      "dir": "ui",
+      "choices": { "app.py": "whole" }
+    },
+    {
+      "pred": "component",
+      "args": ["Frontend"],
+      "dir": "server",
+      "choices": { "worker.py": "skip" }
+    },
+    {
+      "pred": "component",
+      "args": ["Frontend"],
+      "dir": "decoy",
+      "choices": { "noise.py": "skip" }
+    },
+    {
+      "pred": "component",
+      "args": ["Frontend"],
+      "dir": "api",
+      "choices": { "__init__.py": "skip", "client.py": "part" }
+    },
+    {
+      "pred": "component",
+      "args": ["Backend"],
+      "dir": "",
+      "choices": {
+        "api": "descend",
+        "decoy": "descend",
+        "ui": "descend",
+        "server": "descend"
+      }
+    },
+    {
+      "pred": "component",
+      "args": ["Backend"],
+      "dir": "ui",
+      "choices": { "app.py": "skip" }
+    },
+    {
+      "pred": "component",
+      "args": ["Backend"],
+      "dir": "server",
+      "choices": { "worker.py": "whole" }
+    },
+    {
+      "pred": "component",
+      "args": ["Backend"],
+      "dir": "decoy",
+      "choices": { "noise.py": "whole" }
+    },
+    {
+      "pred": "component",
+      "args": ["Backend"],
+      "dir": "api",
+      "choices": { "client.py": "part", "__init__.py": "skip" }
+    }
+  ],
+  "documents": [
+    {"pred": "component", "args": ["Frontend"], "path": "ui/app.py", "verdict": "true", "confidence": 0.33},
+    {"pred": "component", "args": ["Backend"], "path": "server/worker.py", "verdict": "true", "confidence": 0.21},
+    {"pred": "component", "args": ["Backend"], "path": "decoy/noise.py", "verdict": "false", "confidence": 0.21},
+    {"pred": "defines", "args": ["api/client.py", "Backend"], "path": "api/client.py", "verdict": "true", "confidence": 0.66},
+    {"pred": "defines", "args": ["api/client.py", "Frontend"], "path": "api/client.py", "verdict": "true", "confidence": 0.75}
+  ]
+}

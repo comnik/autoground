@@ -1,0 +1,146 @@
+use autoground::edb::Store;
+use autoground::eval::{run, Outcome};
+use autoground::navigator::{
+    Arg, Demand, FixtureJudge, GroundStep, Navigator, Need, TreeNavigator,
+};
+use autoground::report::step::format_trace;
+use autoground::{compile, parse, parse_atom};
+
+fn compiled_layered() -> autoground::Compiled {
+    let src = std::fs::read_to_string("examples/layered.ag").unwrap();
+    compile(&parse(&src).unwrap()).unwrap()
+}
+
+fn ground(repo: &str) -> (Outcome, Store, Vec<String>) {
+    let compiled = compiled_layered();
+    let mut store = Store::new();
+    let mut nav = TreeNavigator::heuristic(repo);
+    let result = run(&compiled, &mut store, Some(&mut nav));
+    (result.outcome, store, nav.documents)
+}
+
+fn assert_no_decoy(docs: &[String]) {
+    assert!(
+        docs.iter().all(|p| !p.contains("decoy")),
+        "decoy document was opened: {docs:?}"
+    );
+}
+
+#[test]
+fn ground_frontend_on_split_has_readable_steps() {
+    let mut store = Store::new();
+    let mut nav = TreeNavigator::heuristic("examples/toy-split");
+    let demand = Demand {
+        pred: "component".into(),
+        args: vec![Arg::Bound("Frontend".into())],
+        need: Need::Truth,
+    };
+    let answer = nav.answer(&demand, &store);
+    for (c, e) in &answer.bindings {
+        store.bind(c, e);
+    }
+    assert_eq!(store.bindings_for("Frontend"), vec!["ui".to_string()]);
+    assert!(nav
+        .trace
+        .iter()
+        .any(|s| matches!(s, GroundStep::Listing { .. })));
+    assert!(nav
+        .trace
+        .iter()
+        .any(|s| matches!(s, GroundStep::Result { .. })));
+    let text = format_trace(&nav.trace, "toy-split");
+    assert!(text.contains("toy-split/"));
+    assert!(text.contains("ui"));
+}
+
+#[test]
+fn parse_ground_atom_question_mark() {
+    let (pred, args) = parse_atom("(component ?x)").unwrap();
+    assert_eq!(pred, "component");
+    assert!(matches!(&args[0], autoground::syntax::Term::Var(v) if v == "x"));
+}
+
+#[test]
+fn toy_layered_grounds() {
+    let (outcome, store, docs) = ground("examples/toy-layered");
+    assert_no_decoy(&docs);
+    assert_eq!(outcome, Outcome::Grounded);
+    assert_eq!(store.bindings_for("Frontend"), vec!["frontend".to_string()]);
+    assert_eq!(store.bindings_for("Backend"), vec!["backend".to_string()]);
+}
+
+#[test]
+fn toy_cycle_violates() {
+    let (outcome, _store, docs) = ground("examples/toy-cycle");
+    assert_no_decoy(&docs);
+    assert_eq!(outcome, Outcome::Violated);
+}
+
+#[test]
+fn toy_unknown_is_ungrounded() {
+    let (outcome, store, docs) = ground("examples/toy-unknown");
+    assert_no_decoy(&docs);
+    assert_eq!(outcome, Outcome::Ungrounded);
+    assert!(store.bindings_for("Frontend").is_empty());
+}
+
+#[test]
+fn jev_collapsed_trace_does_not_bind_both_to_one_file() {
+    let compiled = compiled_layered();
+    let mut store = Store::new();
+    let judge = FixtureJudge::load("tests/fixtures/jev-split-collapsed.json").unwrap();
+    let mut nav = TreeNavigator::new("examples/toy-split", Box::new(judge));
+    let _ = run(&compiled, &mut store, Some(&mut nav));
+    let front = store.bindings_for("Frontend");
+    let back = store.bindings_for("Backend");
+    assert_ne!(
+        front, back,
+        "Frontend and Backend must not collapse to the same path: {front:?}"
+    );
+    assert!(
+        !front.iter().any(|p| p.ends_with("client.py")),
+        "Frontend should not bind a Backend source file: {front:?}"
+    );
+    assert!(
+        front.iter().any(|p| p == "ui" || p.ends_with("app.py")),
+        "Frontend should lift to ui/: {front:?}"
+    );
+}
+
+#[test]
+fn toy_split_binds_two_backend_roots() {
+    let (outcome, store, docs) = ground("examples/toy-split");
+    assert_no_decoy(&docs);
+    assert_eq!(outcome, Outcome::Grounded);
+    assert_eq!(store.bindings_for("Frontend"), vec!["ui".to_string()]);
+    assert_eq!(
+        store.bindings_for("Backend"),
+        vec!["api".to_string(), "server".to_string()]
+    );
+}
+
+#[test]
+fn toy_layered_from_fixture() {
+    let compiled = compiled_layered();
+    let mut store = Store::new();
+    let judge = FixtureJudge::load("tests/fixtures/toy-layered.json").unwrap();
+    let mut nav = TreeNavigator::new("examples/toy-layered", Box::new(judge));
+    let result = run(&compiled, &mut store, Some(&mut nav));
+    assert_eq!(result.outcome, Outcome::Grounded);
+    assert!(nav.documents.iter().all(|p| !p.contains("decoy")));
+}
+
+#[test]
+fn toy_file_binds_app_js() {
+    let (outcome, store, docs) = ground("examples/toy-file");
+    assert_no_decoy(&docs);
+    assert_eq!(outcome, Outcome::Grounded);
+    assert_eq!(
+        store.bindings_for("Frontend"),
+        vec!["src/app.js".to_string()]
+    );
+    assert_eq!(
+        store.bindings_for("Backend"),
+        vec!["src/api.js".to_string()]
+    );
+}
