@@ -54,6 +54,18 @@ fn ground_frontend_on_split_has_readable_steps() {
     let text = format_trace(&nav.trace, "toy-split");
     assert!(text.contains("toy-split/"));
     assert!(text.contains("ui"));
+    for (i, step) in nav.trace.iter().enumerate() {
+        let GroundStep::Document { path, .. } = step else {
+            continue;
+        };
+        let listed = nav.trace[..i].iter().any(|s| {
+            matches!(s, GroundStep::Listing { children, .. } if children.iter().any(|c| c.rel_path == *path))
+        });
+        assert!(
+            listed,
+            "document {path} appeared before the listing that flagged it"
+        );
+    }
 }
 
 #[test]

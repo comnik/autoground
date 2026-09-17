@@ -9,6 +9,7 @@ use crossterm::{
 };
 
 use super::step::{format_jev, format_step};
+use crate::navigator::judge::{DocumentVerdict, TAU_CONFIDENCE};
 use crate::navigator::trace::GroundStep;
 
 /// Interactive pager: left/right (or h/l, p/n) flip through steps. q quits.
@@ -133,7 +134,7 @@ fn draw(
                 ResetColor
             )?;
         } else {
-            color_line(out, line)?;
+            color_line(out, line, step)?;
         }
     }
     let more = if *scroll + page < lines.len() {
@@ -179,18 +180,18 @@ fn wrap_lines(body: &str, width: usize) -> Vec<String> {
     out
 }
 
-fn color_line(out: &mut impl Write, line: &str) -> std::io::Result<()> {
+fn color_line(out: &mut impl Write, line: &str, step: &GroundStep) -> std::io::Result<()> {
     let color = if line.contains(" * investigate") {
         Some(Color::Green)
     } else if line.contains("noise") {
         Some(Color::DarkGrey)
-    } else if line.contains("verdict     true") || line.contains("found") {
+    } else if let Some(c) = document_line_color(line, step) {
+        Some(c)
+    } else if line.contains("found") {
         Some(Color::Green)
-    } else if line.contains("verdict     false") || line.contains("absent") {
+    } else if line.contains("absent") {
         Some(Color::Red)
-    } else if line.contains("verdict     unknown")
-        || line.contains("unknown") && line.trim_start().starts_with("unknown")
-    {
+    } else if line.trim_start().starts_with("unknown") {
         Some(Color::Yellow)
     } else {
         None
@@ -201,4 +202,25 @@ fn color_line(out: &mut impl Write, line: &str) -> std::io::Result<()> {
         queue!(out, Print(line))?;
     }
     Ok(())
+}
+
+fn document_line_color(line: &str, step: &GroundStep) -> Option<Color> {
+    let GroundStep::Document { judgement, .. } = step else {
+        return None;
+    };
+    let high = judgement.confidence >= TAU_CONFIDENCE;
+    if line.contains("verdict") {
+        if !high {
+            return None;
+        }
+        return Some(match judgement.verdict {
+            DocumentVerdict::True => Color::Green,
+            DocumentVerdict::False => Color::Red,
+            DocumentVerdict::Unknown => Color::Yellow,
+        });
+    }
+    if line.contains("confidence") && !high {
+        return Some(Color::Yellow);
+    }
+    None
 }

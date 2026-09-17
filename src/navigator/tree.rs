@@ -383,6 +383,7 @@ impl TreeNavigator {
             let exchanges = self.judge.last_exchanges();
             let mut applied = Vec::new();
             let mut effects = Vec::new();
+            let mut open_files = Vec::new();
             for child in &children {
                 let mut choice = choices
                     .iter()
@@ -415,16 +416,8 @@ impl TreeNavigator {
                             frontier.push((child.rel_path.clone(), depth + 1));
                             effects.push(format!("{}: investigate → list", child.name));
                         } else {
-                            match self.confirm_file(pred, args, &child.rel_path) {
-                                FileConfirm::Witness => {
-                                    hits.push(child.rel_path.clone());
-                                    effects
-                                        .push(format!("{}: investigate → bind file", child.name));
-                                }
-                                FileConfirm::NotWitness => {
-                                    effects.push(format!("{}: file is not a witness", child.name));
-                                }
-                            }
+                            open_files.push(child.rel_path.clone());
+                            effects.push(format!("{}: investigate → open", child.name));
                         }
                     }
                 }
@@ -439,6 +432,11 @@ impl TreeNavigator {
                 effects,
                 exchanges,
             });
+            for rel in open_files {
+                if self.confirm_file(pred, args, &rel) == FileConfirm::Witness {
+                    hits.push(rel);
+                }
+            }
             if need == Need::Truth && !hits.is_empty() && frontier.is_empty() {
                 break;
             }
@@ -516,6 +514,7 @@ fn preview_body(body: &str) -> String {
         .join("\n")
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FileConfirm {
     Witness,
     NotWitness,
