@@ -215,6 +215,7 @@ impl TreeNavigator {
                 },
                 preview: String::new(),
                 note: format!("member of {target}; defines is a dependency, not membership"),
+                exchanges: Vec::new(),
             });
             return Answer {
                 tuples: Vec::new(),
@@ -271,6 +272,7 @@ impl TreeNavigator {
             judgement: judgement.clone(),
             preview: preview_body(&body),
             note,
+            exchanges: self.judge.last_exchanges(),
         });
         if judgement.closed_true() {
             Answer {
@@ -334,6 +336,7 @@ impl TreeNavigator {
                     continue;
                 }
             };
+            let exchanges = self.judge.last_exchanges();
             let mut applied = Vec::new();
             let mut effects = Vec::new();
             for child in &children {
@@ -427,6 +430,7 @@ impl TreeNavigator {
                 children: children.clone(),
                 choices: applied,
                 effects,
+                exchanges,
             });
             if need == Need::Truth && !wholes.is_empty() && parts.is_empty() {
                 // Keep walking only if the frontier might refine a nested whole.
@@ -495,6 +499,7 @@ impl TreeNavigator {
             judgement: j,
             preview: preview_body(&body),
             note,
+            exchanges: self.judge.last_exchanges(),
         });
         confirm
     }

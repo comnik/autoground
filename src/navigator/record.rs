@@ -1,6 +1,6 @@
 use super::fixture::{DocumentFixture, FixtureFile, ListingFixture};
 use super::judge::{
-    ChildChoice, DocumentJudgement, DocumentState, Judge, JudgeError, ListingState,
+    ChildChoice, DocumentJudgement, DocumentState, Judge, JudgeError, JudgeExchange, ListingState,
 };
 use std::path::PathBuf;
 
@@ -61,5 +61,9 @@ impl Judge for RecordingJudge {
             confidence: j.confidence,
         });
         Ok(j)
+    }
+
+    fn last_exchanges(&self) -> Vec<JudgeExchange> {
+        self.inner.last_exchanges()
     }
 }

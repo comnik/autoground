@@ -79,6 +79,14 @@ pub struct DocumentJudgement {
     pub confidence: f64,
 }
 
+/// One HTTP round-trip from a Jev `choose` or `document` call.
+/// Local judges leave this empty.
+#[derive(Debug, Clone)]
+pub struct JudgeExchange {
+    pub request: serde_json::Value,
+    pub response: serde_json::Value,
+}
+
 pub const TAU_CONFIDENCE: f64 = 0.6;
 
 impl DocumentJudgement {
@@ -115,4 +123,10 @@ impl std::error::Error for JudgeError {}
 pub trait Judge {
     fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError>;
     fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError>;
+
+    /// Request/response pairs from the most recent `choose` or `document`.
+    /// Empty for heuristic and fixture judges.
+    fn last_exchanges(&self) -> Vec<JudgeExchange> {
+        Vec::new()
+    }
 }

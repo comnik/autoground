@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 
 use super::judge::{
     Child, ChildChoice, DocumentJudgement, DocumentState, DocumentVerdict, Judge, JudgeError,
-    ListingState, Transition,
+    JudgeExchange, ListingState, Transition,
 };
 
 const DEFAULT_BASE: &str = "https://api.typesafe.ai";
@@ -66,6 +66,7 @@ pub struct JevJudge<T: Transport = UreqTransport> {
     transport: T,
     endpoint: String,
     model: String,
+    exchanges: Vec<JudgeExchange>,
 }
 
 impl JevJudge<UreqTransport> {
@@ -82,6 +83,7 @@ impl JevJudge<UreqTransport> {
             transport: UreqTransport,
             endpoint: format!("{}/v1/systemone", base.trim_end_matches('/')),
             model,
+            exchanges: Vec::new(),
         })
     }
 }
@@ -92,16 +94,23 @@ impl<T: Transport> JevJudge<T> {
             transport,
             endpoint: endpoint.into(),
             model: model.into(),
+            exchanges: Vec::new(),
         }
     }
 
     fn evaluate(&mut self, body: &Value) -> Result<Value, JudgeError> {
-        self.transport.post_json(&self.endpoint, body)
+        let resp = self.transport.post_json(&self.endpoint, body)?;
+        self.exchanges.push(JudgeExchange {
+            request: body.clone(),
+            response: resp.clone(),
+        });
+        Ok(resp)
     }
 }
 
 impl<T: Transport> Judge for JevJudge<T> {
     fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+        self.exchanges.clear();
         let mut out = Vec::with_capacity(state.children.len());
         for chunk in state.children.chunks(CHOICE_CHUNK) {
             let body = listing_request(&self.model, state, chunk, out.len());
@@ -112,9 +121,14 @@ impl<T: Transport> Judge for JevJudge<T> {
     }
 
     fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+        self.exchanges.clear();
         let body = document_request(&self.model, state);
         let resp = self.evaluate(&body)?;
         parse_document_answer(&resp)
+    }
+
+    fn last_exchanges(&self) -> Vec<JudgeExchange> {
+        self.exchanges.clone()
     }
 }
 
@@ -414,5 +428,9 @@ mod tests {
         let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
         let choices = judge.choose(&state).unwrap();
         assert_eq!(choices[0].transition, Transition::Whole);
+        let ex = judge.last_exchanges();
+        assert_eq!(ex.len(), 1);
+        assert_eq!(ex[0].request["model"], "jev-latest");
+        assert_eq!(ex[0].response["answers"]["c0"]["choice"], "whole");
     }
 }

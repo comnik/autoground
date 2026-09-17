@@ -1,4 +1,4 @@
-use super::judge::{Child, ChildChoice, DocumentJudgement};
+use super::judge::{Child, ChildChoice, DocumentJudgement, JudgeExchange};
 
 /// One human-facing moment in a grounding walk.
 #[derive(Debug, Clone)]
@@ -10,6 +10,7 @@ pub enum GroundStep {
         children: Vec<Child>,
         choices: Vec<ChildChoice>,
         effects: Vec<String>,
+        exchanges: Vec<JudgeExchange>,
     },
     Document {
         pred: String,
@@ -18,6 +19,7 @@ pub enum GroundStep {
         judgement: DocumentJudgement,
         preview: String,
         note: String,
+        exchanges: Vec<JudgeExchange>,
     },
     Result {
         pred: String,
@@ -25,6 +27,15 @@ pub enum GroundStep {
         status: String,
         bindings: Vec<(String, String)>,
     },
+}
+
+impl GroundStep {
+    pub fn exchanges(&self) -> &[JudgeExchange] {
+        match self {
+            Self::Listing { exchanges, .. } | Self::Document { exchanges, .. } => exchanges,
+            Self::Result { .. } => &[],
+        }
+    }
 }
 
 pub fn format_atom(pred: &str, args: &[String]) -> String {

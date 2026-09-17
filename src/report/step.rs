@@ -1,4 +1,4 @@
-use crate::navigator::judge::DocumentVerdict;
+use crate::navigator::judge::{DocumentVerdict, JudgeExchange};
 use crate::navigator::trace::{format_atom, GroundStep};
 
 /// Render one grounding step as plain text (also the TUI body).
@@ -11,6 +11,7 @@ pub fn format_step(step: &GroundStep, index: usize, total: usize, repo_name: &st
             children,
             choices,
             effects,
+            exchanges: _,
         } => {
             let mut out = header(pred, args, "listing", index, total);
             let where_ = if dir.is_empty() {
@@ -59,6 +60,7 @@ pub fn format_step(step: &GroundStep, index: usize, total: usize, repo_name: &st
             judgement,
             preview,
             note,
+            exchanges: _,
         } => {
             let mut out = header(pred, args, "document", index, total);
             out.push_str(path);
@@ -125,4 +127,95 @@ pub fn format_trace(steps: &[GroundStep], repo_name: &str) -> String {
         out.push_str(&format_step(step, i, n, repo_name));
     }
     out
+}
+
+/// Pretty-printed Jev request/response for one step, or a note when none.
+pub fn format_jev(step: &GroundStep) -> String {
+    format_exchanges(step.exchanges())
+}
+
+fn format_exchanges(exchanges: &[JudgeExchange]) -> String {
+    if exchanges.is_empty() {
+        return "\n  (no Jev request)\n".into();
+    }
+    let mut out = String::from("\n");
+    let n = exchanges.len();
+    for (i, ex) in exchanges.iter().enumerate() {
+        let req_label = if n == 1 {
+            "  Jev request\n".to_string()
+        } else {
+            format!("  Jev request {}/{n}\n", i + 1)
+        };
+        let resp_label = if n == 1 {
+            "  Jev response\n".to_string()
+        } else {
+            format!("  Jev response {}/{n}\n", i + 1)
+        };
+        out.push_str(&req_label);
+        out.push_str(&indent_json(&ex.request));
+        out.push_str(&resp_label);
+        out.push_str(&indent_json(&ex.response));
+    }
+    out
+}
+
+fn indent_json(value: &serde_json::Value) -> String {
+    let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    let mut out = String::new();
+    for line in pretty.lines() {
+        out.push_str("    ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::navigator::judge::{Child, ChildChoice, Transition};
+    use serde_json::json;
+
+    fn listing_with(exchanges: Vec<JudgeExchange>) -> GroundStep {
+        GroundStep::Listing {
+            pred: "component".into(),
+            args: vec!["Frontend".into()],
+            dir: "".into(),
+            children: vec![Child {
+                name: "ui".into(),
+                rel_path: "ui".into(),
+                is_dir: true,
+                sample: vec![],
+            }],
+            choices: vec![ChildChoice {
+                rel_path: "ui".into(),
+                transition: Transition::Whole,
+                confidence: 0.9,
+            }],
+            effects: vec!["ui: whole → bind".into()],
+            exchanges,
+        }
+    }
+
+    #[test]
+    fn verbose_listing_prints_jev_json() {
+        let step = listing_with(vec![JudgeExchange {
+            request: json!({"model": "jev-latest", "questions": {"c0": {"type": "choice"}}}),
+            response: json!({"answers": {"c0": {"choice": "whole", "confidence": 0.9}}}),
+        }]);
+        let quiet = format_step(&step, 0, 1, "toy");
+        assert!(!quiet.contains("Jev request"));
+        assert!(quiet.contains("ui"));
+        let payload = format_jev(&step);
+        assert!(payload.contains("Jev request"));
+        assert!(payload.contains("Jev response"));
+        assert!(payload.contains("jev-latest"));
+        assert!(payload.contains("\"choice\": \"whole\""));
+    }
+
+    #[test]
+    fn verbose_without_exchange_notes_absence() {
+        let step = listing_with(Vec::new());
+        assert!(format_jev(&step).contains("no Jev request"));
+    }
 }
