@@ -5,17 +5,17 @@
       "args": ["Frontend"],
       "dir": "",
       "choices": {
-        "api": "descend",
-        "decoy": "descend",
-        "ui": "descend",
-        "server": "descend"
+        "api": "investigate",
+        "decoy": "investigate",
+        "ui": "investigate",
+        "server": "investigate"
       }
     },
     {
       "pred": "component",
       "args": ["Frontend"],
       "dir": "ui",
-      "choices": { "app.py": "whole" }
+      "choices": { "app.py": "investigate" }
     },
     {
       "pred": "component",
@@ -33,17 +33,17 @@
       "pred": "component",
       "args": ["Frontend"],
       "dir": "api",
-      "choices": { "__init__.py": "skip", "client.py": "part" }
+      "choices": { "__init__.py": "skip", "client.py": "investigate" }
     },
     {
       "pred": "component",
       "args": ["Backend"],
       "dir": "",
       "choices": {
-        "api": "descend",
-        "decoy": "descend",
-        "ui": "descend",
-        "server": "descend"
+        "api": "investigate",
+        "decoy": "investigate",
+        "ui": "investigate",
+        "server": "investigate"
       }
     },
     {
@@ -56,24 +56,24 @@
       "pred": "component",
       "args": ["Backend"],
       "dir": "server",
-      "choices": { "worker.py": "whole" }
+      "choices": { "worker.py": "investigate" }
     },
     {
       "pred": "component",
       "args": ["Backend"],
       "dir": "decoy",
-      "choices": { "noise.py": "whole" }
+      "choices": { "noise.py": "investigate" }
     },
     {
       "pred": "component",
       "args": ["Backend"],
       "dir": "api",
-      "choices": { "client.py": "part", "__init__.py": "skip" }
+      "choices": { "client.py": "investigate", "__init__.py": "skip" }
     }
   ],
   "documents": [
-    {"pred": "component", "args": ["Frontend"], "path": "ui/app.py", "verdict": "true", "confidence": 0.33},
-    {"pred": "component", "args": ["Backend"], "path": "server/worker.py", "verdict": "true", "confidence": 0.21},
+    {"pred": "component", "args": ["Frontend"], "path": "ui/app.py", "verdict": "true", "confidence": 0.85},
+    {"pred": "component", "args": ["Backend"], "path": "server/worker.py", "verdict": "true", "confidence": 0.85},
     {"pred": "component", "args": ["Backend"], "path": "decoy/noise.py", "verdict": "false", "confidence": 0.21},
     {"pred": "defines", "args": ["api/client.py", "Backend"], "path": "api/client.py", "verdict": "true", "confidence": 0.66},
     {"pred": "defines", "args": ["api/client.py", "Frontend"], "path": "api/client.py", "verdict": "true", "confidence": 0.75}

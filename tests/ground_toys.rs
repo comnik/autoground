@@ -39,7 +39,10 @@ fn ground_frontend_on_split_has_readable_steps() {
     for (c, e) in &answer.bindings {
         store.bind(c, e);
     }
-    assert_eq!(store.bindings_for("Frontend"), vec!["ui".to_string()]);
+    assert_eq!(
+        store.bindings_for("Frontend"),
+        vec!["ui/app.py".to_string()]
+    );
     assert!(nav
         .trace
         .iter()
@@ -62,9 +65,13 @@ fn locate_is_generic_over_predicate_name() {
         need: Need::Truth,
     };
     let answer = nav.answer(&demand, &Store::new());
-    assert_eq!(
-        answer.bindings,
-        vec![("Frontend".to_string(), "frontend".to_string())]
+    assert!(
+        answer
+            .bindings
+            .iter()
+            .any(|(c, e)| c == "Frontend" && e.starts_with("frontend/")),
+        "expected a file under frontend/, got {:?}",
+        answer.bindings
     );
 }
 
@@ -80,8 +87,16 @@ fn toy_layered_grounds() {
     let (outcome, store, docs) = ground("examples/toy-layered");
     assert_no_decoy(&docs);
     assert_eq!(outcome, Outcome::Grounded);
-    assert_eq!(store.bindings_for("Frontend"), vec!["frontend".to_string()]);
-    assert_eq!(store.bindings_for("Backend"), vec!["backend".to_string()]);
+    assert!(store
+        .bindings_for("Frontend")
+        .iter()
+        .all(|p| p.starts_with("frontend/")));
+    assert!(!store.bindings_for("Frontend").is_empty());
+    assert!(store
+        .bindings_for("Backend")
+        .iter()
+        .all(|p| p.starts_with("backend/")));
+    assert!(!store.bindings_for("Backend").is_empty());
 }
 
 #[test]
@@ -117,8 +132,8 @@ fn jev_collapsed_trace_does_not_bind_both_to_one_file() {
         "Frontend should not bind a Backend source file: {front:?}"
     );
     assert!(
-        front.iter().any(|p| p == "ui" || p.ends_with("app.py")),
-        "Frontend should lift to ui/: {front:?}"
+        front.iter().any(|p| p.ends_with("app.py")),
+        "Frontend should bind ui/app.py: {front:?}"
     );
 }
 
@@ -127,10 +142,23 @@ fn toy_split_binds_two_backend_roots() {
     let (outcome, store, docs) = ground("examples/toy-split");
     assert_no_decoy(&docs);
     assert_eq!(outcome, Outcome::Grounded);
-    assert_eq!(store.bindings_for("Frontend"), vec!["ui".to_string()]);
     assert_eq!(
-        store.bindings_for("Backend"),
-        vec!["api".to_string(), "server".to_string()]
+        store.bindings_for("Frontend"),
+        vec!["ui/app.py".to_string()]
+    );
+    let back = store.bindings_for("Backend");
+    assert!(
+        back.iter().any(|p| p.starts_with("api/")),
+        "Backend should include api/ files: {back:?}"
+    );
+    assert!(
+        back.iter().any(|p| p.starts_with("server/")),
+        "Backend should include server/ files: {back:?}"
+    );
+    assert!(
+        back.iter()
+            .all(|p| p.starts_with("api/") || p.starts_with("server/")),
+        "Backend should only bind api/ and server/ files: {back:?}"
     );
 }
 

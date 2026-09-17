@@ -31,31 +31,27 @@ pub struct DocumentState {
     pub verbalization: String,
 }
 
+/// Listing choice: skip this location, or look here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transition {
     Skip,
-    Descend,
-    Part,
-    Whole,
+    /// List a directory or open a file.
+    Investigate,
 }
 
 impl Transition {
     pub fn label(self) -> &'static str {
         match self {
             Transition::Skip => "skip",
-            Transition::Descend => "descend",
-            Transition::Part => "part",
-            Transition::Whole => "whole",
+            Transition::Investigate => "investigate",
         }
     }
 
     pub fn mark(self) -> &'static str {
         match self {
             Transition::Skip => ".",
-            Transition::Descend => ">",
-            Transition::Part => "+",
-            Transition::Whole => "*",
+            Transition::Investigate => "*",
         }
     }
 }

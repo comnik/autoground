@@ -44,7 +44,7 @@ pub fn format_step(step: &GroundStep, index: usize, total: usize, repo_name: &st
                     })
                     .unwrap_or("");
                 out.push_str(&format!(
-                    "{branch} {name:<16} {mark} {label:<8} {conf:<5}  {effect}\n",
+                    "{branch} {name:<16} {mark} {label:<12} {conf:<5}  {effect}\n",
                     name = format!("{}{kind}", child.name),
                 ));
             }
@@ -189,10 +189,10 @@ mod tests {
             }],
             choices: vec![ChildChoice {
                 rel_path: "ui".into(),
-                transition: Transition::Whole,
+                transition: Transition::Investigate,
                 confidence: 0.9,
             }],
-            effects: vec!["ui: whole → bind".into()],
+            effects: vec!["ui: investigate → list".into()],
             exchanges,
         }
     }
@@ -201,7 +201,7 @@ mod tests {
     fn verbose_listing_prints_jev_json() {
         let step = listing_with(vec![JudgeExchange {
             request: json!({"model": "jev-latest", "questions": {"c0": {"type": "choice"}}}),
-            response: json!({"answers": {"c0": {"choice": "whole", "confidence": 0.9}}}),
+            response: json!({"answers": {"c0": {"choice": "investigate", "confidence": 0.9}}}),
         }]);
         let quiet = format_step(&step, 0, 1, "toy");
         assert!(!quiet.contains("Jev request"));
@@ -210,7 +210,7 @@ mod tests {
         assert!(payload.contains("Jev request"));
         assert!(payload.contains("Jev response"));
         assert!(payload.contains("jev-latest"));
-        assert!(payload.contains("\"choice\": \"whole\""));
+        assert!(payload.contains("\"choice\": \"investigate\""));
     }
 
     #[test]

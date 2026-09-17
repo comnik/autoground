@@ -122,7 +122,7 @@ impl<T: Transport> Judge for JevJudge<T> {
 
     fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
         self.exchanges.clear();
-        let body = document_request(&self.model, state);
+        let body = investigation_request(&self.model, state);
         let resp = self.evaluate(&body)?;
         parse_document_answer(&resp)
     }
@@ -140,19 +140,17 @@ pub fn listing_request(
 ) -> Value {
     let atom = atom_text(&state.pred, &state.args, &state.verbalization);
     let mut questions = serde_json::Map::new();
-    for (i, child) in chunk.iter().enumerate() {
+    for i in 0..chunk.len() {
         questions.insert(
             format!("c{}", id_base + i),
             json!({
                 "type": "choice",
                 "instructions": format!(
-                    "Locate proof or disproof for: {atom} in path {}. Choose one navigation transition. Stop at whole directories where appropriate.",
-                    child.rel_path
+                    "Does this location contain proof or disproof for the following statement: {atom}"
                 ),
                 "criteria": {
-                    "skip": "Not a witness of the atom and does not contain one.",
-                    "descend": "This location is not itself evidence, but is likely to contain one nested inside.",
-                    "investigate": "This location contains evidence and should be examined closely.",
+                    "skip": "This location does not contain proof or disproof.",
+                    "investigate": "This location contains proof or disproof. Directories are listed; files are opened.",
                 }
             }),
         );
@@ -173,31 +171,8 @@ pub fn listing_request(
     })
 }
 
-pub fn document_request(model: &str, state: &DocumentState) -> Value {
+pub fn investigation_request(model: &str, state: &DocumentState) -> Value {
     let atom = atom_text(&state.pred, &state.args, &state.verbalization);
-    let (instructions, criteria) = if state.args.len() >= 2 {
-        (
-            format!(
-                "Does this file make the following true? {atom}. A file that implements or belongs to a mentioned entity does not count as an external relation. Choose true, false, or unknown."
-            ),
-            json!({
-                "true": "The atom holds of this file.",
-                "false": "The atom does not hold. Files that belong to or implement a mentioned entity are false for an external relation.",
-                "unknown": "Cannot tell from this file."
-            }),
-        )
-    } else {
-        (
-            format!(
-                "Is this single file the entire denotation of: {atom}? Not merely a file that belongs to it. Choose true, false, or unknown."
-            ),
-            json!({
-                "true": "The whole denotation is this one file (e.g. a single-file app.js).",
-                "false": "This file is not the whole denotation.",
-                "unknown": "Cannot tell."
-            }),
-        )
-    };
     json!({
         "model": model,
         "state": {
@@ -212,8 +187,12 @@ pub fn document_request(model: &str, state: &DocumentState) -> Value {
         "questions": {
             "ground": {
                 "type": "choice",
-                "instructions": instructions,
-                "criteria": criteria
+                "instructions": atom,
+                "criteria": {
+                    "true": "The atom holds.",
+                    "false": "The atom does not hold.",
+                    "unknown": "Cannot tell.",
+                }
             }
         }
     })
@@ -241,12 +220,10 @@ pub fn parse_listing_answers(
             .unwrap_or(0.0);
         let transition = match choice {
             "skip" => Transition::Skip,
-            "descend" => Transition::Descend,
-            "part" => Transition::Part,
-            "whole" => Transition::Whole,
+            "investigate" => Transition::Investigate,
             other => {
                 return Err(JudgeError::Parse(format!(
-                    "unknown transition `{other}` for {}",
+                    "unknown listing choice `{other}` for {}",
                     child.rel_path
                 )));
             }
@@ -340,15 +317,19 @@ mod tests {
         let instr = body["questions"]["c0"]["instructions"].as_str().unwrap();
         assert_eq!(
             instr,
-            "Locate proof or disproof for: \"Frontend\" is a component in the codebase in path frontend. Choose one navigation transition. Stop at whole directories where appropriate."
+            "Does this location contain proof or disproof for the following statement: \"Frontend\" is a component in the codebase"
         );
+        let criteria = body["questions"]["c0"]["criteria"].as_object().unwrap();
+        assert!(criteria.contains_key("skip"));
+        assert!(criteria.contains_key("investigate"));
+        assert!(!criteria.contains_key("unknown"));
         assert!(!instr.contains("Listing sample"));
         assert_eq!(body["state"]["children"][0]["sample"], json!(["app.py"]));
         assert!(!body["state"].get("body").is_some());
     }
 
     #[test]
-    fn document_request_is_three_way_choice() {
+    fn investigation_request_is_three_way_choice() {
         let state = DocumentState {
             pred: "defines".into(),
             args: vec!["ui/app.py".into(), "Backend".into()],
@@ -357,7 +338,7 @@ mod tests {
             bindings: vec![("Backend".into(), "api".into())],
             verbalization: "file \"ui/app.py\" (partially) defines component \"Backend\"".into(),
         };
-        let body = document_request("jev-latest", &state);
+        let body = investigation_request("jev-latest", &state);
         assert_eq!(body["questions"]["ground"]["type"], "choice");
         let criteria = body["questions"]["ground"]["criteria"].as_object().unwrap();
         assert!(criteria.contains_key("true"));
@@ -368,7 +349,10 @@ mod tests {
         let instr = body["questions"]["ground"]["instructions"]
             .as_str()
             .unwrap();
-        assert!(instr.contains("file \"ui/app.py\" (partially) defines component \"Backend\""));
+        assert_eq!(
+            instr,
+            "file \"ui/app.py\" (partially) defines component \"Backend\""
+        );
     }
 
     #[test]
@@ -376,12 +360,12 @@ mod tests {
         let children = vec![child("frontend", true), child("decoy", true)];
         let resp = json!({
             "answers": {
-                "c0": { "type": "choice", "choice": "whole", "confidence": 0.91 },
+                "c0": { "type": "choice", "choice": "investigate", "confidence": 0.91 },
                 "c1": { "type": "choice", "choice": "skip", "confidence": 0.88 }
             }
         });
         let choices = parse_listing_answers(&resp, &children, 0).unwrap();
-        assert_eq!(choices[0].transition, Transition::Whole);
+        assert_eq!(choices[0].transition, Transition::Investigate);
         assert_eq!(choices[1].transition, Transition::Skip);
 
         let doc_resp = json!({
@@ -430,17 +414,17 @@ mod tests {
         let transport = SeqTransport {
             responses: vec![json!({
                 "answers": {
-                    "c0": { "type": "choice", "choice": "whole", "confidence": 0.9 }
+                    "c0": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
                 }
             })],
             bodies: Vec::new(),
         };
         let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
         let choices = judge.choose(&state).unwrap();
-        assert_eq!(choices[0].transition, Transition::Whole);
+        assert_eq!(choices[0].transition, Transition::Investigate);
         let ex = judge.last_exchanges();
         assert_eq!(ex.len(), 1);
         assert_eq!(ex[0].request["model"], "jev-latest");
-        assert_eq!(ex[0].response["answers"]["c0"]["choice"], "whole");
+        assert_eq!(ex[0].response["answers"]["c0"]["choice"], "investigate");
     }
 }

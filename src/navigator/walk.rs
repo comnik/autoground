@@ -110,7 +110,7 @@ fn should_hide(name: &str) -> bool {
 }
 
 /// Names that must not be entered while locating a component, even if a
-/// judge says descend. Stops decoy/ file bodies from being read.
+/// judge says investigate. Stops decoy/ file bodies from being read.
 pub fn is_noise_name(name: &str) -> bool {
     let n: String = name
         .chars()

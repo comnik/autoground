@@ -23,31 +23,16 @@ impl Judge for HeuristicJudge {
             .filter(|c| child_matches(c, label) || sample_matches(c, label))
             .map(|c| c.rel_path.as_str())
             .collect();
-        let unique_direct = state
-            .children
-            .iter()
-            .filter(|c| child_matches(c, label))
-            .count()
-            == 1;
-
         Ok(state
             .children
             .iter()
             .map(|c| {
                 let transition = if crate::navigator::walk::is_noise_name(&c.name) {
                     Transition::Skip
-                } else if child_matches(c, label) {
-                    if c.is_dir {
-                        if unique_direct {
-                            Transition::Whole
-                        } else {
-                            Transition::Part
-                        }
-                    } else {
-                        Transition::Whole
-                    }
-                } else if c.is_dir && sample_matches(c, label) {
-                    Transition::Descend
+                } else if c.is_dir && (child_matches(c, label) || sample_matches(c, label)) {
+                    Transition::Investigate
+                } else if !c.is_dir && path_matches(&c.rel_path, label) {
+                    Transition::Investigate
                 } else {
                     Transition::Skip
                 };
@@ -76,8 +61,7 @@ impl Judge for HeuristicJudge {
             _ if state.args.len() >= 2 => document_defines(state),
             _ => {
                 let label = state.args.first().map(|s| s.as_str()).unwrap_or("");
-                let name = state.path.rsplit('/').next().unwrap_or(&state.path);
-                if name_matches(name, label) {
+                if path_matches(&state.path, label) {
                     DocumentJudgement {
                         verdict: DocumentVerdict::True,
                         confidence: 0.85,
@@ -126,12 +110,8 @@ fn enumerate_components(state: &ListingState) -> Vec<ChildChoice> {
         .map(|c| {
             let transition = if crate::navigator::walk::is_noise_name(&c.name) {
                 Transition::Skip
-            } else if c.is_dir && is_container(&c.name) {
-                Transition::Descend
-            } else if c.is_dir {
-                Transition::Part
             } else {
-                Transition::Skip
+                Transition::Investigate
             };
             ChildChoice {
                 rel_path: c.rel_path.clone(),
@@ -142,15 +122,12 @@ fn enumerate_components(state: &ListingState) -> Vec<ChildChoice> {
         .collect()
 }
 
-fn is_container(name: &str) -> bool {
-    matches!(
-        name.to_lowercase().as_str(),
-        "src" | "lib" | "libs" | "packages" | "pkg" | "apps" | "services"
-    )
-}
-
 fn child_matches(child: &super::judge::Child, label: &str) -> bool {
     name_matches(&child.name, label)
+}
+
+fn path_matches(path: &str, label: &str) -> bool {
+    path.split('/').any(|p| name_matches(p, label))
 }
 
 fn sample_matches(child: &super::judge::Child, label: &str) -> bool {
@@ -260,7 +237,7 @@ mod tests {
                 .unwrap()
                 .transition
         };
-        assert_eq!(t("frontend"), Transition::Whole);
+        assert_eq!(t("frontend"), Transition::Investigate);
         assert_eq!(t("backend"), Transition::Skip);
         assert_eq!(t("decoy"), Transition::Skip);
     }
