@@ -4,12 +4,12 @@ use serde_json::{json, Value};
 
 use super::judge::{
     Child, ChildChoice, DocumentAnswer, DocumentJudgement, DocumentState, DocumentVerdict, Judge,
-    JudgeError, JudgeExchange, ListingState, Transition,
+    JudgeError, JudgeExchange, ListingState, Transition, LISTING_CHOICE_BUDGET,
 };
 
 const DEFAULT_BASE: &str = "https://api.typesafe.ai";
 const DEFAULT_MODEL: &str = "jev-latest";
-const CHOICE_CHUNK: usize = 100;
+
 const MAX_RETRIES: u32 = 4;
 const DOCUMENT_PARALLELISM: usize = 8;
 /// Published Jev input price. Output tokens are unmetered.
@@ -205,7 +205,7 @@ impl<T: Transport> Judge for JevJudge<T> {
     fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
         self.exchanges.clear();
         let mut out = Vec::with_capacity(state.children.len());
-        for chunk in state.children.chunks(CHOICE_CHUNK) {
+        for chunk in state.children.chunks(LISTING_CHOICE_BUDGET) {
             let body = listing_request(&self.model, state, chunk, out.len());
             let resp = self.evaluate(&body)?;
             out.extend(parse_listing_answers(&resp, chunk, out.len())?);
@@ -277,8 +277,8 @@ pub fn listing_request(
                     "Should we look in {path} for proof or disproof of the following statement: {statement}"
                 ),
                 "criteria": {
-                    "skip": "Do not look here. The name, path, and listing sample show this is unrelated.",
-                    "investigate": "Look here. Directories are listed next; files are opened and judged.",
+                    "skip": "Do not look here, or in anything nested under this path. The name, path, and directory tree show this is unrelated.",
+                    "investigate": "Look here. Nested paths already in this listing are used when a directory is investigated; files are opened and judged.",
                 }
             }),
         );
@@ -292,15 +292,52 @@ pub fn listing_request(
                 "statement": statement,
             },
             "directory": state.dir,
-            "children": state.children.iter().map(|c| json!({
-                "name": c.name,
-                "path": c.rel_path,
-                "is_dir": c.is_dir,
-                "sample": c.sample,
-            })).collect::<Vec<_>>(),
+            "tree": listing_tree(&state.children),
         },
         "questions": questions,
     })
+}
+
+/// Nested directory tree for listing state. Directories are objects, files are
+/// `null`. Sample names of a directory appear only when that child was not packed.
+fn listing_tree(children: &[Child]) -> Value {
+    let mut root = serde_json::Map::new();
+    for child in children {
+        insert_node(&mut root, &split_rel(&child.rel_path), child.is_dir);
+    }
+    for child in children {
+        if !child.is_dir {
+            continue;
+        }
+        for name in &child.sample {
+            let rel = if child.rel_path.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{name}", child.rel_path.trim_end_matches('/'))
+            };
+            insert_node(&mut root, &split_rel(&rel), false);
+        }
+    }
+    Value::Object(root)
+}
+
+fn split_rel(rel: &str) -> Vec<&str> {
+    rel.split('/').filter(|s| !s.is_empty()).collect()
+}
+
+fn insert_node(map: &mut serde_json::Map<String, Value>, parts: &[&str], is_dir: bool) {
+    let Some((first, rest)) = parts.split_first() else {
+        return;
+    };
+    if rest.is_empty() && !is_dir {
+        map.entry((*first).to_string()).or_insert(Value::Null);
+        return;
+    }
+    let child = map.entry((*first).to_string()).or_insert_with(|| json!({}));
+    if !child.is_object() {
+        *child = json!({});
+    }
+    insert_node(child.as_object_mut().unwrap(), rest, is_dir);
 }
 
 pub fn investigation_request(model: &str, state: &DocumentState) -> Value {
@@ -496,10 +533,15 @@ mod tests {
         assert_eq!(body["questions"]["c0"]["type"], "choice");
         assert_eq!(body["questions"]["c1"]["type"], "choice");
         assert_eq!(body["questions"]["c2"]["type"], "choice");
-        assert_eq!(body["state"]["children"].as_array().unwrap().len(), 3);
-        assert_eq!(body["state"]["children"][0]["path"], "frontend");
-        assert_eq!(body["state"]["children"][1]["path"], "decoy");
-        assert_eq!(body["state"]["children"][2]["path"], "app.py");
+        assert!(body["state"].get("children").is_none());
+        assert_eq!(
+            body["state"]["tree"],
+            json!({
+                "frontend": { "app.py": null },
+                "decoy": { "app.py": null },
+                "app.py": null,
+            })
+        );
         assert_eq!(
             body["state"]["atom"]["statement"],
             "\"Frontend\" is a component in the codebase"
@@ -528,8 +570,59 @@ mod tests {
                 .contains("does not contain proof or disproof"),
             "skip must not mean 'no proof yet'; that makes every listing skip"
         );
-        assert_eq!(body["state"]["children"][0]["sample"], json!(["app.py"]));
+        assert!(
+            criteria["skip"]
+                .as_str()
+                .unwrap()
+                .contains("nested under this path"),
+            "skip must drop packed descendants"
+        );
+        assert!(
+            criteria["investigate"]
+                .as_str()
+                .unwrap()
+                .contains("Nested paths already in this listing"),
+            "{:?}",
+            criteria["investigate"]
+        );
         assert!(!body["state"].get("body").is_some());
+    }
+
+    #[test]
+    fn listing_tree_nests_packed_paths_without_duplicate_samples() {
+        let children = vec![
+            Child {
+                name: "api".into(),
+                rel_path: "api".into(),
+                is_dir: true,
+                sample: vec!["client.py".into(), "handlers.py".into()],
+            },
+            Child {
+                name: "client.py".into(),
+                rel_path: "api/client.py".into(),
+                is_dir: false,
+                sample: vec![],
+            },
+            Child {
+                name: "handlers.py".into(),
+                rel_path: "api/handlers.py".into(),
+                is_dir: false,
+                sample: vec![],
+            },
+            Child {
+                name: "src".into(),
+                rel_path: "src".into(),
+                is_dir: true,
+                sample: vec!["frontend".into(), "lib".into()],
+            },
+        ];
+        assert_eq!(
+            listing_tree(&children),
+            json!({
+                "api": { "client.py": null, "handlers.py": null },
+                "src": { "frontend": null, "lib": null },
+            })
+        );
     }
 
     #[test]

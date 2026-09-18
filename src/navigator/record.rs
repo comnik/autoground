@@ -63,13 +63,7 @@ impl Judge for RecordingJudge {
         let choices = self.inner.choose(state)?;
         let mut map = std::collections::HashMap::new();
         for c in &choices {
-            let name = c
-                .rel_path
-                .rsplit('/')
-                .next()
-                .unwrap_or(&c.rel_path)
-                .to_string();
-            map.insert(name, c.transition);
+            map.insert(c.rel_path.clone(), c.transition);
         }
         self.file.listings.push(ListingFixture {
             pred: state.pred.clone(),

@@ -6,6 +6,7 @@ use super::judge::{
     ListingState, Transition, TAU_CONFIDENCE,
 };
 use super::trace::GroundStep;
+use super::walk::parent_dir;
 use crate::eval::{EdbAtom, Outcome, Value, Witness};
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -101,28 +102,43 @@ impl FixtureJudge {
     }
 }
 
+fn lookup_listing_choice(
+    related: &[&ListingFixture],
+    child: &super::judge::Child,
+) -> Option<Transition> {
+    for f in related {
+        if let Some(t) = f.choices.get(&child.rel_path) {
+            return Some(*t);
+        }
+    }
+    let parent = parent_dir(&child.rel_path).unwrap_or("");
+    for f in related {
+        if f.dir == parent {
+            if let Some(t) = f.choices.get(&child.name) {
+                return Some(*t);
+            }
+        }
+    }
+    None
+}
+
 impl Judge for FixtureJudge {
     fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
-        let hit = self
+        let related: Vec<&ListingFixture> = self
             .listings
             .iter()
-            .find(|f| f.pred == state.pred && f.args == state.args && f.dir == state.dir);
+            .filter(|f| f.pred == state.pred && f.args == state.args)
+            .collect();
+        let atom_known = !related.is_empty();
         Ok(state
             .children
             .iter()
             .map(|c| {
-                let transition = hit
-                    .and_then(|f| {
-                        f.choices
-                            .get(&c.name)
-                            .or_else(|| f.choices.get(&c.rel_path))
-                    })
-                    .copied()
-                    .unwrap_or(Transition::Skip);
+                let transition = lookup_listing_choice(&related, c).unwrap_or(Transition::Skip);
                 ChildChoice {
                     rel_path: c.rel_path.clone(),
                     transition,
-                    confidence: if hit.is_some() {
+                    confidence: if atom_known {
                         0.9
                     } else {
                         TAU_CONFIDENCE - 0.1
@@ -152,9 +168,47 @@ impl Judge for FixtureJudge {
 mod tests {
     use super::*;
     use crate::eval::Outcome;
-    use crate::navigator::judge::{Child, ChildChoice, JudgeExchange};
+    use crate::navigator::judge::{
+        Child, ChildChoice, Judge, JudgeExchange, ListingState, Transition,
+    };
     use crate::navigator::trace::GroundStep;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn packed_listing_replays_per_dir_fixture_entries() {
+        let mut j = FixtureJudge::load("tests/fixtures/toy-layered.json").unwrap();
+        let state = ListingState {
+            pred: "component".into(),
+            args: vec!["Frontend".into()],
+            dir: "".into(),
+            children: vec![
+                Child {
+                    name: "frontend".into(),
+                    rel_path: "frontend".into(),
+                    is_dir: true,
+                    sample: vec![],
+                },
+                Child {
+                    name: "app.py".into(),
+                    rel_path: "frontend/app.py".into(),
+                    is_dir: false,
+                    sample: vec![],
+                },
+                Child {
+                    name: "backend".into(),
+                    rel_path: "backend".into(),
+                    is_dir: true,
+                    sample: vec![],
+                },
+            ],
+            verbalization: String::new(),
+        };
+        let choices = j.choose(&state).unwrap();
+        let t = |p: &str| choices.iter().find(|c| c.rel_path == p).unwrap().transition;
+        assert_eq!(t("frontend"), Transition::Investigate);
+        assert_eq!(t("frontend/app.py"), Transition::Investigate);
+        assert_eq!(t("backend"), Transition::Skip);
+    }
 
     #[test]
     fn loads_legacy_fixture_without_run_fields() {

@@ -38,7 +38,7 @@ pub fn format_step(step: &GroundStep, index: usize, total: usize, repo_name: &st
                 let kind = if child.is_dir { "/" } else { "" };
                 let effect = effects
                     .iter()
-                    .find(|e| e.starts_with(&format!("{}:", child.name)))
+                    .find(|e| e.starts_with(&format!("{}:", child.rel_path)))
                     .map(|e| {
                         e.split_once(':')
                             .map(|(_, rest)| rest.trim())
@@ -47,7 +47,7 @@ pub fn format_step(step: &GroundStep, index: usize, total: usize, repo_name: &st
                     .unwrap_or("");
                 out.push_str(&format!(
                     "{branch} {name:<16} {mark} {label:<12} {conf:<5}  {effect}\n",
-                    name = format!("{}{kind}", child.name),
+                    name = format!("{}{kind}", child.rel_path),
                 ));
             }
             if children.is_empty() {

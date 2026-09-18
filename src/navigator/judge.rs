@@ -10,6 +10,7 @@ pub struct Child {
 }
 
 /// Directory listing presented to the judge. Names and samples, not file bodies.
+/// `children` may include nested paths from greedily packed subdirectories.
 #[derive(Debug, Clone)]
 pub struct ListingState {
     pub pred: String,
@@ -157,6 +158,10 @@ pub struct DocumentAnswer {
 }
 
 pub const TAU_CONFIDENCE: f64 = 0.6;
+
+/// Max children in one listing Choice. Packing and Jev chunking share this so
+/// a filled listing is one HTTP request.
+pub const LISTING_CHOICE_BUDGET: usize = 100;
 
 impl DocumentJudgement {
     pub fn closed_true(&self) -> bool {

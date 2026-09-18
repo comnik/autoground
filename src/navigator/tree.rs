@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 
 use crate::edb::Store;
 use crate::navigator::judge::{
-    ChildChoice, DocumentState, Judge, ListingState, Transition, TAU_CONFIDENCE,
+    ChildChoice, DocumentState, Judge, ListingState, Transition, LISTING_CHOICE_BUDGET,
+    TAU_CONFIDENCE,
 };
 use crate::navigator::trace::GroundStep;
-use crate::navigator::walk::{list_dir, read_trimmed, repo_join, ListingFilter};
+use crate::navigator::walk::{pack_listing, parent_dir, read_trimmed, repo_join, ListingFilter};
 use crate::navigator::{Answer, Arg, Demand, Navigator, Need};
 use crate::syntax::{verbalize_atom, Declare, Term};
 
@@ -14,8 +15,8 @@ const MAX_LISTINGS: usize = 32;
 const MAX_DEPTH: usize = 8;
 const BODY_BUDGET: usize = 8192;
 
-/// Goal-directed walk of a repo tree. Asks a `Judge` at each listing and
-/// document; never evaluates IDB.
+/// Goal-directed walk of a repo tree. Packs nested listings into one Choice
+/// per request; asks a `Judge` at each listing and document; never evaluates IDB.
 pub struct TreeNavigator {
     root: PathBuf,
     filter: ListingFilter,
@@ -283,48 +284,69 @@ impl TreeNavigator {
         let args = bound_values(demand);
         let need = demand.need;
         let mut frontier: Vec<(String, usize)> = vec![("".to_string(), 0)];
-        let mut visited = HashSet::new();
+        let mut already = HashSet::new();
         let mut hits = Vec::new();
         let mut listings = 0;
         let mut all_skips_confident = true;
 
-        while let Some((dir, depth)) = frontier.pop() {
-            if listings >= MAX_LISTINGS || depth > MAX_DEPTH {
+        while !frontier.is_empty() {
+            if listings >= MAX_LISTINGS {
                 all_skips_confident = false;
                 break;
             }
-            if !visited.insert(dir.clone()) {
+            if frontier.iter().all(|(_, depth)| *depth > MAX_DEPTH) {
+                all_skips_confident = false;
+                break;
+            }
+            let packed = pack_listing(
+                &self.root,
+                &frontier,
+                &self.filter,
+                &already,
+                LISTING_CHOICE_BUDGET,
+                MAX_DEPTH,
+            );
+            listings += 1;
+            self.listings.extend(packed.dir_depth.keys().cloned());
+            if packed.depth_limited {
+                all_skips_confident = false;
+            }
+            if !packed.failed.is_empty() {
+                all_skips_confident = false;
+            }
+            if packed.children.is_empty() {
+                if packed.unfinished.is_empty() || packed.unfinished == frontier {
+                    break;
+                }
+                frontier = packed.unfinished;
                 continue;
             }
-            let children = match list_dir(&self.root, &dir, &self.filter) {
-                Ok(c) => c,
-                Err(_) => {
-                    all_skips_confident = false;
-                    continue;
-                }
-            };
-            self.listings.push(dir.clone());
-            listings += 1;
             let verbalization = self.verbalize_demand(demand);
             let choices = match self.judge.choose(&ListingState {
                 pred: pred.to_string(),
                 args: args.clone(),
-                dir: dir.clone(),
-                children: children.clone(),
+                dir: packed.origin.clone(),
+                children: packed.children.clone(),
                 verbalization,
             }) {
                 Ok(c) => c,
                 Err(e) => {
                     self.errors.push(e.to_string());
                     all_skips_confident = false;
+                    frontier = packed.unfinished;
                     continue;
                 }
             };
+            for child in &packed.children {
+                already.insert(child.rel_path.clone());
+            }
             let exchanges = self.judge.last_exchanges();
             let mut applied = Vec::new();
             let mut effects = Vec::new();
             let mut open_files = Vec::new();
-            for child in &children {
+            let mut skipped = HashSet::new();
+            let mut incomplete = Vec::new();
+            for child in &packed.children {
                 let choice = choices
                     .iter()
                     .find(|c| c.rel_path == child.rel_path)
@@ -334,37 +356,78 @@ impl TreeNavigator {
                         transition: Transition::Skip,
                         confidence: 0.0,
                     });
+                if has_skipped_ancestor(&child.rel_path, &skipped) {
+                    if choice.transition == Transition::Investigate {
+                        effects.push(format!("{}: ignored (parent skip)", child.rel_path));
+                    }
+                    applied.push(choice);
+                    continue;
+                }
                 match choice.transition {
                     Transition::Skip => {
+                        if child.is_dir {
+                            skipped.insert(child.rel_path.clone());
+                        }
                         if choice.confidence < TAU_CONFIDENCE {
                             all_skips_confident = false;
                         }
                     }
                     Transition::Investigate => {
                         if child.is_dir {
-                            frontier.push((child.rel_path.clone(), depth + 1));
-                            effects.push(format!("{}: investigate → list", child.name));
                             if args.is_empty() {
                                 hits.push(child.rel_path.clone());
                             }
+                            if !packed.complete.contains(&child.rel_path) {
+                                incomplete.push((
+                                    child.rel_path.clone(),
+                                    child_depth(&child.rel_path, &packed.dir_depth),
+                                ));
+                                effects.push(format!("{}: investigate → list", child.rel_path));
+                            } else {
+                                effects.push(format!("{}: investigate", child.rel_path));
+                            }
                         } else {
                             open_files.push(child.rel_path.clone());
-                            effects.push(format!("{}: investigate → open", child.name));
+                            effects.push(format!("{}: investigate → open", child.rel_path));
                         }
                     }
                 }
                 applied.push(choice);
             }
+            let mut next = Vec::new();
+            let mut seen_next = HashSet::new();
+            for (dir, depth) in packed.unfinished {
+                if depth > MAX_DEPTH {
+                    all_skips_confident = false;
+                    continue;
+                }
+                if skipped.contains(&dir) || has_skipped_ancestor(&dir, &skipped) {
+                    continue;
+                }
+                if seen_next.insert(dir.clone()) {
+                    next.push((dir, depth));
+                }
+            }
+            for (dir, depth) in incomplete {
+                if depth > MAX_DEPTH {
+                    all_skips_confident = false;
+                    continue;
+                }
+                if seen_next.insert(dir.clone()) {
+                    next.push((dir, depth));
+                }
+            }
             self.trace.push(GroundStep::Listing {
                 pred: pred.to_string(),
                 args: args.to_vec(),
-                dir: dir.clone(),
-                children: children.clone(),
+                dir: packed.origin.clone(),
+                children: packed.children.clone(),
                 choices: applied,
                 effects,
                 exchanges,
             });
             hits.extend(self.confirm_files(demand, &open_files, store));
+            frontier = next;
             if need == Need::Truth && !hits.is_empty() && frontier.is_empty() {
                 break;
             }
@@ -538,6 +601,24 @@ fn bound_at<'a>(args: &'a [Arg], i: usize) -> Option<&'a str> {
     match args.get(i) {
         Some(Arg::Bound(s)) => Some(s.as_str()),
         _ => None,
+    }
+}
+
+fn has_skipped_ancestor(rel: &str, skipped: &HashSet<String>) -> bool {
+    let mut path = rel;
+    while let Some(parent) = parent_dir(path) {
+        if skipped.contains(parent) {
+            return true;
+        }
+        path = parent;
+    }
+    false
+}
+
+fn child_depth(rel: &str, dir_depth: &HashMap<String, usize>) -> usize {
+    match parent_dir(rel) {
+        Some(p) => dir_depth.get(p).copied().unwrap_or(0) + 1,
+        None => dir_depth.get("").copied().unwrap_or(0) + 1,
     }
 }
 
@@ -886,6 +967,119 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, GroundStep::Listing { .. })),
             "already-located file args should not walk"
+        );
+    }
+
+    struct CaptureListings {
+        states: Arc<Mutex<Vec<ListingState>>>,
+    }
+
+    impl Judge for CaptureListings {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            self.states.lock().unwrap().push(state.clone());
+            OpenAll.choose(state)
+        }
+
+        fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            OpenAll.document(state)
+        }
+    }
+
+    #[test]
+    fn locate_packs_nested_listings_into_one_choose() {
+        let states = Arc::new(Mutex::new(Vec::new()));
+        let mut nav = TreeNavigator::new(
+            "examples/toy-split",
+            Box::new(CaptureListings {
+                states: states.clone(),
+            }),
+        );
+        let demand = Demand {
+            pred: "component".into(),
+            args: vec![Arg::Bound("Frontend".into())],
+            need: Need::Truth,
+        };
+        let _ = nav.answer(&demand, &Store::new());
+        let states = states.lock().unwrap().clone();
+        assert_eq!(
+            states.len(),
+            1,
+            "expected one packed listing, got {}",
+            states.len()
+        );
+        let paths: Vec<&str> = states[0]
+            .children
+            .iter()
+            .map(|c| c.rel_path.as_str())
+            .collect();
+        assert!(paths.contains(&"ui"), "{paths:?}");
+        assert!(paths.contains(&"ui/app.py"), "{paths:?}");
+        assert!(paths.contains(&"api"), "{paths:?}");
+        assert!(paths.contains(&"api/client.py"), "{paths:?}");
+        let listings: Vec<_> = nav
+            .trace
+            .iter()
+            .filter(|s| matches!(s, GroundStep::Listing { .. }))
+            .collect();
+        assert_eq!(listings.len(), 1);
+    }
+
+    struct SkipDecoyInvestigateRest;
+
+    impl Judge for SkipDecoyInvestigateRest {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            Ok(state
+                .children
+                .iter()
+                .map(|c| ChildChoice {
+                    rel_path: c.rel_path.clone(),
+                    transition: if c.rel_path == "decoy" {
+                        Transition::Skip
+                    } else {
+                        Transition::Investigate
+                    },
+                    confidence: 0.9,
+                })
+                .collect())
+        }
+
+        fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            Ok(DocumentJudgement {
+                verdict: DocumentVerdict::True,
+                confidence: 0.9,
+            })
+        }
+    }
+
+    #[test]
+    fn skip_on_parent_ignores_packed_descendants() {
+        let mut nav = TreeNavigator::new("examples/toy-split", Box::new(SkipDecoyInvestigateRest));
+        let demand = Demand {
+            pred: "component".into(),
+            args: vec![Arg::Bound("Frontend".into())],
+            need: Need::Truth,
+        };
+        let _ = nav.answer(&demand, &Store::new());
+        let docs: Vec<_> = nav
+            .trace
+            .iter()
+            .filter_map(|s| match s {
+                GroundStep::Document { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            docs.iter().all(|p| !p.contains("decoy")),
+            "skipped decoy/ must not open packed descendants: {docs:?}"
+        );
+        assert!(
+            nav.trace.iter().any(|s| match s {
+                GroundStep::Listing { effects, .. } => effects
+                    .iter()
+                    .any(|e| e.contains("decoy/noise.py") && e.contains("parent skip")),
+                _ => false,
+            }),
+            "expected parent-skip effect on decoy/noise.py"
         );
     }
 }
