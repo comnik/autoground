@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::core::{program_constants, Compiled};
+use crate::core::Compiled;
 use crate::edb::Store;
 use crate::navigator::{Arg, Demand, Navigator, Need};
 use crate::syntax::{Formula, Term};
@@ -57,10 +57,19 @@ pub struct Witness {
     pub assignment: Vec<(String, String)>,
 }
 
+/// A ground EDB atom the evaluator bottomed out on, with the judge's 3VL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdbAtom {
+    pub pred: String,
+    pub args: Vec<String>,
+    pub value: Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequireResult {
     pub value: Value,
     pub witness: Option<Witness>,
+    pub edb: Vec<EdbAtom>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,10 +91,13 @@ struct Engine<'a> {
     store: &'a mut Store,
     navigator: Option<&'a mut dyn Navigator>,
     demands: Vec<Demand>,
-    memo: HashMap<(String, Vec<String>), Value>,
+    memo: HashMap<(String, Vec<String>), (Value, Vec<EdbAtom>)>,
     stack: HashSet<(String, Vec<String>)>,
     last_exists_witness: Option<Witness>,
     last_forall_counterexample: Option<Witness>,
+    current_edb: Vec<EdbAtom>,
+    edb_seen: HashSet<(String, Vec<String>)>,
+    idb_leaf_stack: Vec<Vec<EdbAtom>>,
 }
 
 /// Evaluate every `require` against the store, asking the navigator for missing EDB.
@@ -103,6 +115,9 @@ pub fn run<'a>(
         stack: HashSet::new(),
         last_exists_witness: None,
         last_forall_counterexample: None,
+        current_edb: Vec::new(),
+        edb_seen: HashSet::new(),
+        idb_leaf_stack: Vec::new(),
     };
     if let Some(nav) = eng.navigator.as_mut() {
         nav.prepare(compiled);
@@ -111,13 +126,19 @@ pub fn run<'a>(
     for req in &compiled.requires {
         eng.last_exists_witness = None;
         eng.last_forall_counterexample = None;
+        eng.current_edb.clear();
+        eng.edb_seen.clear();
         let value = eng.eval(req, &HashMap::new());
         let witness = match value {
             Value::True => eng.last_exists_witness.clone(),
             Value::False => eng.last_forall_counterexample.clone(),
             Value::Unknown => None,
         };
-        requires.push(RequireResult { value, witness });
+        requires.push(RequireResult {
+            value,
+            witness,
+            edb: std::mem::take(&mut eng.current_edb),
+        });
     }
     let demands = eng.demands;
 
@@ -211,33 +232,17 @@ impl Engine<'_> {
         body: &Formula,
         env: &HashMap<String, String>,
     ) -> Value {
-        let domain = self.universe();
-        if domain.is_empty() {
-            return Value::True;
-        }
-
-        let assignments = cartesian(&domain, vars.len());
-        let mut saw_unknown = false;
-        for asg in assignments {
-            let mut env2 = env.clone();
-            let mut pairs = Vec::new();
-            for (v, val) in vars.iter().zip(asg.iter()) {
-                env2.insert(v.clone(), val.clone());
-                pairs.push((v.clone(), val.clone()));
+        let negated = Formula::Not(Box::new(body.clone()));
+        match self.eval_exists(vars, &negated, env) {
+            Value::True => {
+                self.last_forall_counterexample = self.last_exists_witness.take();
+                Value::False
             }
-            match self.eval(body, &env2) {
-                Value::False => {
-                    self.last_forall_counterexample = Some(Witness { assignment: pairs });
-                    return Value::False;
-                }
-                Value::True => {}
-                Value::Unknown => saw_unknown = true,
+            Value::False => {
+                self.last_exists_witness = None;
+                Value::True
             }
-        }
-        if saw_unknown {
-            Value::Unknown
-        } else {
-            Value::True
+            Value::Unknown => Value::Unknown,
         }
     }
 
@@ -255,38 +260,9 @@ impl Engine<'_> {
             &mut atoms,
         );
         for (pred, args) in atoms {
-            let mut demand_args = Vec::new();
-            let mut any_free = false;
-            let mut any_unresolved = false;
-            for t in &args {
-                match t {
-                    Term::Const(c) | Term::Typed { value: c, .. } => {
-                        demand_args.push(Arg::Bound(c.clone()))
-                    }
-                    Term::Var(v) if env.contains_key(v) => {
-                        demand_args.push(Arg::Bound(env[v].clone()));
-                    }
-                    Term::Var(v) if vars.iter().any(|x| x == v) => {
-                        demand_args.push(Arg::Free(v.clone()));
-                        any_free = true;
-                    }
-                    Term::Var(_) => {
-                        any_unresolved = true;
-                    }
-                }
-            }
-            if any_unresolved || !any_free {
+            let Some(demand_args) = self.generator_demand(&pred, &args, vars, env) else {
                 continue;
-            }
-            // file/1 and defines/2 (and File-first relations) are tests of a
-            // candidate, not generators. Generating from them would walk the
-            // whole repo (including decoy/).
-            if self.is_test_pred(&pred) {
-                continue;
-            }
-            if demand_args.iter().all(|a| matches!(a, Arg::Free(_))) {
-                continue;
-            }
+            };
             self.demand_and_fill(&pred, &demand_args, Need::Truth);
         }
     }
@@ -304,29 +280,36 @@ impl Engine<'_> {
             &self.compiled.defs,
             &mut atoms,
         );
-        let atoms: Vec<_> = atoms
-            .into_iter()
-            .filter(|(pred, _)| !self.is_test_pred(pred))
-            .collect();
-        if atoms.is_empty() {
-            return self.universe_closed(body);
-        }
-        atoms.iter().all(|(pred, args)| {
-            let pattern: Vec<Option<String>> = args
+        let mut covered = HashSet::new();
+        let mut any = false;
+        for (pred, args) in &atoms {
+            let Some(demand_args) = self.generator_demand(pred, args, vars, env) else {
+                continue;
+            };
+            any = true;
+            let pattern: Vec<Option<String>> = demand_args
                 .iter()
-                .map(|t| match t {
-                    Term::Const(c) | Term::Typed { value: c, .. } => Some(c.clone()),
-                    Term::Var(v) if env.contains_key(v) => env.get(v).cloned(),
-                    Term::Var(v) if vars.iter().any(|x| x == v) => None,
-                    Term::Var(_) => None,
+                .map(|a| match a {
+                    Arg::Bound(v) => Some(v.clone()),
+                    Arg::Free(_) => None,
                 })
                 .collect();
-            self.store.pattern_closed(pred, &pattern)
-        })
+            if !self.store.pattern_closed(pred, &pattern) {
+                continue;
+            }
+            for a in demand_args {
+                if let Arg::Free(v) = a {
+                    covered.insert(v);
+                }
+            }
+        }
+        if !any {
+            return self.universe_closed(body);
+        }
+        vars.iter().all(|v| covered.contains(v))
     }
 
-    /// Values for exists-vars taken from generator tuples (e.g. includes), not the
-    /// whole universe of model constants.
+    /// Values for exists-vars taken from generator tuples, not the forall universe.
     fn generated_domain(
         &self,
         vars: &[String],
@@ -342,7 +325,7 @@ impl Engine<'_> {
         );
         let mut values = HashSet::new();
         for (pred, args) in atoms {
-            if self.is_test_pred(&pred) {
+            if self.generator_demand(&pred, &args, vars, env).is_none() {
                 continue;
             }
             for row in self.store.facts_for(&pred) {
@@ -384,22 +367,29 @@ impl Engine<'_> {
             if resolved.iter().any(|a| a.is_none()) {
                 return Value::Unknown;
             }
+            let vars = def.vars.clone();
+            let body = def.body.clone();
             let ground: Vec<String> = resolved.into_iter().map(|a| a.unwrap()).collect();
             let key = (pred.to_string(), ground.clone());
-            if let Some(v) = self.memo.get(&key) {
-                return *v;
+            if let Some((v, leaves)) = self.memo.get(&key).cloned() {
+                for leaf in leaves {
+                    self.record_edb(&leaf.pred, leaf.args, leaf.value);
+                }
+                return v;
             }
             if !self.stack.insert(key.clone()) {
                 return Value::Unknown;
             }
             let mut env2 = HashMap::new();
-            for (var, val) in def.vars.iter().zip(ground.iter()) {
+            for (var, val) in vars.iter().zip(ground.iter()) {
                 env2.insert(var.clone(), val.clone());
             }
-            let v = self.eval(&def.body, &env2);
+            self.idb_leaf_stack.push(Vec::new());
+            let v = self.eval(&body, &env2);
+            let leaves = self.idb_leaf_stack.pop().unwrap_or_default();
             self.stack.remove(&key);
             if v != Value::Unknown {
-                self.memo.insert(key, v);
+                self.memo.insert(key, (v, leaves));
             }
             return v;
         }
@@ -407,29 +397,51 @@ impl Engine<'_> {
         // EDB
         if resolved.iter().all(|a| a.is_some()) {
             let ground: Vec<String> = resolved.into_iter().map(|a| a.unwrap()).collect();
-            if self.store.has_fact(pred, &ground) {
-                return Value::True;
-            }
-            self.demand_and_fill(
-                pred,
-                &ground
-                    .iter()
-                    .map(|g| Arg::Bound(g.clone()))
-                    .collect::<Vec<_>>(),
-                Need::Truth,
-            );
-            if self.store.has_fact(pred, &ground) {
-                return Value::True;
-            }
-            if self.store.is_closed_for(pred, &ground) {
-                return Value::False;
-            }
-            return Value::Unknown;
+            let value = if self.store.has_fact(pred, &ground) {
+                Value::True
+            } else {
+                self.demand_and_fill(
+                    pred,
+                    &ground
+                        .iter()
+                        .map(|g| Arg::Bound(g.clone()))
+                        .collect::<Vec<_>>(),
+                    Need::Truth,
+                );
+                if self.store.has_fact(pred, &ground) {
+                    Value::True
+                } else if self.store.is_closed_for(pred, &ground) {
+                    Value::False
+                } else {
+                    Value::Unknown
+                }
+            };
+            self.record_edb(pred, ground, value);
+            return value;
         }
 
-        // Free arguments: generation is handled by the enclosing exists,
-        // which iterates the universe. If we get here, a var was unbound.
+        // Free arguments: generation is handled by the enclosing exists.
         Value::Unknown
+    }
+
+    fn record_edb(&mut self, pred: &str, args: Vec<String>, value: Value) {
+        let key = (pred.to_string(), args.clone());
+        let atom = EdbAtom {
+            pred: pred.to_string(),
+            args,
+            value,
+        };
+        if self.edb_seen.insert(key) {
+            self.current_edb.push(atom.clone());
+        }
+        for frame in &mut self.idb_leaf_stack {
+            if !frame
+                .iter()
+                .any(|a| a.pred == atom.pred && a.args == atom.args)
+            {
+                frame.push(atom.clone());
+            }
+        }
     }
 
     fn demand_and_fill(&mut self, pred: &str, args: &[Arg], need: Need) {
@@ -462,35 +474,42 @@ impl Engine<'_> {
         }
     }
 
-    fn universe(&self) -> Vec<String> {
-        // v0: model constants, plus labels that acquired a binding. File paths
-        // and directory entities are not in the forall domain.
-        let mut s: HashSet<String> = program_constants(self.compiled).into_iter().collect();
-        for b in self.store.all_bindings() {
-            s.insert(b.constant);
+    /// An EDB atom generates exists-vars when every non-exists argument is
+    /// bound. Whether that pattern yields tuples is the navigator's decision.
+    fn generator_demand(
+        &self,
+        _pred: &str,
+        args: &[Term],
+        vars: &[String],
+        env: &HashMap<String, String>,
+    ) -> Option<Vec<Arg>> {
+        let mut demand_args = Vec::new();
+        let mut any_free = false;
+        for t in args {
+            match t {
+                Term::Const(c) | Term::Typed { value: c, .. } => {
+                    demand_args.push(Arg::Bound(c.clone()))
+                }
+                Term::Var(v) if env.contains_key(v) => {
+                    demand_args.push(Arg::Bound(env[v].clone()));
+                }
+                Term::Var(v) if vars.iter().any(|x| x == v) => {
+                    demand_args.push(Arg::Free(v.clone()));
+                    any_free = true;
+                }
+                Term::Var(_) => return None,
+            }
         }
-        let mut v: Vec<_> = s.into_iter().collect();
-        v.sort();
-        v
-    }
-
-    fn is_test_pred(&self, pred: &str) -> bool {
-        if pred.eq_ignore_ascii_case("file") || pred == "defines" {
-            return true;
+        if !any_free {
+            return None;
         }
-        let Some(d) = self.compiled.declarations.get(pred) else {
-            return false;
-        };
-        if d.slots.len() == 1 && is_file_sort(&d.slots[0]) {
-            return true;
-        }
-        d.slots.first().is_some_and(|s| is_file_sort(s))
+        Some(demand_args)
     }
 
     fn universe_closed(&self, body: &Formula) -> bool {
         let mut preds = HashSet::new();
         collect_edb_preds(body, &self.compiled.idb_preds, &mut preds);
-        // Unfold one level of IDB so closedness of depends_on follows its EDB.
+        // Unfold one level of IDB so closedness follows the body's EDB.
         for pred in self.compiled.idb_preds.iter() {
             if formula_uses(body, pred) {
                 if let Some(def) = self.compiled.defs.get(pred) {
@@ -503,10 +522,6 @@ impl Engine<'_> {
         }
         self.store.all_closed(&preds)
     }
-}
-
-fn is_file_sort(name: &str) -> bool {
-    name.eq_ignore_ascii_case("file")
 }
 
 fn formula_uses(f: &Formula, pred: &str) -> bool {
@@ -558,10 +573,6 @@ fn collect_edb_atoms(
     }
 }
 
-fn cartesian(domain: &[String], n: usize) -> Vec<Vec<String>> {
-    cartesian_rows(domain, n)
-}
-
 fn cartesian_rows(domain: &[String], n: usize) -> Vec<Vec<String>> {
     if n == 0 {
         return vec![Vec::new()];
@@ -600,28 +611,28 @@ mod tests {
         store.insert_fact("file", vec!["frontend/app.py".into()], "test");
         store.insert_fact("file", vec!["backend/api.py".into()], "test");
         store.insert_fact(
-            "includes",
-            vec!["Frontend".into(), "frontend/app.py".into()],
+            "belongs_to",
+            vec!["frontend/app.py".into(), "Frontend".into()],
+            "test",
+        );
+        store.insert_fact(
+            "belongs_to",
+            vec!["backend/api.py".into(), "Backend".into()],
             "test",
         );
         store.insert_fact(
             "includes",
-            vec!["Backend".into(), "backend/api.py".into()],
-            "test",
-        );
-        store.insert_fact(
-            "defines",
-            vec!["frontend/app.py".into(), "Backend".into()],
+            vec!["frontend/app.py".into(), "backend/api.py".into()],
             "test",
         );
         if cycle {
             store.insert_fact(
-                "defines",
-                vec!["backend/api.py".into(), "Frontend".into()],
+                "includes",
+                vec!["backend/api.py".into(), "frontend/app.py".into()],
                 "test",
             );
         }
-        for p in ["component", "file", "includes", "defines"] {
+        for p in ["component", "file", "includes", "belongs_to"] {
             store.close_pred(p);
         }
     }
@@ -646,7 +657,7 @@ mod tests {
     fn closed_empty_depends_on_acyclicity_is_true() {
         let c = layered();
         let mut store = Store::new();
-        for p in ["component", "file", "includes", "defines"] {
+        for p in ["component", "file", "includes", "belongs_to"] {
             store.close_pred(p);
         }
         let result = run(&c, &mut store, None);
@@ -717,23 +728,219 @@ mod tests {
                 "component",
                 vec![vec!["Frontend".into()], vec!["Backend".into()]],
             )
-            .with_pred("file", vec![vec!["frontend/app.py".into()]])
             .with_pred(
-                "includes",
-                vec![vec!["Frontend".into(), "frontend/app.py".into()]],
+                "file",
+                vec![
+                    vec!["frontend/app.py".into()],
+                    vec!["backend/api.py".into()],
+                ],
             )
             .with_pred(
-                "defines",
-                vec![vec!["frontend/app.py".into(), "Backend".into()]],
+                "belongs_to",
+                vec![
+                    vec!["frontend/app.py".into(), "Frontend".into()],
+                    vec!["backend/api.py".into(), "Backend".into()],
+                ],
+            )
+            .with_pred(
+                "includes",
+                vec![vec!["frontend/app.py".into(), "backend/api.py".into()]],
             )
             .closing("component")
             .closing("file")
             .closing("includes")
-            .closing("defines");
+            .closing("belongs_to");
         let result = run(&c, &mut store, Some(&mut nav));
         assert!(nav.log.iter().any(|d| d.pred == "component"));
         assert!(result.requires[0].value == Value::True);
         assert_eq!(result.requires[1].value, Value::True);
         assert!(!nav.log.iter().any(|d| format!("{:?}", d).contains("decoy")));
+    }
+
+    #[test]
+    fn require_records_ground_edb_leaves() {
+        let src = r#"(require (and (component "Frontend") (component "Missing")))"#;
+        let c = compile(&parse(src).unwrap()).unwrap();
+        let mut store = Store::new();
+        store.insert_fact("component", vec!["Frontend".into()], "test");
+        store.close_pred("component");
+        let result = run(&c, &mut store, None);
+        assert_eq!(result.requires[0].value, Value::False);
+        let edb = &result.requires[0].edb;
+        assert_eq!(edb.len(), 2, "{edb:?}");
+        assert_eq!(edb[0].pred, "component");
+        assert_eq!(edb[0].args, vec!["Frontend".to_string()]);
+        assert_eq!(edb[0].value, Value::True);
+        assert_eq!(edb[1].args, vec!["Missing".to_string()]);
+        assert_eq!(edb[1].value, Value::False);
+    }
+
+    #[test]
+    fn idb_memo_replays_edb_leaves_on_later_require() {
+        let src = r#"
+(def ok [x] (component x))
+(require (ok "Frontend"))
+(require (ok "Frontend"))
+"#;
+        let c = compile(&parse(src).unwrap()).unwrap();
+        let mut store = Store::new();
+        store.insert_fact("component", vec!["Frontend".into()], "test");
+        store.close_pred("component");
+        let result = run(&c, &mut store, None);
+        assert_eq!(result.requires[0].edb.len(), 1);
+        assert_eq!(result.requires[1].edb.len(), 1);
+        assert_eq!(result.requires[1].edb[0].pred, "component");
+        assert_eq!(result.requires[1].edb[0].value, Value::True);
+    }
+
+    #[test]
+    fn depends_on_generates_files_from_belongs_to() {
+        let c = layered();
+        let mut store = Store::new();
+        store.insert_fact("component", vec!["Frontend".into()], "test");
+        store.insert_fact("component", vec!["Backend".into()], "test");
+        store.close_pred("component");
+        let mut nav = ScriptedNavigator::new()
+            .with_pred(
+                "belongs_to",
+                vec![
+                    vec!["frontend/app.py".into(), "Frontend".into()],
+                    vec!["backend/api.py".into(), "Backend".into()],
+                ],
+            )
+            .with_pred(
+                "file",
+                vec![
+                    vec!["frontend/app.py".into()],
+                    vec!["backend/api.py".into()],
+                ],
+            )
+            .with_pred(
+                "includes",
+                vec![vec!["frontend/app.py".into(), "backend/api.py".into()]],
+            )
+            .closing("belongs_to")
+            .closing("file")
+            .closing("includes");
+        let result = run(&c, &mut store, Some(&mut nav));
+        assert!(
+            nav.log.iter().any(|d| d.pred == "belongs_to"
+                && d.args.iter().any(|a| matches!(a, Arg::Free(_)))),
+            "expected a belongs_to generator demand, got {:?}",
+            nav.log
+        );
+        assert_eq!(result.requires[1].value, Value::True);
+        assert!(result.requires[1].edb.iter().any(|a| {
+            a.pred == "includes"
+                && a.args == ["frontend/app.py".to_string(), "backend/api.py".to_string()]
+                && a.value == Value::True
+        }));
+    }
+
+    #[test]
+    fn exists_ranges_over_component() {
+        let src = r#"
+(declare component "{String} is a component in the codebase")
+(require (exists [c] (component c)))
+"#;
+        let c = compile(&parse(src).unwrap()).unwrap();
+        let mut store = Store::new();
+        let mut nav = ScriptedNavigator::new()
+            .with_pred(
+                "component",
+                vec![vec!["Frontend".into()], vec!["Backend".into()]],
+            )
+            .closing("component");
+        let result = run(&c, &mut store, Some(&mut nav));
+        assert_eq!(result.outcome, Outcome::Grounded);
+        assert_eq!(result.requires[0].value, Value::True);
+        assert!(
+            nav.log
+                .iter()
+                .any(|d| d.pred == "component" && d.args.iter().any(|a| matches!(a, Arg::Free(_)))),
+            "expected a free component demand, got {:?}",
+            nav.log
+        );
+        let w = result.requires[0].witness.as_ref().expect("witness");
+        assert_eq!(w.assignment[0].0, "c");
+        assert!(w.assignment[0].1 == "Backend" || w.assignment[0].1 == "Frontend");
+    }
+
+    #[test]
+    fn exists_over_unanswered_file_stays_unknown() {
+        let src = r#"(require (exists [f] (file f)))"#;
+        let c = compile(&parse(src).unwrap()).unwrap();
+        let mut store = Store::new();
+        let result = run(&c, &mut store, None);
+        assert_eq!(result.requires[0].value, Value::Unknown);
+        assert_eq!(result.outcome, Outcome::Ungrounded);
+    }
+
+    fn every_component_has_a_file() -> Compiled {
+        let src = r#"
+(declare component "{String} is a component")
+(declare file "{String} is a file")
+(declare belongs_to "{file} belongs to {component}")
+(require
+  (forall [c]
+    (implies
+      (component c)
+      (exists [f]
+        (and
+          (file f)
+          (belongs_to f c))))))
+"#;
+        compile(&parse(src).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn forall_without_constants_is_unknown_while_edb_is_open() {
+        let c = every_component_has_a_file();
+        let mut store = Store::new();
+        let result = run(&c, &mut store, None);
+        assert_eq!(result.requires[0].value, Value::Unknown);
+        assert_eq!(result.outcome, Outcome::Ungrounded);
+    }
+
+    #[test]
+    fn forall_generated_components_need_a_member_file() {
+        let c = every_component_has_a_file();
+        let mut store = Store::new();
+        let mut nav = ScriptedNavigator::new()
+            .with_pred("component", vec![vec!["Frontend".into()]])
+            .with_pred("file", vec![vec!["ui/app.py".into()]])
+            .with_pred(
+                "belongs_to",
+                vec![vec!["ui/app.py".into(), "Frontend".into()]],
+            )
+            .closing("component")
+            .closing("file")
+            .closing("belongs_to");
+        let result = run(&c, &mut store, Some(&mut nav));
+        assert_eq!(result.requires[0].value, Value::True);
+        assert_eq!(result.outcome, Outcome::Grounded);
+        assert!(
+            nav.log
+                .iter()
+                .any(|d| d.pred == "component" && d.args.iter().any(|a| matches!(a, Arg::Free(_)))),
+            "forall should generate components, got {:?}",
+            nav.log
+        );
+    }
+
+    #[test]
+    fn forall_fails_when_a_component_has_no_file() {
+        let c = every_component_has_a_file();
+        let mut store = Store::new();
+        let mut nav = ScriptedNavigator::new()
+            .with_pred("component", vec![vec!["Frontend".into()]])
+            .closing("component")
+            .closing("file")
+            .closing("belongs_to");
+        let result = run(&c, &mut store, Some(&mut nav));
+        assert_eq!(result.requires[0].value, Value::False);
+        assert_eq!(result.outcome, Outcome::Violated);
+        let w = result.requires[0].witness.as_ref().expect("counterexample");
+        assert_eq!(w.assignment, vec![("c".into(), "Frontend".into())]);
     }
 }

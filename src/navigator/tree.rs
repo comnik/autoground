@@ -10,6 +10,7 @@ use crate::navigator::walk::{
     is_noise_name, list_dir, list_files_recursive, read_trimmed, repo_join,
 };
 use crate::navigator::{Answer, Arg, Demand, Navigator, Need};
+use crate::syntax::template::is_builtin_sort;
 use crate::syntax::{verbalize_atom, Declare, Term};
 
 const MAX_LISTINGS: usize = 32;
@@ -69,12 +70,24 @@ impl TreeNavigator {
         }
     }
 
-    fn answer_locate(&mut self, demand: &Demand, _store: &Store) -> Answer {
+    fn answer_locate(&mut self, demand: &Demand, store: &Store) -> Answer {
         let pred = demand.pred.as_str();
         let (args, free) = match bound_at(&demand.args, 0) {
             Some(label) => (vec![label.to_string()], false),
             None => (Vec::new(), true),
         };
+        if free {
+            let mut tuples = store.facts_for(pred);
+            if !tuples.is_empty() {
+                tuples.sort();
+                return Answer {
+                    tuples,
+                    close: true,
+                    bindings: Vec::new(),
+                    source: format!("nav:{pred}"),
+                };
+            }
+        }
         let located = self.locate(pred, &args, demand.need);
         let source = format!("nav:{pred}");
         let answer = match located {
@@ -136,27 +149,39 @@ impl TreeNavigator {
         answer
     }
 
-    fn answer_includes(&mut self, demand: &Demand, store: &Store) -> Answer {
-        let Some(label) = bound_at(&demand.args, 0) else {
+    /// Files that sit under a bound component: `belongs_to(?f, "Frontend")`
+    /// or the older `includes("Frontend", ?f)`.
+    fn answer_membership(&mut self, demand: &Demand, store: &Store) -> Answer {
+        let source = format!("nav:{}", demand.pred);
+        let Some((file_i, comp_i)) = self.membership_slots(&demand.pred) else {
             return Answer {
-                source: "nav:includes".into(),
+                source,
                 ..Answer::default()
             };
         };
-        if let Some(file) = bound_at(&demand.args, 1) {
-            let member = store
-                .bindings_for(label)
-                .iter()
-                .any(|root| file == root || file.starts_with(&format!("{root}/")));
+        let Some(label) = bound_at(&demand.args, comp_i) else {
+            return Answer {
+                source,
+                ..Answer::default()
+            };
+        };
+        if let Some(file) = bound_at(&demand.args, file_i) {
+            let member = is_member(store, label, file);
             return Answer {
                 tuples: if member {
-                    vec![vec![label.to_string(), file.to_string()]]
+                    vec![membership_tuple(
+                        demand.args.len(),
+                        file_i,
+                        comp_i,
+                        file,
+                        label,
+                    )]
                 } else {
                     Vec::new()
                 },
                 close: true,
                 bindings: Vec::new(),
-                source: "nav:includes".into(),
+                source,
             };
         }
         let mut tuples = Vec::new();
@@ -168,12 +193,24 @@ impl TreeNavigator {
         for entity in bindings {
             let path = repo_join(&self.root, &entity);
             if path.is_file() {
-                tuples.push(vec![label.to_string(), entity]);
+                tuples.push(membership_tuple(
+                    demand.args.len(),
+                    file_i,
+                    comp_i,
+                    &entity,
+                    label,
+                ));
             } else if path.is_dir() {
                 match list_files_recursive(&self.root, &entity) {
                     Ok(files) => {
                         for f in files {
-                            tuples.push(vec![label.to_string(), f]);
+                            tuples.push(membership_tuple(
+                                demand.args.len(),
+                                file_i,
+                                comp_i,
+                                &f,
+                                label,
+                            ));
                         }
                     }
                     Err(_) => closed = false,
@@ -186,7 +223,7 @@ impl TreeNavigator {
             tuples,
             close: closed,
             bindings: Vec::new(),
-            source: "nav:includes".into(),
+            source,
         }
     }
 
@@ -224,31 +261,27 @@ impl TreeNavigator {
             };
         }
         // Membership is `includes`. A file that sits under y does not
-        // *depend on* y; treating that as defines(f, y) makes depends_on(y, y).
-        if pred == "defines" {
-            if let Some(target) = args.get(1) {
-                if is_member(store, target, file) {
-                    self.trace.push(GroundStep::Document {
-                        pred: pred.to_string(),
-                        args: args.clone(),
-                        path: file.to_string(),
-                        judgement: crate::navigator::judge::DocumentJudgement {
-                            verdict: crate::navigator::judge::DocumentVerdict::False,
-                            confidence: 1.0,
-                        },
-                        preview: String::new(),
-                        note: format!(
-                            "member of {target}; defines is a dependency, not membership"
-                        ),
-                        exchanges: Vec::new(),
-                    });
-                    return Answer {
-                        tuples: Vec::new(),
-                        close: true,
-                        bindings: Vec::new(),
-                        source,
-                    };
-                }
+        // *depend on* y; treating that as belongs_to(f, y) makes depends_on(y, y).
+        if let Some(target) = args.get(1) {
+            if is_member(store, target, file) {
+                self.trace.push(GroundStep::Document {
+                    pred: pred.to_string(),
+                    args: args.clone(),
+                    path: file.to_string(),
+                    judgement: crate::navigator::judge::DocumentJudgement {
+                        verdict: crate::navigator::judge::DocumentVerdict::False,
+                        confidence: 1.0,
+                    },
+                    preview: String::new(),
+                    note: format!("member of {target}; membership is includes, not {pred}"),
+                    exchanges: Vec::new(),
+                });
+                return Answer {
+                    tuples: Vec::new(),
+                    close: true,
+                    bindings: Vec::new(),
+                    source,
+                };
             }
         }
         let (body, _trimmed) = match read_trimmed(&self.root, file, BODY_BUDGET) {
@@ -325,6 +358,21 @@ impl TreeNavigator {
                 source,
             }
         }
+    }
+
+    fn membership_slots(&self, pred: &str) -> Option<(usize, usize)> {
+        if let Some(d) = self.declarations.get(pred) {
+            let file_i = d.slots.iter().position(|s| is_file_sort(s))?;
+            let comp_i = d
+                .slots
+                .iter()
+                .position(|s| !is_file_sort(s) && !is_builtin_sort(s))?;
+            return Some((file_i, comp_i));
+        }
+        if pred == "includes" {
+            return Some((1, 0));
+        }
+        None
     }
 
     fn file_arg_index(&self, pred: &str, args: &[String]) -> Option<usize> {
@@ -415,6 +463,9 @@ impl TreeNavigator {
                         if child.is_dir {
                             frontier.push((child.rel_path.clone(), depth + 1));
                             effects.push(format!("{}: investigate → list", child.name));
+                            if args.is_empty() {
+                                hits.push(child.rel_path.clone());
+                            }
                         } else {
                             open_files.push(child.rel_path.clone());
                             effects.push(format!("{}: investigate → open", child.name));
@@ -533,6 +584,27 @@ fn is_member(store: &Store, label: &str, file: &str) -> bool {
         .any(|root| file == root || file.starts_with(&format!("{root}/")))
 }
 
+fn is_file_sort(name: &str) -> bool {
+    name.eq_ignore_ascii_case("file")
+}
+
+fn membership_tuple(
+    arity: usize,
+    file_i: usize,
+    comp_i: usize,
+    file: &str,
+    label: &str,
+) -> Vec<String> {
+    let mut row = vec![String::new(); arity];
+    if file_i < arity {
+        row[file_i] = file.to_string();
+    }
+    if comp_i < arity {
+        row[comp_i] = label.to_string();
+    }
+    row
+}
+
 fn bound_at<'a>(args: &'a [Arg], i: usize) -> Option<&'a str> {
     match args.get(i) {
         Some(Arg::Bound(s)) => Some(s.as_str()),
@@ -563,8 +635,10 @@ impl Navigator for TreeNavigator {
     fn answer(&mut self, demand: &Demand, store: &Store) -> Answer {
         match demand.pred.as_str() {
             "file" | "File" => self.answer_file(demand),
-            "includes" => self.answer_includes(demand, store),
             _ if demand.args.len() <= 1 => self.answer_locate(demand, store),
+            _ if self.membership_slots(&demand.pred).is_some() => {
+                self.answer_membership(demand, store)
+            }
             _ => self.answer_relation(demand, store),
         }
     }

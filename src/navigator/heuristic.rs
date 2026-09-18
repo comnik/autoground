@@ -80,11 +80,16 @@ impl Judge for HeuristicJudge {
 fn document_defines(state: &DocumentState) -> DocumentJudgement {
     let target = state.args.get(1).map(|s| s.as_str()).unwrap_or("");
     let mut names = aliases(target);
+    names.extend(path_import_names(target));
     for (constant, entity) in &state.bindings {
         if constant == target {
             if let Some(base) = entity.rsplit('/').next() {
                 names.push(normalize(base));
             }
+        }
+        if target == entity || target.starts_with(&format!("{entity}/")) {
+            names.extend(aliases(constant));
+            names.extend(path_import_names(entity));
         }
     }
     names.sort();
@@ -171,6 +176,28 @@ fn normalize(s: &str) -> String {
         .collect()
 }
 
+fn path_import_names(path: &str) -> Vec<String> {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let no_ext = match trimmed.rfind('.') {
+        Some(i) if i > 0 && !trimmed[..i].contains('/') => &trimmed[..i],
+        Some(i) if i > trimmed.rfind('/').unwrap_or(0) => &trimmed[..i],
+        _ => trimmed,
+    };
+    let mut names = vec![no_ext.replace('/', ".")];
+    if let Some(stem) = no_ext.rsplit('/').next() {
+        if stem != "__init__" {
+            names.push(stem.to_string());
+        }
+    }
+    if let Some((parent, _)) = no_ext.split_once('/') {
+        names.push(parent.to_string());
+    }
+    names
+}
+
 fn aliases(label: &str) -> Vec<String> {
     let n = normalize(label);
     let mut out = vec![n.clone()];
@@ -213,7 +240,21 @@ fn import_mentions(body: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::navigator::judge::Child;
+    use crate::navigator::judge::{Child, DocumentState, DocumentVerdict};
+
+    #[test]
+    fn file_import_mentions_module_path() {
+        let state = DocumentState {
+            pred: "includes".into(),
+            args: vec!["ui/app.py".into(), "api/client.py".into()],
+            path: "ui/app.py".into(),
+            body: "from api import client\n".into(),
+            bindings: vec![("Backend".into(), "api/client.py".into())],
+            verbalization: String::new(),
+        };
+        let j = document_defines(&state);
+        assert_eq!(j.verdict, DocumentVerdict::True);
+    }
 
     #[test]
     fn frontend_locks_directory() {

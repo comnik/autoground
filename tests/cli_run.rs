@@ -33,7 +33,26 @@ fn run_prints_outcome_bindings_and_trace_path() {
     assert_eq!(code, 0);
     assert!(out.contains("GROUNDED"), "{out}");
     assert!(out.contains("\"Frontend\""), "{out}");
-    assert!(out.contains("require 0: true"), "{out}");
+    assert!(
+        out.contains("(require\n  (and\n    (component \"Frontend\")"),
+        "{out}"
+    );
+    assert!(
+        out.contains("(component \"Frontend\")") && out.contains("proved"),
+        "{out}"
+    );
+    assert!(
+        out.contains("(require\n  (depends_on \"Frontend\" \"Backend\"))"),
+        "{out}"
+    );
+    assert!(
+        out.contains("(includes \"frontend/app.py\"") && out.contains("proved"),
+        "{out}"
+    );
+    assert!(
+        out.contains("(belongs_to \"frontend/app.py\" \"Frontend\")"),
+        "{out}"
+    );
     let path = trace_path(&out);
     assert!(
         path.starts_with("/tmp/autoground/trace-"),

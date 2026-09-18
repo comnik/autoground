@@ -24,7 +24,7 @@ fn layered_ag_verbalizes_component() {
         "expected component verbalization, got {lines:?}"
     );
     assert!(
-        lines.iter().any(|l| l.contains("(partially) defines")),
-        "expected defines verbalization, got {lines:?}"
+        lines.iter().any(|l| l.contains("belongs to")),
+        "expected belongs_to verbalization, got {lines:?}"
     );
 }

@@ -75,7 +75,7 @@
     {"pred": "component", "args": ["Frontend"], "path": "ui/app.py", "verdict": "true", "confidence": 0.85},
     {"pred": "component", "args": ["Backend"], "path": "server/worker.py", "verdict": "true", "confidence": 0.85},
     {"pred": "component", "args": ["Backend"], "path": "decoy/noise.py", "verdict": "false", "confidence": 0.21},
-    {"pred": "defines", "args": ["api/client.py", "Backend"], "path": "api/client.py", "verdict": "true", "confidence": 0.66},
-    {"pred": "defines", "args": ["api/client.py", "Frontend"], "path": "api/client.py", "verdict": "true", "confidence": 0.75}
+    {"pred": "belongs_to", "args": ["api/client.py", "Backend"], "path": "api/client.py", "verdict": "true", "confidence": 0.66},
+    {"pred": "belongs_to", "args": ["api/client.py", "Frontend"], "path": "api/client.py", "verdict": "true", "confidence": 0.75}
   ]
 }

@@ -291,10 +291,13 @@ mod tests {
         assert!(c.edb_preds.contains("component"));
         assert!(c.edb_preds.contains("file"));
         assert!(c.edb_preds.contains("includes"));
-        assert!(c.edb_preds.contains("defines"));
+        assert!(c.edb_preds.contains("belongs_to"));
         assert_eq!(c.requires.len(), 4);
         assert!(c.declarations.contains_key("component"));
-        assert_eq!(c.declarations["defines"].slots, vec!["file", "component"]);
+        assert_eq!(
+            c.declarations["belongs_to"].slots,
+            vec!["file", "component"]
+        );
     }
 
     #[test]

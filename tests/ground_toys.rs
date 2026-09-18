@@ -199,3 +199,31 @@ fn toy_file_binds_app_js() {
         vec!["src/api.js".to_string()]
     );
 }
+
+#[test]
+fn forall_components_have_a_file_on_toy_split() {
+    let src = r#"
+(declare component "{String} is a component in the codebase")
+(declare file "{String} is a file in the codebase")
+(declare belongs_to "{file} belongs to {component}")
+(require
+  (forall [c]
+    (implies
+      (component c)
+      (exists [f]
+        (and
+          (file f)
+          (belongs_to f c))))))
+"#;
+    let compiled = compile(&parse(src).unwrap()).unwrap();
+    let mut store = Store::new();
+    let mut nav = TreeNavigator::heuristic("examples/toy-split");
+    let result = run(&compiled, &mut store, Some(&mut nav));
+    assert_eq!(result.outcome, Outcome::Grounded);
+    assert_eq!(result.requires[0].value, autoground::eval::Value::True);
+    assert!(
+        !store.facts_for("component").is_empty(),
+        "forall should generate components, got {:?}",
+        store.facts_for("component")
+    );
+}

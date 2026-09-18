@@ -1,6 +1,6 @@
 (declare component "{String} is a component in the codebase")
 (declare file "{String} is a file in the codebase")
-(declare includes "{component} includes {file}")
+(declare includes "{file} includes or imports {file}")
 (declare belongs_to "{file} belongs to {component}")
 
 (require
@@ -15,11 +15,13 @@
     (component x)
     (component y)
     (or
-      (exists [f]
+      (exists [f1 f2]
         (and
-          (file f)
-          (includes x f)
-          (belongs_to f y))))))
+          (file f1)
+          (file f2)
+          (belongs_to f1 x)
+          (belongs_to f2 y)
+          (includes f1 f2))))))
 
 ;; A relationship `depends_on` connecting the two components.
 (require
