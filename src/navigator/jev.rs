@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashSet};
 use std::time::SystemTime;
 
 use serde_json::{json, Value};
@@ -6,6 +7,7 @@ use super::judge::{
     Child, ChildChoice, DocumentAnswer, DocumentJudgement, DocumentState, DocumentVerdict, Judge,
     JudgeError, JudgeExchange, ListingState, Transition, LISTING_CHOICE_BUDGET,
 };
+use super::walk::parent_dir;
 
 const DEFAULT_BASE: &str = "https://api.typesafe.ai";
 const DEFAULT_MODEL: &str = "jev-latest";
@@ -277,7 +279,7 @@ pub fn listing_request(
                     "Should we look in {path} for proof or disproof of the following statement: {statement}"
                 ),
                 "criteria": {
-                    "skip": "Do not look here, or in anything nested under this path. The name, path, and directory tree show this is unrelated.",
+                    "skip": "Do not look here, or in anything nested under this path. The name, path, and listing tree show this is unrelated.",
                     "investigate": "Look here. Nested paths already in this listing are used when a directory is investigated; files are opened and judged.",
                 }
             }),
@@ -293,51 +295,71 @@ pub fn listing_request(
             },
             "directory": state.dir,
             "tree": listing_tree(&state.children),
+            "children": children_by_question(chunk, id_base),
         },
         "questions": questions,
     })
 }
 
-/// Nested directory tree for listing state. Directories are objects, files are
-/// `null`. Sample names of a directory appear only when that child was not packed.
+/// Parent directory → child names. Directory names end with `/`.
+/// Sample names appear only when that child was not packed.
 fn listing_tree(children: &[Child]) -> Value {
-    let mut root = serde_json::Map::new();
+    let mut dirs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let packed: HashSet<&str> = children.iter().map(|c| c.rel_path.as_str()).collect();
     for child in children {
-        insert_node(&mut root, &split_rel(&child.rel_path), child.is_dir);
+        dirs.entry(dir_key(parent_dir(&child.rel_path)))
+            .or_default()
+            .push(entry_name(child));
     }
     for child in children {
         if !child.is_dir {
             continue;
         }
+        let key = dir_key(Some(&child.rel_path));
+        let entries = dirs.entry(key).or_default();
         for name in &child.sample {
             let rel = if child.rel_path.is_empty() {
                 name.clone()
             } else {
                 format!("{}/{name}", child.rel_path.trim_end_matches('/'))
             };
-            insert_node(&mut root, &split_rel(&rel), false);
+            if packed.contains(rel.as_str()) {
+                continue;
+            }
+            if entries.iter().any(|e| e.trim_end_matches('/') == name) {
+                continue;
+            }
+            entries.push(name.clone());
         }
     }
-    Value::Object(root)
+    for names in dirs.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    json!(dirs)
 }
 
-fn split_rel(rel: &str) -> Vec<&str> {
-    rel.split('/').filter(|s| !s.is_empty()).collect()
+fn children_by_question(chunk: &[Child], id_base: usize) -> Value {
+    let mut map = serde_json::Map::new();
+    for (i, child) in chunk.iter().enumerate() {
+        map.insert(format!("c{}", id_base + i), json!(listing_path(child)));
+    }
+    Value::Object(map)
 }
 
-fn insert_node(map: &mut serde_json::Map<String, Value>, parts: &[&str], is_dir: bool) {
-    let Some((first, rest)) = parts.split_first() else {
-        return;
-    };
-    if rest.is_empty() && !is_dir {
-        map.entry((*first).to_string()).or_insert(Value::Null);
-        return;
+fn dir_key(parent: Option<&str>) -> String {
+    match parent {
+        Some(p) if !p.is_empty() => format!("{}/", p.trim_end_matches('/')),
+        _ => "/".into(),
     }
-    let child = map.entry((*first).to_string()).or_insert_with(|| json!({}));
-    if !child.is_object() {
-        *child = json!({});
+}
+
+fn entry_name(child: &Child) -> String {
+    if child.is_dir {
+        format!("{}/", child.name.trim_end_matches('/'))
+    } else {
+        child.name.clone()
     }
-    insert_node(child.as_object_mut().unwrap(), rest, is_dir);
 }
 
 pub fn investigation_request(model: &str, state: &DocumentState) -> Value {
@@ -533,13 +555,15 @@ mod tests {
         assert_eq!(body["questions"]["c0"]["type"], "choice");
         assert_eq!(body["questions"]["c1"]["type"], "choice");
         assert_eq!(body["questions"]["c2"]["type"], "choice");
-        assert!(body["state"].get("children").is_none());
+        assert_eq!(body["state"]["children"]["c0"], "frontend/");
+        assert_eq!(body["state"]["children"]["c1"], "decoy/");
+        assert_eq!(body["state"]["children"]["c2"], "app.py");
         assert_eq!(
             body["state"]["tree"],
             json!({
-                "frontend": { "app.py": null },
-                "decoy": { "app.py": null },
-                "app.py": null,
+                "/": ["app.py", "decoy/", "frontend/"],
+                "decoy/": ["app.py"],
+                "frontend/": ["app.py"],
             })
         );
         assert_eq!(
@@ -589,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_tree_nests_packed_paths_without_duplicate_samples() {
+    fn listing_tree_indexes_dirs_and_keeps_unpacked_samples() {
         let children = vec![
             Child {
                 name: "api".into(),
@@ -619,8 +643,9 @@ mod tests {
         assert_eq!(
             listing_tree(&children),
             json!({
-                "api": { "client.py": null, "handlers.py": null },
-                "src": { "frontend": null, "lib": null },
+                "/": ["api/", "src/"],
+                "api/": ["client.py", "handlers.py"],
+                "src/": ["frontend", "lib"],
             })
         );
     }
