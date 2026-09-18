@@ -28,6 +28,8 @@ fn run_prints_header_requires_and_trace_path() {
         "examples/layered.ag",
         "--repo",
         "examples/toy-layered",
+        "--judge",
+        "heuristic",
     ]);
     assert_eq!(err, "", "{out}");
     assert_eq!(code, 0);
@@ -70,17 +72,54 @@ fn run_prints_header_requires_and_trace_path() {
 }
 
 #[test]
+fn run_defaults_repo_to_cwd() {
+    let out = bin()
+        .current_dir("examples/toy-layered")
+        .args(["run", "../layered.ag", "--judge", "heuristic"])
+        .output()
+        .expect("run autoground");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let code = out.status.code().unwrap_or(1);
+    assert_eq!(stderr.as_ref(), "", "{stdout}");
+    assert_eq!(code, 0);
+    assert!(stdout.starts_with("GROUNDED\n"), "{stdout}");
+}
+
+#[test]
 fn run_accepts_inline_model_source() {
     let (out, err, code) = stdout(&[
         "run",
         r#"(require (component "Frontend"))"#,
         "--repo",
         "examples/toy-layered",
+        "--judge",
+        "heuristic",
     ]);
     assert_eq!(err, "", "{out}");
     assert_eq!(code, 0);
     assert!(out.contains("GROUNDED"), "{out}");
     assert!(out.contains("trace: /tmp/autoground/"), "{out}");
+}
+
+#[test]
+fn run_defaults_to_jev_judge() {
+    let out = bin()
+        .env_remove("TYPESAFE_API_KEY")
+        .args([
+            "run",
+            r#"(require (component "Frontend"))"#,
+            "--repo",
+            "examples/toy-layered",
+        ])
+        .output()
+        .expect("run autoground");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let code = out.status.code().unwrap_or(1);
+    assert_eq!(code, 3, "{stdout}{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
 }
 
 #[test]

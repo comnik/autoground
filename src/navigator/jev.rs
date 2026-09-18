@@ -212,16 +212,31 @@ pub fn listing_request(
     chunk: &[Child],
     id_base: usize,
 ) -> Value {
-    let atom = atom_text(&state.pred, &state.args, &state.verbalization);
+    let statement = atom_text(&state.pred, &state.args, &state.verbalization);
     let mut questions = serde_json::Map::new();
-    for i in 0..chunk.len() {
+    let mut children = serde_json::Map::new();
+    for (i, child) in chunk.iter().enumerate() {
+        let id = format!("c{}", id_base + i);
+        let loc = format!("children.{id}");
+        children.insert(
+            id.clone(),
+            json!({
+                "name": child.name,
+                "path": child.rel_path,
+                "is_dir": child.is_dir,
+                "sample": child.sample,
+            }),
+        );
         questions.insert(
-            format!("c{}", id_base + i),
+            id,
             json!({
                 "type": "choice",
-                "instructions": format!(
-                    "Does this location contain proof or disproof for the following statement: {atom}"
-                ),
+                "instructions": {
+                    "question": format!(
+                        "Does `{loc}` contain proof or disproof for `atom.statement`?"
+                    ),
+                    "inspect": loc,
+                },
                 "criteria": {
                     "skip": "This location does not contain proof or disproof.",
                     "investigate": "This location contains proof or disproof. Directories are listed; files are opened.",
@@ -232,14 +247,13 @@ pub fn listing_request(
     json!({
         "model": model,
         "state": {
-            "atom": { "pred": state.pred, "args": state.args },
+            "atom": {
+                "pred": state.pred,
+                "args": state.args,
+                "statement": statement,
+            },
             "directory": state.dir,
-            "children": state.children.iter().map(|c| json!({
-                "name": c.name,
-                "path": c.rel_path,
-                "is_dir": c.is_dir,
-                "sample": c.sample,
-            })).collect::<Vec<_>>(),
+            "children": children,
         },
         "questions": questions,
     })
@@ -380,25 +394,44 @@ mod tests {
             pred: "component".into(),
             args: vec!["Frontend".into()],
             dir: "".into(),
-            children: vec![child("frontend", true), child("decoy", true)],
+            children: vec![
+                child("frontend", true),
+                child("decoy", true),
+                child("app.py", false),
+            ],
             verbalization: "\"Frontend\" is a component in the codebase".into(),
         };
         let body = listing_request("jev-latest", &state, &state.children, 0);
         assert_eq!(body["model"], "jev-latest");
         assert_eq!(body["questions"]["c0"]["type"], "choice");
         assert_eq!(body["questions"]["c1"]["type"], "choice");
-        assert!(body["state"]["children"].as_array().unwrap().len() == 2);
-        let instr = body["questions"]["c0"]["instructions"].as_str().unwrap();
+        assert_eq!(body["questions"]["c2"]["type"], "choice");
+        assert_eq!(body["state"]["children"]["c0"]["path"], "frontend");
+        assert_eq!(body["state"]["children"]["c1"]["path"], "decoy");
+        assert_eq!(body["state"]["children"]["c2"]["path"], "app.py");
         assert_eq!(
-            instr,
-            "Does this location contain proof or disproof for the following statement: \"Frontend\" is a component in the codebase"
+            body["state"]["atom"]["statement"],
+            "\"Frontend\" is a component in the codebase"
+        );
+        let instr = &body["questions"]["c0"]["instructions"];
+        assert_eq!(
+            instr["question"],
+            "Does `children.c0` contain proof or disproof for `atom.statement`?"
+        );
+        assert_eq!(instr["inspect"], "children.c0");
+        assert_eq!(
+            body["questions"]["c1"]["instructions"]["inspect"],
+            "children.c1"
+        );
+        assert_eq!(
+            body["questions"]["c2"]["instructions"]["inspect"],
+            "children.c2"
         );
         let criteria = body["questions"]["c0"]["criteria"].as_object().unwrap();
         assert!(criteria.contains_key("skip"));
         assert!(criteria.contains_key("investigate"));
         assert!(!criteria.contains_key("unknown"));
-        assert!(!instr.contains("Listing sample"));
-        assert_eq!(body["state"]["children"][0]["sample"], json!(["app.py"]));
+        assert_eq!(body["state"]["children"]["c0"]["sample"], json!(["app.py"]));
         assert!(!body["state"].get("body").is_some());
     }
 

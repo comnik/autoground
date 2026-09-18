@@ -20,16 +20,16 @@ struct Cli {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum JudgeKind {
-    /// Local stand-in (default). No API key.
-    Heuristic,
-    /// TypeSafe Jev via TYPESAFE_API_KEY.
+    /// TypeSafe Jev via TYPESAFE_API_KEY (default).
     Jev,
+    /// Local stand-in. No API key.
+    Heuristic,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Parse a model and evaluate its requires against EDB, optionally grounding
-    /// from a repository via the navigator.
+    /// Parse a model and evaluate its requires against EDB, grounding from a
+    /// repository via the navigator (default: the current directory).
     ///
     /// Prints the evaluation result and grounding. On a TTY, left/right opens
     /// the step-by-step debug view. A judge recording is always written under
@@ -42,9 +42,9 @@ enum Commands {
         /// Path to a `.ag` model, or a model source string.
         model: String,
         /// Repository to ground against.
-        #[arg(long)]
-        repo: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = JudgeKind::Heuristic)]
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
         judge: JudgeKind,
         #[arg(long)]
         fixtures: Option<PathBuf>,
@@ -68,7 +68,7 @@ fn main() -> ExitCode {
             repo,
             judge,
             fixtures,
-        } => match run_model(&model, repo.as_ref(), judge, fixtures.as_ref()) {
+        } => match run_model(&model, &repo, judge, fixtures.as_ref()) {
             Ok(code) => ExitCode::from(code as u8),
             Err(err) => {
                 eprintln!("{err}");
@@ -95,7 +95,7 @@ fn verbalize_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_model(
     model: &str,
-    repo: Option<&PathBuf>,
+    repo: &Path,
     judge: JudgeKind,
     fixtures: Option<&PathBuf>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
@@ -103,31 +103,19 @@ fn run_model(
     let program = parse(&src)?;
     let compiled = compile(&program)?;
     let mut store = Store::new();
-    let repo_name = repo
-        .and_then(|r| r.file_name())
-        .and_then(|s| s.to_str())
-        .unwrap_or("repo");
+    let repo_name = repo.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
     let record_path = allocate_record_path()?;
 
-    let (result, steps, judge_failed) = if let Some(repo) = repo {
-        let mut nav = make_nav(repo, judge, fixtures, &record_path)?;
-        let result = run(&compiled, &mut store, Some(&mut nav));
-        let failed = !nav.errors.is_empty();
-        if failed {
-            for e in &nav.errors {
-                eprintln!("judge error: {e}");
-            }
+    let mut nav = make_nav(repo, judge, fixtures, &record_path)?;
+    let result = run(&compiled, &mut store, Some(&mut nav));
+    let judge_failed = !nav.errors.is_empty();
+    if judge_failed {
+        for e in &nav.errors {
+            eprintln!("judge error: {e}");
         }
-        let steps = std::mem::take(&mut nav.trace);
-        drop(nav);
-        (result, steps, failed)
-    } else {
-        std::fs::write(
-            &record_path,
-            "{\n  \"listings\": [],\n  \"documents\": []\n}\n",
-        )?;
-        (run(&compiled, &mut store, None), Vec::new(), false)
-    };
+    }
+    let steps = std::mem::take(&mut nav.trace);
+    drop(nav);
 
     let printed = format_run(&compiled, &result, &record_path, jev_request_count(&steps));
     autoground::report::tui::present_run(&printed, &steps, repo_name)?;
