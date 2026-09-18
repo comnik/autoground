@@ -1,5 +1,7 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 /// A child of a location state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Child {
     pub name: String,
     pub rel_path: String,
@@ -56,7 +58,7 @@ impl Transition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChildChoice {
     pub rel_path: String,
     pub transition: Transition,
@@ -73,7 +75,7 @@ pub enum DocumentVerdict {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DocumentJudgement {
     pub verdict: DocumentVerdict,
     pub confidence: f64,
@@ -81,10 +83,70 @@ pub struct DocumentJudgement {
 
 /// One HTTP round-trip from a Jev `choose` or `document` call.
 /// Local judges leave this empty.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JudgeExchange {
     pub request: serde_json::Value,
     pub response: serde_json::Value,
+    #[serde(
+        default,
+        rename = "started_at_ms",
+        skip_serializing_if = "Option::is_none",
+        with = "opt_epoch_ms"
+    )]
+    pub started_at: Option<SystemTime>,
+    #[serde(
+        default,
+        rename = "ended_at_ms",
+        skip_serializing_if = "Option::is_none",
+        with = "opt_epoch_ms"
+    )]
+    pub ended_at: Option<SystemTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// USD, when the response reports usage (or an explicit cost).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+pub fn epoch_ms(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn from_epoch_ms(ms: u64) -> SystemTime {
+    UNIX_EPOCH + std::time::Duration::from_millis(ms)
+}
+
+mod opt_epoch_ms {
+    use super::{epoch_ms, from_epoch_ms, SystemTime};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(v: &Option<SystemTime>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        v.map(epoch_ms).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<SystemTime>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Option::<u64>::deserialize(deserializer)?.map(from_epoch_ms))
+    }
+}
+
+impl JudgeExchange {
+    pub fn new(request: serde_json::Value, response: serde_json::Value) -> Self {
+        Self {
+            request,
+            response,
+            ..Self::default()
+        }
+    }
 }
 
 /// One document judgement plus the exchanges that produced it.

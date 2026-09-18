@@ -69,6 +69,28 @@ fn run_prints_header_requires_and_trace_path() {
     let body = std::fs::read_to_string(path).unwrap();
     assert!(body.contains("\"listings\""), "{body}");
     assert!(body.contains("\"documents\""), "{body}");
+    let started = json_u64(&body, "started_at_ms");
+    let ended = json_u64(&body, "ended_at_ms");
+    assert!(ended >= started, "{body}");
+    assert!(body.contains("\"outcome\": \"grounded\""), "{body}");
+    assert!(body.contains("\"steps\""), "{body}");
+    assert!(body.contains("\"requires\""), "{body}");
+    assert!(body.contains("\"repo_name\""), "{body}");
+}
+
+fn json_u64(body: &str, key: &str) -> u64 {
+    let prefix = format!("\"{key}\": ");
+    let start = body
+        .find(&prefix)
+        .unwrap_or_else(|| panic!("missing {key} in {body}"))
+        + prefix.len();
+    let digits: String = body[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("bad {key} in {body}"))
 }
 
 #[test]
@@ -139,6 +161,44 @@ fn ground_subcommand_is_gone() {
         text.contains("unrecognized subcommand") || text.contains("error"),
         "{text}"
     );
+}
+
+#[test]
+fn inspect_rerenders_a_recorded_run() {
+    let (out, err, code) = stdout(&[
+        "run",
+        "examples/layered.ag",
+        "--repo",
+        "examples/toy-layered",
+        "--judge",
+        "heuristic",
+    ]);
+    assert_eq!(err, "", "{out}");
+    assert_eq!(code, 0);
+    let path = trace_path(&out).to_string();
+    let (again, err2, code2) = stdout(&["run", "--inspect", &path]);
+    assert_eq!(err2, "", "{again}");
+    assert_eq!(code2, code);
+    assert_eq!(again, out);
+}
+
+#[test]
+fn inspect_fixture_without_run_result_errors() {
+    let (out, err, code) = stdout(&["run", "--inspect", "tests/fixtures/toy-layered.json"]);
+    assert_eq!(code, 3);
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("not a full run trace") || err.contains("judge fixture"),
+        "{err}"
+    );
+}
+
+#[test]
+fn inspect_missing_file_errors() {
+    let (out, err, code) = stdout(&["run", "--inspect", "tests/fixtures/does-not-exist.json"]);
+    assert_eq!(code, 3);
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("could not read trace"), "{err}");
 }
 
 #[test]

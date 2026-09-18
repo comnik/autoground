@@ -5,7 +5,8 @@ use crate::edb::Store;
 use crate::navigator::{Arg, Demand, Navigator, Need};
 use crate::syntax::{Formula, Term};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Value {
     True,
     False,
@@ -52,30 +53,32 @@ impl std::fmt::Display for Value {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Witness {
     pub assignment: Vec<(String, String)>,
 }
 
 /// A ground EDB atom the evaluator bottomed out on, with the judge's 3VL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EdbAtom {
     pub pred: String,
     pub args: Vec<String>,
     pub value: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RequireResult {
     pub value: Value,
     pub witness: Option<Witness>,
     pub edb: Vec<EdbAtom>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Outcome {
     Grounded,
     Violated,
+    #[serde(rename = "unknown")]
     Ungrounded,
 }
 

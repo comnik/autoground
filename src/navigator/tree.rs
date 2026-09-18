@@ -387,12 +387,7 @@ impl TreeNavigator {
 
     /// Files flagged `investigate` in one listing. Their document Nouls do
     /// not depend on each other; the judge may post them concurrently.
-    fn confirm_files(
-        &mut self,
-        demand: &Demand,
-        rels: &[String],
-        store: &Store,
-    ) -> Vec<String> {
+    fn confirm_files(&mut self, demand: &Demand, rels: &[String], store: &Store) -> Vec<String> {
         struct Prepared {
             rel: String,
             body: String,
@@ -827,9 +822,10 @@ mod tests {
                 .any(|s| matches!(s, GroundStep::Listing { .. })),
             "mixed n-ary is a walk, not a binding-table listing"
         );
-        assert!(nav.trace.iter().any(
-            |s| matches!(s, GroundStep::Document { path, .. } if path == "ui/app.py")
-        ));
+        assert!(nav
+            .trace
+            .iter()
+            .any(|s| matches!(s, GroundStep::Document { path, .. } if path == "ui/app.py")));
     }
 
     #[test]

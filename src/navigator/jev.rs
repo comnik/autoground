@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use serde_json::{json, Value};
 
 use super::judge::{
@@ -10,14 +12,36 @@ const DEFAULT_MODEL: &str = "jev-latest";
 const CHOICE_CHUNK: usize = 100;
 const MAX_RETRIES: u32 = 4;
 const DOCUMENT_PARALLELISM: usize = 8;
+/// Published Jev input price. Output tokens are unmetered.
+const INPUT_USD_PER_MILLION_TOKENS: f64 = 0.042;
+
+/// One transport round-trip, with wall-clock bounds for the trace.
+#[derive(Debug, Clone)]
+pub struct Posted {
+    pub value: Value,
+    pub started_at: SystemTime,
+    pub ended_at: SystemTime,
+}
+
+impl Posted {
+    fn capture(f: impl FnOnce() -> Result<Value, JudgeError>) -> Result<Self, JudgeError> {
+        let started_at = SystemTime::now();
+        let value = f()?;
+        Ok(Self {
+            value,
+            started_at,
+            ended_at: SystemTime::now(),
+        })
+    }
+}
 
 /// POST body / response transport. Live HTTP in production; a mock in tests.
 pub trait Transport {
-    fn post_json(&mut self, url: &str, body: &Value) -> Result<Value, JudgeError>;
+    fn post_json(&mut self, url: &str, body: &Value) -> Result<Posted, JudgeError>;
 
     /// Default posts one body at a time. Live HTTP overrides this to overlap
     /// independent document requests.
-    fn post_json_all(&mut self, url: &str, bodies: &[Value]) -> Vec<Result<Value, JudgeError>> {
+    fn post_json_all(&mut self, url: &str, bodies: &[Value]) -> Vec<Result<Posted, JudgeError>> {
         bodies.iter().map(|b| self.post_json(url, b)).collect()
     }
 }
@@ -25,13 +49,13 @@ pub trait Transport {
 pub struct UreqTransport;
 
 impl Transport for UreqTransport {
-    fn post_json(&mut self, url: &str, body: &Value) -> Result<Value, JudgeError> {
-        post_json_with_retries(url, body)
+    fn post_json(&mut self, url: &str, body: &Value) -> Result<Posted, JudgeError> {
+        Posted::capture(|| post_json_with_retries(url, body))
     }
 
-    fn post_json_all(&mut self, url: &str, bodies: &[Value]) -> Vec<Result<Value, JudgeError>> {
+    fn post_json_all(&mut self, url: &str, bodies: &[Value]) -> Vec<Result<Posted, JudgeError>> {
         parallel_map(bodies, DOCUMENT_PARALLELISM, |body| {
-            post_json_with_retries(url, body)
+            Posted::capture(|| post_json_with_retries(url, body))
         })
     }
 }
@@ -141,12 +165,11 @@ impl<T: Transport> JevJudge<T> {
     }
 
     fn evaluate(&mut self, body: &Value) -> Result<Value, JudgeError> {
-        let resp = self.transport.post_json(&self.endpoint, body)?;
-        self.exchanges.push(JudgeExchange {
-            request: body.clone(),
-            response: resp.clone(),
-        });
-        Ok(resp)
+        let posted = self.transport.post_json(&self.endpoint, body)?;
+        let value = posted.value.clone();
+        self.exchanges
+            .push(exchange_from_posted(body.clone(), posted));
+        Ok(value)
     }
 }
 
@@ -182,11 +205,9 @@ impl<T: Transport> Judge for JevJudge<T> {
         let mut out = Vec::with_capacity(states.len());
         for (request, resp) in bodies.into_iter().zip(responses) {
             match resp {
-                Ok(response) => {
-                    let ex = JudgeExchange {
-                        request,
-                        response: response.clone(),
-                    };
+                Ok(posted) => {
+                    let response = posted.value.clone();
+                    let ex = exchange_from_posted(request, posted);
                     self.exchanges.push(ex.clone());
                     out.push(
                         parse_document_answer(&response).map(|judgement| DocumentAnswer {
@@ -341,6 +362,44 @@ pub fn parse_document_answer(resp: &Value) -> Result<DocumentJudgement, JudgeErr
     Ok(DocumentJudgement {
         verdict,
         confidence,
+    })
+}
+
+fn exchange_from_posted(request: Value, posted: Posted) -> JudgeExchange {
+    let (input_tokens, output_tokens, cost_usd) = usage_from(&posted.value);
+    JudgeExchange {
+        request,
+        response: posted.value,
+        started_at: Some(posted.started_at),
+        ended_at: Some(posted.ended_at),
+        input_tokens,
+        output_tokens,
+        cost_usd,
+    }
+}
+
+/// Token counts and USD cost from a System One response. Cost prefers an
+/// explicit `usage.cost` / `usage.cost_usd` field; otherwise it is input
+/// tokens at the published Jev input price.
+fn usage_from(response: &Value) -> (Option<u64>, Option<u64>, Option<f64>) {
+    let Some(usage) = response.get("usage") else {
+        return (None, None, None);
+    };
+    let input = int_field(usage, "input_tokens");
+    let output = int_field(usage, "output_tokens");
+    let cost = usage
+        .get("cost_usd")
+        .or_else(|| usage.get("cost"))
+        .and_then(|v| v.as_f64())
+        .or_else(|| input.map(|n| n as f64 * INPUT_USD_PER_MILLION_TOKENS / 1_000_000.0));
+    (input, output, cost)
+}
+
+fn int_field(obj: &Value, key: &str) -> Option<u64> {
+    obj.get(key).and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+            .or_else(|| v.as_f64().and_then(|n| (n >= 0.0).then_some(n as u64)))
     })
 }
 
@@ -506,12 +565,12 @@ mod tests {
     }
 
     impl Transport for SeqTransport {
-        fn post_json(&mut self, _url: &str, body: &Value) -> Result<Value, JudgeError> {
+        fn post_json(&mut self, _url: &str, body: &Value) -> Result<Posted, JudgeError> {
             self.bodies.push(body.clone());
             if self.responses.is_empty() {
                 return Err(JudgeError::Http("no more responses".into()));
             }
-            Ok(self.responses.remove(0))
+            Posted::capture(|| Ok(self.responses.remove(0)))
         }
     }
 
@@ -539,6 +598,9 @@ mod tests {
         assert_eq!(ex.len(), 1);
         assert_eq!(ex[0].request["model"], "jev-latest");
         assert_eq!(ex[0].response["answers"]["c0"]["choice"], "investigate");
+        assert!(ex[0].started_at.is_some());
+        assert!(ex[0].ended_at.is_some());
+        assert!(ex[0].ended_at.unwrap() >= ex[0].started_at.unwrap());
     }
 
     fn doc_state(path: &str) -> DocumentState {
@@ -566,7 +628,7 @@ mod tests {
     }
 
     impl Transport for BatchSpy {
-        fn post_json(&mut self, _url: &str, _body: &Value) -> Result<Value, JudgeError> {
+        fn post_json(&mut self, _url: &str, _body: &Value) -> Result<Posted, JudgeError> {
             panic!("documents should post via post_json_all");
         }
 
@@ -574,7 +636,7 @@ mod tests {
             &mut self,
             _url: &str,
             bodies: &[Value],
-        ) -> Vec<Result<Value, JudgeError>> {
+        ) -> Vec<Result<Posted, JudgeError>> {
             self.batches.lock().unwrap().push(bodies.len());
             bodies
                 .iter()
@@ -582,7 +644,7 @@ mod tests {
                     if self.responses.is_empty() {
                         Err(JudgeError::Http("no more responses".into()))
                     } else {
-                        Ok(self.responses.remove(0))
+                        Posted::capture(|| Ok(self.responses.remove(0)))
                     }
                 })
                 .collect()
@@ -609,6 +671,59 @@ mod tests {
         assert_eq!(ex[0].request["state"]["path"], "a.py");
         assert_eq!(ex[1].request["state"]["path"], "b.py");
         assert_eq!(ex[2].request["state"]["path"], "c.py");
+        assert!(ex
+            .iter()
+            .all(|e| e.started_at.is_some() && e.ended_at.is_some()));
+    }
+
+    #[test]
+    fn usage_from_tokens_computes_jev_input_price() {
+        let (input, output, cost) = usage_from(&json!({
+            "answers": {},
+            "usage": { "input_tokens": 1_000_000, "output_tokens": 12 }
+        }));
+        assert_eq!(input, Some(1_000_000));
+        assert_eq!(output, Some(12));
+        assert!((cost.unwrap() - 0.042).abs() < 1e-12);
+    }
+
+    #[test]
+    fn usage_from_prefers_explicit_cost() {
+        let (_, _, cost) = usage_from(&json!({
+            "usage": { "input_tokens": 10, "cost_usd": 1.25 }
+        }));
+        assert!((cost.unwrap() - 1.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn usage_from_missing_is_none() {
+        assert_eq!(usage_from(&json!({"answers": {}})), (None, None, None));
+    }
+
+    #[test]
+    fn evaluate_records_usage_on_exchange() {
+        let state = ListingState {
+            pred: "component".into(),
+            args: vec!["Frontend".into()],
+            dir: "".into(),
+            children: vec![child("frontend", true)],
+            verbalization: String::new(),
+        };
+        let transport = SeqTransport {
+            responses: vec![json!({
+                "answers": {
+                    "c0": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
+                },
+                "usage": { "input_tokens": 2000, "output_tokens": 8 }
+            })],
+            bodies: Vec::new(),
+        };
+        let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
+        judge.choose(&state).unwrap();
+        let ex = &judge.last_exchanges()[0];
+        assert_eq!(ex.input_tokens, Some(2000));
+        assert_eq!(ex.output_tokens, Some(8));
+        assert!((ex.cost_usd.unwrap() - 2000.0 * 0.042 / 1_000_000.0).abs() < 1e-15);
     }
 
     #[test]

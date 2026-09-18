@@ -70,7 +70,9 @@ impl Judge for HeuristicJudge {
                     .collect();
                 if conceptual.is_empty() {
                     document_defines(state)
-                } else if conceptual.iter().any(|label| path_matches(&state.path, label))
+                } else if conceptual
+                    .iter()
+                    .any(|label| path_matches(&state.path, label))
                 {
                     DocumentJudgement {
                         verdict: DocumentVerdict::True,
@@ -136,12 +138,10 @@ fn enumerate_components(state: &ListingState) -> Vec<ChildChoice> {
     state
         .children
         .iter()
-        .map(|c| {
-            ChildChoice {
-                rel_path: c.rel_path.clone(),
-                transition: Transition::Investigate,
-                confidence: 0.85,
-            }
+        .map(|c| ChildChoice {
+            rel_path: c.rel_path.clone(),
+            transition: Transition::Investigate,
+            confidence: 0.85,
         })
         .collect()
 }

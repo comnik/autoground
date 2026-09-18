@@ -3,11 +3,11 @@ pub mod tui;
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::core::Compiled;
 use crate::eval::{EdbAtom, Outcome, RunResult, Value};
-use crate::navigator::GroundStep;
+use crate::navigator::{GroundStep, RequireTrace};
 use crate::syntax::{print_ground_atom, print_require};
 
 pub const DEFAULT_TRACE_DIR: &str = "/tmp/autoground";
@@ -43,6 +43,72 @@ pub fn jev_request_count(steps: &[GroundStep]) -> usize {
     steps.iter().map(|s| s.exchanges().len()).sum()
 }
 
+/// Wall-clock span of one `autoground run`.
+#[derive(Debug, Clone, Copy)]
+pub struct RunTiming {
+    pub started_at: SystemTime,
+    pub ended_at: SystemTime,
+}
+
+impl RunTiming {
+    pub fn from_millis(started_at_ms: u64, ended_at_ms: u64) -> Self {
+        Self {
+            started_at: crate::navigator::judge::from_epoch_ms(started_at_ms),
+            ended_at: crate::navigator::judge::from_epoch_ms(ended_at_ms),
+        }
+    }
+
+    pub fn elapsed(self) -> Duration {
+        self.ended_at
+            .duration_since(self.started_at)
+            .unwrap_or(Duration::ZERO)
+    }
+}
+
+/// Start/end of each Jev round-trip that recorded wall-clock times.
+pub fn jev_request_intervals(steps: &[GroundStep]) -> Vec<(SystemTime, SystemTime)> {
+    steps
+        .iter()
+        .flat_map(|s| s.exchanges())
+        .filter_map(|ex| Some((ex.started_at?, ex.ended_at?)))
+        .collect()
+}
+
+/// Sum of recorded Jev costs, if any exchange reported one.
+pub fn jev_request_cost_usd(steps: &[GroundStep]) -> Option<f64> {
+    let mut any = false;
+    let mut sum = 0.0;
+    for ex in steps.iter().flat_map(|s| s.exchanges()) {
+        if let Some(c) = ex.cost_usd {
+            any = true;
+            sum += c;
+        }
+    }
+    any.then_some(sum)
+}
+
+pub fn format_duration(d: Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.2}s", d.as_secs_f64())
+    } else {
+        let secs = d.as_secs();
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    }
+}
+
+pub fn format_usd(cost: f64) -> String {
+    if cost >= 0.01 {
+        format!("${cost:.2}")
+    } else if cost >= 0.0001 {
+        format!("${cost:.4}")
+    } else {
+        format!("${cost:.6}")
+    }
+}
+
 fn outcome_label(outcome: &Outcome) -> &'static str {
     match outcome {
         Outcome::Grounded => "GROUNDED",
@@ -51,27 +117,42 @@ fn outcome_label(outcome: &Outcome) -> &'static str {
     }
 }
 
-/// Human-readable summary of a run: header, then each `require` and the EDB it bottomed out on.
-pub fn format_run(
-    compiled: &Compiled,
-    result: &RunResult,
-    trace_path: &Path,
-    jev_requests: usize,
-) -> String {
+pub fn format_run_header(outcome: &Outcome, trace_path: &Path, jev_requests: usize) -> String {
     let mut out = String::new();
-    out.push_str(outcome_label(&result.outcome));
+    out.push_str(outcome_label(outcome));
     out.push('\n');
     out.push_str(&format!("trace: {}\n", trace_path.display()));
     out.push_str(&format!("jev requests: {jev_requests}\n"));
+    out
+}
 
-    for (i, req) in result.requires.iter().enumerate() {
+pub fn require_traces(compiled: &Compiled, result: &RunResult) -> Vec<RequireTrace> {
+    result
+        .requires
+        .iter()
+        .enumerate()
+        .map(|(i, req)| RequireTrace {
+            formula: compiled
+                .requires
+                .get(i)
+                .map(print_require)
+                .unwrap_or_else(|| format!("(require #{i})")),
+            value: req.value,
+            witness: req.witness.clone(),
+            edb: req.edb.clone(),
+        })
+        .collect()
+}
+
+pub fn format_run_body(compiled: &Compiled, result: &RunResult) -> String {
+    format_require_traces(&require_traces(compiled, result))
+}
+
+pub fn format_require_traces(requires: &[RequireTrace]) -> String {
+    let mut out = String::new();
+    for req in requires {
         out.push('\n');
-        let formula = compiled
-            .requires
-            .get(i)
-            .map(print_require)
-            .unwrap_or_else(|| format!("(require #{i})"));
-        out.push_str(&formula);
+        out.push_str(&req.formula);
         out.push('\n');
         out.push_str(&format!("  {}\n", req.value));
         if let Some(w) = &req.witness {
@@ -89,6 +170,18 @@ pub fn format_run(
         }
         out.push_str(&format_edb_leaves(&req.edb));
     }
+    out
+}
+
+/// Human-readable summary of a run: header, then each `require` and the EDB it bottomed out on.
+pub fn format_run(
+    compiled: &Compiled,
+    result: &RunResult,
+    trace_path: &Path,
+    jev_requests: usize,
+) -> String {
+    let mut out = format_run_header(&result.outcome, trace_path, jev_requests);
+    out.push_str(&format_run_body(compiled, result));
     out
 }
 
@@ -222,16 +315,42 @@ mod tests {
             choices: vec![],
             effects: vec![],
             exchanges: vec![
-                JudgeExchange {
-                    request: serde_json::json!({}),
-                    response: serde_json::json!({}),
-                },
-                JudgeExchange {
-                    request: serde_json::json!({}),
-                    response: serde_json::json!({}),
-                },
+                JudgeExchange::new(serde_json::json!({}), serde_json::json!({})),
+                JudgeExchange::new(serde_json::json!({}), serde_json::json!({})),
             ],
         };
         assert_eq!(jev_request_count(&[empty, listing]), 2);
+    }
+
+    #[test]
+    fn format_duration_picks_units() {
+        assert_eq!(format_duration(Duration::from_millis(340)), "340ms");
+        assert_eq!(format_duration(Duration::from_millis(1420)), "1.42s");
+        assert_eq!(format_duration(Duration::from_secs(72)), "1m 12s");
+    }
+
+    #[test]
+    fn jev_request_cost_sums_reported_costs() {
+        use crate::navigator::judge::JudgeExchange;
+        let listing = GroundStep::Listing {
+            pred: "component".into(),
+            args: vec!["Frontend".into()],
+            dir: String::new(),
+            children: vec![],
+            choices: vec![],
+            effects: vec![],
+            exchanges: vec![
+                JudgeExchange {
+                    cost_usd: Some(0.0001),
+                    ..JudgeExchange::default()
+                },
+                JudgeExchange {
+                    cost_usd: Some(0.0002),
+                    ..JudgeExchange::default()
+                },
+            ],
+        };
+        assert!((jev_request_cost_usd(&[listing]).unwrap() - 0.0003).abs() < 1e-12);
+        assert_eq!(jev_request_cost_usd(&[]), None);
     }
 }

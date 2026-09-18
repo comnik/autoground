@@ -1,6 +1,8 @@
 use crate::navigator::judge::{DocumentVerdict, JudgeExchange};
 use crate::navigator::trace::{format_atom, GroundStep};
 
+use super::{format_duration, format_usd};
+
 /// Render one grounding step as plain text (also the TUI body).
 pub fn format_step(step: &GroundStep, index: usize, total: usize, repo_name: &str) -> String {
     match step {
@@ -153,10 +155,11 @@ fn format_exchanges(exchanges: &[JudgeExchange]) -> String {
     let mut out = String::from("\n");
     let n = exchanges.len();
     for (i, ex) in exchanges.iter().enumerate() {
+        let meta = exchange_meta(ex);
         let req_label = if n == 1 {
-            "  Jev request\n".to_string()
+            format!("  Jev request{meta}\n")
         } else {
-            format!("  Jev request {}/{n}\n", i + 1)
+            format!("  Jev request {}/{n}{meta}\n", i + 1)
         };
         let resp_label = if n == 1 {
             "  Jev response\n".to_string()
@@ -169,6 +172,23 @@ fn format_exchanges(exchanges: &[JudgeExchange]) -> String {
         out.push_str(&indent_json(&ex.response));
     }
     out
+}
+
+fn exchange_meta(ex: &JudgeExchange) -> String {
+    let mut bits = Vec::new();
+    if let (Some(start), Some(end)) = (ex.started_at, ex.ended_at) {
+        if let Ok(d) = end.duration_since(start) {
+            bits.push(format_duration(d));
+        }
+    }
+    if let Some(cost) = ex.cost_usd {
+        bits.push(format_usd(cost));
+    }
+    if bits.is_empty() {
+        String::new()
+    } else {
+        format!("  ({})", bits.join(", "))
+    }
 }
 
 fn indent_json(value: &serde_json::Value) -> String {
@@ -211,10 +231,10 @@ mod tests {
 
     #[test]
     fn verbose_listing_prints_jev_json() {
-        let step = listing_with(vec![JudgeExchange {
-            request: json!({"model": "jev-latest", "questions": {"c0": {"type": "choice"}}}),
-            response: json!({"answers": {"c0": {"choice": "investigate", "confidence": 0.9}}}),
-        }]);
+        let step = listing_with(vec![JudgeExchange::new(
+            json!({"model": "jev-latest", "questions": {"c0": {"type": "choice"}}}),
+            json!({"answers": {"c0": {"choice": "investigate", "confidence": 0.9}}}),
+        )]);
         let quiet = format_step(&step, 0, 1, "toy");
         assert!(!quiet.contains("Jev request"));
         assert!(quiet.contains("ui"));
@@ -233,14 +253,33 @@ mod tests {
 
     #[test]
     fn verbose_trace_includes_jev_payloads() {
-        let step = listing_with(vec![JudgeExchange {
-            request: json!({"model": "jev-latest"}),
-            response: json!({"answers": {"c0": {"choice": "investigate"}}}),
-        }]);
+        let step = listing_with(vec![JudgeExchange::new(
+            json!({"model": "jev-latest"}),
+            json!({"answers": {"c0": {"choice": "investigate"}}}),
+        )]);
         let quiet = format_trace(std::slice::from_ref(&step), "toy");
         let verbose = format_trace_verbose(std::slice::from_ref(&step), "toy");
         assert!(!quiet.contains("Jev request"));
         assert!(verbose.contains("Jev request"));
         assert!(verbose.contains("jev-latest"));
+    }
+
+    #[test]
+    fn jev_label_includes_duration_and_cost() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t0 = UNIX_EPOCH + Duration::from_millis(1_000);
+        let step = listing_with(vec![JudgeExchange {
+            request: json!({"model": "jev-latest"}),
+            response: json!({"answers": {}}),
+            started_at: Some(t0),
+            ended_at: Some(t0 + Duration::from_millis(340)),
+            cost_usd: Some(0.000042),
+            ..JudgeExchange::default()
+        }]);
+        let payload = format_jev(&step);
+        assert!(
+            payload.contains("Jev request  (340ms, $0.000042)"),
+            "{payload}"
+        );
     }
 }

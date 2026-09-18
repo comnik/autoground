@@ -1,4 +1,5 @@
 use std::io::{stdout, IsTerminal, Write};
+use std::time::{Duration, SystemTime};
 
 use crossterm::{
     cursor,
@@ -9,8 +10,16 @@ use crossterm::{
 };
 
 use super::step::{format_jev, format_step};
+use super::{format_duration, format_usd, jev_request_cost_usd, jev_request_intervals, RunTiming};
 use crate::navigator::judge::{DocumentVerdict, TAU_CONFIDENCE};
 use crate::navigator::trace::GroundStep;
+
+const JEV_BAR: Color = Color::Rgb {
+    r: 135,
+    g: 206,
+    b: 250,
+};
+const REST_BAR: Color = Color::DarkGrey;
 
 struct RawMode;
 
@@ -42,9 +51,22 @@ impl Drop for AlternateScreen {
     }
 }
 
-/// Print the run summary. On a TTY, left/right open the grounding debug pager.
-pub fn present_run(summary: &str, steps: &[GroundStep], repo_name: &str) -> std::io::Result<()> {
-    print!("{summary}");
+/// Print the run summary. On a TTY, a concurrency timeline follows the
+/// header (one row per in-flight Jev count), and left/right open the
+/// grounding debug pager.
+pub fn present_run(
+    header: &str,
+    body: &str,
+    steps: &[GroundStep],
+    repo_name: &str,
+    timing: RunTiming,
+) -> std::io::Result<()> {
+    print!("{header}");
+    stdout().flush()?;
+    if stdout().is_terminal() {
+        draw_timing_bar(&mut stdout(), timing, steps)?;
+    }
+    print!("{body}");
     stdout().flush()?;
     if !stdout().is_terminal() {
         return Ok(());
@@ -73,6 +95,139 @@ pub fn present_run(summary: &str, steps: &[GroundStep], repo_name: &str) -> std:
         }
     }
     Ok(())
+}
+
+fn draw_timing_bar(
+    out: &mut impl Write,
+    timing: RunTiming,
+    steps: &[GroundStep],
+) -> std::io::Result<()> {
+    let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
+    let elapsed = timing.elapsed();
+    let mut suffix = format!("  {}", format_duration(elapsed));
+    if let Some(cost) = jev_request_cost_usd(steps) {
+        suffix.push(' ');
+        suffix.push_str(&format_usd(cost));
+    }
+    let intervals = jev_request_intervals(steps);
+    let width_guess = cols.saturating_sub(suffix.len()).saturating_sub(4).max(8);
+    let peek = concurrency_cells(width_guess, timing.started_at, timing.ended_at, &intervals);
+    let max_n = peek.iter().copied().max().unwrap_or(0);
+    if max_n == 0 {
+        let bar_width = cols.saturating_sub(suffix.len()).saturating_sub(1).max(8);
+        queue!(
+            out,
+            SetForegroundColor(REST_BAR),
+            Print(&"▀".repeat(bar_width)),
+            ResetColor,
+            Print(&suffix),
+            Print("\n")
+        )?;
+        return out.flush();
+    }
+    let label_w = max_n.to_string().len().max(1);
+    let bar_width = cols
+        .saturating_sub(label_w + 1 + suffix.len())
+        .saturating_sub(1)
+        .max(8);
+    let cells = concurrency_cells(bar_width, timing.started_at, timing.ended_at, &intervals);
+    let levels: Vec<usize> = (1..=max_n).rev().filter(|&n| cells.contains(&n)).collect();
+    for (i, n) in levels.iter().enumerate() {
+        let label = format!("{n:>label_w$} ");
+        queue!(out, Print(&label))?;
+        write_level_bar(out, &cells, *n)?;
+        if i + 1 == levels.len() {
+            queue!(out, Print(&suffix), Print("\n"))?;
+        } else {
+            queue!(out, Print("\n"))?;
+        }
+    }
+    out.flush()
+}
+
+fn write_level_bar(out: &mut impl Write, cells: &[usize], n: usize) -> std::io::Result<()> {
+    let mut i = 0;
+    while i < cells.len() {
+        let hit = cells[i] == n;
+        let mut j = i + 1;
+        while j < cells.len() && (cells[j] == n) == hit {
+            j += 1;
+        }
+        if hit {
+            queue!(
+                out,
+                SetForegroundColor(JEV_BAR),
+                Print(&"▀".repeat(j - i)),
+                ResetColor
+            )?;
+        } else {
+            queue!(out, Print(&" ".repeat(j - i)))?;
+        }
+        i = j;
+    }
+    Ok(())
+}
+
+/// Peak in-flight Jev count for each column of the run timeline.
+fn concurrency_cells(
+    width: usize,
+    run_start: SystemTime,
+    run_end: SystemTime,
+    intervals: &[(SystemTime, SystemTime)],
+) -> Vec<usize> {
+    let mut cells = vec![0usize; width];
+    let total = match run_end.duration_since(run_start) {
+        Ok(d) if d > Duration::ZERO => d.as_secs_f64(),
+        _ => return cells,
+    };
+    let mut events: Vec<(f64, i32)> = Vec::with_capacity(intervals.len() * 2);
+    for &(start, end) in intervals {
+        let s = start
+            .duration_since(run_start)
+            .unwrap_or(Duration::ZERO)
+            .as_secs_f64()
+            .clamp(0.0, total);
+        let e = end
+            .duration_since(run_start)
+            .unwrap_or(Duration::ZERO)
+            .as_secs_f64()
+            .clamp(0.0, total);
+        if e <= s {
+            continue;
+        }
+        events.push((s, 1));
+        events.push((e, -1));
+    }
+    // Ends before starts at the same instant so back-to-back calls stay at n=1.
+    events.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut n = 0i32;
+    let mut last = 0.0;
+    let mut i = 0;
+    while i < events.len() {
+        let t = events[i].0;
+        if t > last && n > 0 {
+            paint_level(&mut cells, width, total, last, t, n as usize);
+        }
+        while i < events.len() && events[i].0 == t {
+            n += events[i].1;
+            i += 1;
+        }
+        last = t;
+    }
+    cells
+}
+
+fn paint_level(cells: &mut [usize], width: usize, total: f64, s: f64, e: f64, n: usize) {
+    let mut a = ((s / total) * width as f64).floor() as usize;
+    let mut b = ((e / total) * width as f64).ceil() as usize;
+    a = a.min(width);
+    b = b.min(width);
+    if a == b && a < width {
+        b = a + 1;
+    }
+    for cell in cells.iter_mut().take(b).skip(a) {
+        *cell = (*cell).max(n);
+    }
 }
 
 fn is_debug_key(key: &event::KeyEvent) -> bool {
@@ -310,4 +465,49 @@ fn document_line_color(line: &str, step: &GroundStep) -> Option<Color> {
         return Some(Color::Yellow);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn t(ms: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn concurrency_cells_sequential_requests() {
+        let cells = concurrency_cells(
+            10,
+            t(1000),
+            t(2000),
+            &[(t(1000), t(1500)), (t(1800), t(2000))],
+        );
+        assert_eq!(cells, vec![1, 1, 1, 1, 1, 0, 0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn concurrency_cells_overlapping_requests() {
+        let cells = concurrency_cells(10, t(0), t(1000), &[(t(0), t(600)), (t(400), t(800))]);
+        assert_eq!(cells, vec![1, 1, 1, 1, 2, 2, 1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn concurrency_cells_abutting_requests_stay_at_one() {
+        let cells = concurrency_cells(10, t(0), t(1000), &[(t(0), t(500)), (t(500), t(1000))]);
+        assert_eq!(cells, vec![1; 10]);
+    }
+
+    #[test]
+    fn concurrency_cells_empty_when_no_jev() {
+        let cells = concurrency_cells(8, t(0), t(1000), &[]);
+        assert_eq!(cells, vec![0; 8]);
+    }
+
+    #[test]
+    fn concurrency_cells_zero_duration_run_is_empty() {
+        let cells = concurrency_cells(8, t(5), t(5), &[(t(5), t(5))]);
+        assert_eq!(cells, vec![0; 8]);
+    }
 }

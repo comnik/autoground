@@ -3,8 +3,12 @@ use std::process::ExitCode;
 
 use autoground::edb::Store;
 use autoground::eval::run;
-use autoground::navigator::{FixtureJudge, JevJudge, RecordingJudge, TreeNavigator};
-use autoground::report::{allocate_record_path, format_run, jev_request_count, run_exit_code};
+use autoground::navigator::judge::epoch_ms;
+use autoground::navigator::{FixtureFile, FixtureJudge, JevJudge, RecordingJudge, TreeNavigator};
+use autoground::report::{
+    allocate_record_path, format_require_traces, format_run_body, format_run_header,
+    jev_request_count, require_traces, run_exit_code, RunTiming,
+};
 use autoground::{compile, parse, verbalize_source};
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -38,9 +42,11 @@ enum Commands {
     /// Examples:
     ///   autoground run examples/layered.ag --repo examples/toy-layered
     ///   autoground run --repo examples/toy-split '(require (component "Frontend"))'
+    ///   autoground run --inspect /tmp/autoground/trace-….json
     Run {
         /// Path to a `.ag` model, or a model source string.
-        model: String,
+        #[arg(required_unless_present = "inspect")]
+        model: Option<String>,
         /// Repository to ground against.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -48,6 +54,9 @@ enum Commands {
         judge: JudgeKind,
         #[arg(long)]
         fixtures: Option<PathBuf>,
+        /// Reopen a recorded trace and render it as if the run had just completed.
+        #[arg(long, value_name = "TRACE")]
+        inspect: Option<PathBuf>,
     },
     /// Verbalize an atom or a model using `declare` templates.
     ///
@@ -68,13 +77,26 @@ fn main() -> ExitCode {
             repo,
             judge,
             fixtures,
-        } => match run_model(&model, &repo, judge, fixtures.as_ref()) {
-            Ok(code) => ExitCode::from(code as u8),
-            Err(err) => {
-                eprintln!("{err}");
-                ExitCode::from(3)
+            inspect,
+        } => {
+            let result = if let Some(path) = inspect {
+                inspect_trace(&path)
+            } else {
+                run_model(
+                    model.as_deref().expect("model required"),
+                    &repo,
+                    judge,
+                    fixtures.as_ref(),
+                )
+            };
+            match result {
+                Ok(code) => ExitCode::from(code as u8),
+                Err(err) => {
+                    eprintln!("{err}");
+                    ExitCode::from(3)
+                }
             }
-        },
+        }
         Commands::Verbalize { input } => match verbalize_cmd(&input) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
@@ -99,6 +121,7 @@ fn run_model(
     judge: JudgeKind,
     fixtures: Option<&PathBuf>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
+    let started_at = std::time::SystemTime::now();
     let src = model_source(model)?;
     let program = parse(&src)?;
     let compiled = compile(&program)?;
@@ -108,6 +131,7 @@ fn run_model(
 
     let mut nav = make_nav(repo, judge, fixtures, &record_path, model)?;
     let result = run(&compiled, &mut store, Some(&mut nav));
+    let ended_at = std::time::SystemTime::now();
     let judge_failed = !nav.errors.is_empty();
     if judge_failed {
         for e in &nav.errors {
@@ -117,13 +141,78 @@ fn run_model(
     let steps = std::mem::take(&mut nav.trace);
     drop(nav);
 
-    let printed = format_run(&compiled, &result, &record_path, jev_request_count(&steps));
-    autoground::report::tui::present_run(&printed, &steps, repo_name)?;
+    write_run_trace(
+        &record_path,
+        &result.outcome,
+        repo_name,
+        require_traces(&compiled, &result),
+        &steps,
+        started_at,
+        ended_at,
+    )?;
+
+    let header = format_run_header(&result.outcome, &record_path, jev_request_count(&steps));
+    let body = format_run_body(&compiled, &result);
+    autoground::report::tui::present_run(
+        &header,
+        &body,
+        &steps,
+        repo_name,
+        RunTiming {
+            started_at,
+            ended_at,
+        },
+    )?;
     if judge_failed {
         Ok(3)
     } else {
         Ok(run_exit_code(&result.outcome))
     }
+}
+
+fn inspect_trace(path: &Path) -> Result<i32, Box<dyn std::error::Error>> {
+    let file = FixtureFile::load(path)
+        .map_err(|e| format!("could not read trace {}: {e}", path.display()))?;
+    let outcome = file.outcome.clone().ok_or_else(|| {
+        format!(
+            "{} is a judge fixture, not a full run trace; re-run to record one",
+            path.display()
+        )
+    })?;
+    let timing = match (file.started_at_ms, file.ended_at_ms) {
+        (Some(s), Some(e)) => RunTiming::from_millis(s, e),
+        _ => {
+            let now = std::time::SystemTime::now();
+            RunTiming {
+                started_at: now,
+                ended_at: now,
+            }
+        }
+    };
+    let header = format_run_header(&outcome, path, jev_request_count(&file.steps));
+    let body = format_require_traces(&file.requires);
+    autoground::report::tui::present_run(&header, &body, &file.steps, &file.repo_name, timing)?;
+    Ok(run_exit_code(&outcome))
+}
+
+fn write_run_trace(
+    path: &Path,
+    outcome: &autoground::Outcome,
+    repo_name: &str,
+    requires: Vec<autoground::RequireTrace>,
+    steps: &[autoground::GroundStep],
+    started_at: std::time::SystemTime,
+    ended_at: std::time::SystemTime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = FixtureFile::load(path).unwrap_or_default();
+    file.outcome = Some(outcome.clone());
+    file.repo_name = repo_name.to_string();
+    file.requires = requires;
+    file.steps = steps.to_vec();
+    file.started_at_ms = Some(epoch_ms(started_at));
+    file.ended_at_ms = Some(epoch_ms(ended_at));
+    file.save(path)?;
+    Ok(())
 }
 
 /// Read `input` as a `.ag` file when it names one, otherwise treat it as source.

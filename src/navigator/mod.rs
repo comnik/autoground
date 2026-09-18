@@ -9,7 +9,7 @@ pub mod walk;
 
 use crate::edb::Store;
 
-pub use fixture::FixtureJudge;
+pub use fixture::{FixtureFile, FixtureJudge, RequireTrace};
 pub use heuristic::HeuristicJudge;
 pub use jev::JevJudge;
 pub use judge::{Judge, JudgeError, Transition};

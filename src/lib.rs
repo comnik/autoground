@@ -10,7 +10,8 @@ pub use core::{compile, CompileError, Compiled};
 pub use edb::Store;
 pub use eval::{run, Outcome, RunResult, Value};
 pub use navigator::{
-    FixtureJudge, GroundStep, HeuristicJudge, JevJudge, RecordingJudge, TreeNavigator,
+    FixtureFile, FixtureJudge, GroundStep, HeuristicJudge, JevJudge, RecordingJudge, RequireTrace,
+    TreeNavigator,
 };
 pub use syntax::{
     parse, parse_atom, print_formula, print_ground_atom, print_program, print_require,

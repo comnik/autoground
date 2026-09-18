@@ -1,7 +1,8 @@
 use super::judge::{Child, ChildChoice, DocumentJudgement, JudgeExchange};
 
 /// One human-facing moment in a grounding walk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum GroundStep {
     Listing {
         pred: String,
@@ -9,7 +10,9 @@ pub enum GroundStep {
         dir: String,
         children: Vec<Child>,
         choices: Vec<ChildChoice>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         effects: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exchanges: Vec<JudgeExchange>,
     },
     Document {
@@ -17,14 +20,18 @@ pub enum GroundStep {
         args: Vec<String>,
         path: String,
         judgement: DocumentJudgement,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         preview: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         note: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exchanges: Vec<JudgeExchange>,
     },
     Result {
         pred: String,
         args: Vec<String>,
         status: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         bindings: Vec<(String, String)>,
     },
 }
