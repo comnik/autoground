@@ -1,4 +1,5 @@
-// Evaluator based on top-down datalog-like evaluation of requirements against the EDB store.
+// Evaluator based on top-down datalog-like evaluation of requirements against the EDB
+// store.
 use std::collections::{HashMap, HashSet};
 
 use crate::core::Compiled;
