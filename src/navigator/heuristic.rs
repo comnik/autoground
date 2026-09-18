@@ -13,14 +13,21 @@ impl Judge for HeuristicJudge {
         &mut self,
         state: &ListingState,
     ) -> Result<Vec<ChildChoice>, super::judge::JudgeError> {
-        let label = state.args.first().map(|s| s.as_str()).unwrap_or("");
-        if label.is_empty() {
+        let labels: Vec<&str> = state.args.iter().map(|s| s.as_str()).collect();
+        if labels.iter().all(|s| s.is_empty()) {
             return Ok(enumerate_components(state));
         }
+        let hit = |c: &super::judge::Child| {
+            labels.iter().any(|label| {
+                child_matches(c, label)
+                    || sample_matches(c, label)
+                    || path_matches(&c.rel_path, label)
+            })
+        };
         let matches: Vec<&str> = state
             .children
             .iter()
-            .filter(|c| child_matches(c, label) || sample_matches(c, label))
+            .filter(|c| hit(c))
             .map(|c| c.rel_path.as_str())
             .collect();
         Ok(state
@@ -29,9 +36,13 @@ impl Judge for HeuristicJudge {
             .map(|c| {
                 let transition = if crate::navigator::walk::is_noise_name(&c.name) {
                     Transition::Skip
-                } else if c.is_dir && (child_matches(c, label) || sample_matches(c, label)) {
+                } else if c.is_dir
+                    && labels
+                        .iter()
+                        .any(|label| child_matches(c, label) || sample_matches(c, label))
+                {
                     Transition::Investigate
-                } else if !c.is_dir && path_matches(&c.rel_path, label) {
+                } else if !c.is_dir && labels.iter().any(|label| path_matches(&c.rel_path, label)) {
                     Transition::Investigate
                 } else {
                     Transition::Skip
@@ -281,6 +292,33 @@ mod tests {
         assert_eq!(t("frontend"), Transition::Investigate);
         assert_eq!(t("backend"), Transition::Skip);
         assert_eq!(t("decoy"), Transition::Skip);
+    }
+
+    #[test]
+    fn listing_matches_any_argument() {
+        let mut j = HeuristicJudge;
+        let state = ListingState {
+            pred: "knows_about".into(),
+            args: vec!["Judge".into(), "Evaluator".into()],
+            dir: "src".into(),
+            children: vec![
+                child("judge.rs", false, vec![]),
+                child("evaluator.rs", false, vec![]),
+                child("noise.rs", false, vec![]),
+            ],
+            verbalization: String::new(),
+        };
+        let choices = j.choose(&state).unwrap();
+        let t = |name: &str| {
+            choices
+                .iter()
+                .find(|c| c.rel_path == name)
+                .unwrap()
+                .transition
+        };
+        assert_eq!(t("judge.rs"), Transition::Investigate);
+        assert_eq!(t("evaluator.rs"), Transition::Investigate);
+        assert_eq!(t("noise.rs"), Transition::Skip);
     }
 
     fn child(name: &str, is_dir: bool, sample: Vec<String>) -> Child {

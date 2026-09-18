@@ -10,7 +10,6 @@ use crate::navigator::walk::{
     is_noise_name, list_dir, list_files_recursive, read_trimmed, repo_join,
 };
 use crate::navigator::{Answer, Arg, Demand, Navigator, Need};
-use crate::syntax::template::is_builtin_sort;
 use crate::syntax::{verbalize_atom, Declare, Term};
 
 const MAX_LISTINGS: usize = 32;
@@ -72,10 +71,7 @@ impl TreeNavigator {
 
     fn answer_locate(&mut self, demand: &Demand, store: &Store) -> Answer {
         let pred = demand.pred.as_str();
-        let (args, free) = match bound_at(&demand.args, 0) {
-            Some(label) => (vec![label.to_string()], false),
-            None => (Vec::new(), true),
-        };
+        let (args, free) = bound_args(demand);
         if free {
             let mut tuples = store.facts_for(pred);
             if !tuples.is_empty() {
@@ -88,34 +84,42 @@ impl TreeNavigator {
                 };
             }
         }
-        let located = self.locate(pred, &args, demand.need);
+        let located = self.locate(pred, &args, demand.need, store);
         let source = format!("nav:{pred}");
+        let unary = demand.args.len() == 1;
         let answer = match located {
             LocateResult::Found(paths) => {
-                let bindings = if free {
-                    paths
+                if free {
+                    let bindings: Vec<(String, String)> = paths
                         .iter()
                         .map(|p| {
                             let name = p.rsplit('/').next().unwrap_or(p).to_string();
                             (name, p.clone())
                         })
-                        .collect()
+                        .collect();
+                    let tuples = bindings.iter().map(|(n, _)| vec![n.clone()]).collect();
+                    Answer {
+                        tuples,
+                        close: true,
+                        bindings,
+                        source: source.clone(),
+                    }
+                } else if unary {
+                    let label = args[0].clone();
+                    Answer {
+                        tuples: vec![vec![label.clone()]],
+                        close: true,
+                        bindings: paths.iter().map(|p| (label.clone(), p.clone())).collect(),
+                        source: source.clone(),
+                    }
                 } else {
-                    paths
-                        .iter()
-                        .map(|p| (args[0].clone(), p.clone()))
-                        .collect::<Vec<_>>()
-                };
-                let tuples = if free {
-                    bindings.iter().map(|(n, _)| vec![n.clone()]).collect()
-                } else {
-                    vec![vec![args[0].clone()]]
-                };
-                Answer {
-                    tuples,
-                    close: true,
-                    bindings,
-                    source: source.clone(),
+                    // Witness files prove the ground atom; they are not a denotation.
+                    Answer {
+                        tuples: vec![args.clone()],
+                        close: true,
+                        bindings: Vec::new(),
+                        source: source.clone(),
+                    }
                 }
             }
             LocateResult::Unknown => Answer {
@@ -131,14 +135,12 @@ impl TreeNavigator {
                 source: source.clone(),
             },
         };
-        let status = if answer.bindings.is_empty() {
-            if answer.close {
-                "absent"
-            } else {
-                "unknown"
-            }
-        } else {
+        let status = if !answer.tuples.is_empty() {
             "found"
+        } else if answer.close {
+            "absent"
+        } else {
+            "unknown"
         };
         self.trace.push(GroundStep::Result {
             pred: pred.to_string(),
@@ -149,107 +151,109 @@ impl TreeNavigator {
         answer
     }
 
-    /// Files that sit under a bound component: `belongs_to(?f, "Frontend")`
-    /// or the older `includes("Frontend", ?f)`.
-    fn answer_membership(&mut self, demand: &Demand, store: &Store) -> Answer {
+    /// One free arg, the rest bound: files under those constants' bindings.
+    fn answer_membership(&mut self, demand: &Demand, store: &Store) -> Option<Answer> {
         let source = format!("nav:{}", demand.pred);
-        let Some((file_i, comp_i)) = self.membership_slots(&demand.pred) else {
-            return Answer {
-                source,
-                ..Answer::default()
-            };
-        };
-        let Some(label) = bound_at(&demand.args, comp_i) else {
-            return Answer {
-                source,
-                ..Answer::default()
-            };
-        };
-        if let Some(file) = bound_at(&demand.args, file_i) {
-            let member = is_member(store, label, file);
-            return Answer {
-                tuples: if member {
-                    vec![membership_tuple(
-                        demand.args.len(),
-                        file_i,
-                        comp_i,
-                        file,
-                        label,
-                    )]
-                } else {
-                    Vec::new()
-                },
-                close: true,
-                bindings: Vec::new(),
-                source,
-            };
-        }
-        let mut tuples = Vec::new();
-        let mut closed = true;
-        let bindings = store.bindings_for(label);
-        if bindings.is_empty() {
-            closed = false;
-        }
-        for entity in bindings {
-            let path = repo_join(&self.root, &entity);
-            if path.is_file() {
-                tuples.push(membership_tuple(
-                    demand.args.len(),
-                    file_i,
-                    comp_i,
-                    &entity,
-                    label,
-                ));
-            } else if path.is_dir() {
-                match list_files_recursive(&self.root, &entity) {
-                    Ok(files) => {
-                        for f in files {
-                            tuples.push(membership_tuple(
-                                demand.args.len(),
-                                file_i,
-                                comp_i,
-                                &f,
-                                label,
-                            ));
-                        }
-                    }
-                    Err(_) => closed = false,
-                }
-            } else {
-                closed = false;
+        let mut file_i = None;
+        let mut bound = Vec::new();
+        for (i, a) in demand.args.iter().enumerate() {
+            match a {
+                Arg::Free(_) if file_i.is_none() => file_i = Some(i),
+                Arg::Free(_) => return None,
+                Arg::Bound(v) => bound.push((i, v.clone())),
             }
         }
-        Answer {
+        let file_i = file_i?;
+        if bound.is_empty() {
+            return None;
+        }
+        let arity = demand.args.len();
+        let mut tuples = Vec::new();
+        let mut closed = true;
+        let mut any = false;
+        for (_, label) in &bound {
+            let bindings = store.bindings_for(label);
+            if bindings.is_empty() {
+                continue;
+            }
+            any = true;
+            for entity in bindings {
+                let path = repo_join(&self.root, &entity);
+                if path.is_file() {
+                    tuples.push(demand_tuple(arity, file_i, &entity, &bound));
+                } else if path.is_dir() {
+                    match list_files_recursive(&self.root, &entity) {
+                        Ok(files) => {
+                            for f in files {
+                                tuples.push(demand_tuple(arity, file_i, &f, &bound));
+                            }
+                        }
+                        Err(_) => closed = false,
+                    }
+                } else {
+                    closed = false;
+                }
+            }
+        }
+        if !any {
+            closed = false;
+        }
+        Some(Answer {
             tuples,
             close: closed,
             bindings: Vec::new(),
             source,
-        }
+        })
     }
 
-    fn answer_relation(&mut self, demand: &Demand, store: &Store) -> Answer {
-        let pred = demand.pred.as_str();
+    /// Ground atom with a file and an already-located constant: path-prefix
+    /// membership from the binding table, not a document Choice.
+    fn answer_member_test(
+        &self,
+        pred: &str,
+        args: &[String],
+        file_i: usize,
+        store: &Store,
+    ) -> Option<Answer> {
+        let file = args[file_i].as_str();
+        let mut saw_locator = false;
+        let mut member = false;
+        for (i, a) in args.iter().enumerate() {
+            if i == file_i {
+                continue;
+            }
+            if store.bindings_for(a).is_empty() {
+                continue;
+            }
+            saw_locator = true;
+            if is_member(store, a, file) {
+                member = true;
+            }
+        }
+        if !saw_locator {
+            return None;
+        }
+        Some(Answer {
+            tuples: if member {
+                vec![args.to_vec()]
+            } else {
+                Vec::new()
+            },
+            close: true,
+            bindings: Vec::new(),
+            source: format!("nav:{pred}"),
+        })
+    }
+
+    /// An argument is already a repo file: judge that document, no walk.
+    fn answer_document(
+        &mut self,
+        pred: &str,
+        args: &[String],
+        file_i: usize,
+        store: &Store,
+    ) -> Answer {
         let source = format!("nav:{pred}");
-        let bound: Option<Vec<String>> = demand
-            .args
-            .iter()
-            .map(|a| match a {
-                Arg::Bound(s) => Some(s.clone()),
-                Arg::Free(_) => None,
-            })
-            .collect();
-        let Some(args) = bound else {
-            return Answer {
-                source,
-                ..Answer::default()
-            };
-        };
-        let Some(file_i) = self.file_arg_index(pred, &args) else {
-            return Answer {
-                source,
-                ..Answer::default()
-            };
-        };
         let file = args[file_i].as_str();
         let path = repo_join(&self.root, file);
         if !path.is_file() {
@@ -260,13 +264,13 @@ impl TreeNavigator {
                 source,
             };
         }
-        // Membership is `includes`. A file that sits under y does not
-        // *depend on* y; treating that as belongs_to(f, y) makes depends_on(y, y).
+        // A file under y is a member of y; that is not proof that this
+        // atom (e.g. a document relation) holds of y.
         if let Some(target) = args.get(1) {
             if is_member(store, target, file) {
                 self.trace.push(GroundStep::Document {
                     pred: pred.to_string(),
-                    args: args.clone(),
+                    args: args.to_vec(),
                     path: file.to_string(),
                     judgement: crate::navigator::judge::DocumentJudgement {
                         verdict: crate::navigator::judge::DocumentVerdict::False,
@@ -296,10 +300,10 @@ impl TreeNavigator {
             }
         };
         self.documents.push(file.to_string());
-        let verbalization = self.verbalize(pred, &args);
+        let verbalization = self.verbalize(pred, args);
         let judgement = match self.judge.document(&DocumentState {
             pred: pred.to_string(),
-            args: args.clone(),
+            args: args.to_vec(),
             path: file.to_string(),
             body: body.clone(),
             bindings: store
@@ -329,7 +333,7 @@ impl TreeNavigator {
         };
         self.trace.push(GroundStep::Document {
             pred: pred.to_string(),
-            args: args.clone(),
+            args: args.to_vec(),
             path: file.to_string(),
             judgement: judgement.clone(),
             preview: preview_body(&body),
@@ -338,7 +342,7 @@ impl TreeNavigator {
         });
         if judgement.closed_true() {
             Answer {
-                tuples: vec![args],
+                tuples: vec![args.to_vec()],
                 close: true,
                 bindings: Vec::new(),
                 source,
@@ -360,36 +364,12 @@ impl TreeNavigator {
         }
     }
 
-    fn membership_slots(&self, pred: &str) -> Option<(usize, usize)> {
-        if let Some(d) = self.declarations.get(pred) {
-            let file_i = d.slots.iter().position(|s| is_file_sort(s))?;
-            let comp_i = d
-                .slots
-                .iter()
-                .position(|s| !is_file_sort(s) && !is_builtin_sort(s))?;
-            return Some((file_i, comp_i));
-        }
-        if pred == "includes" {
-            return Some((1, 0));
-        }
-        None
-    }
-
-    fn file_arg_index(&self, pred: &str, args: &[String]) -> Option<usize> {
-        if let Some(d) = self.declarations.get(pred) {
-            if let Some(i) = d.slots.iter().position(|s| s.eq_ignore_ascii_case("file")) {
-                return Some(i);
-            }
-        }
-        args.iter().position(|a| repo_join(&self.root, a).is_file())
-    }
-
     fn verbalize(&self, pred: &str, args: &[String]) -> String {
         let terms: Vec<Term> = args.iter().cloned().map(Term::Const).collect();
         verbalize_atom(pred, &terms, &self.declarations)
     }
 
-    fn locate(&mut self, pred: &str, args: &[String], need: Need) -> LocateResult {
+    fn locate(&mut self, pred: &str, args: &[String], need: Need, store: &Store) -> LocateResult {
         let mut frontier: Vec<(String, usize)> = vec![("".to_string(), 0)];
         let mut visited = HashSet::new();
         let mut hits = Vec::new();
@@ -483,7 +463,7 @@ impl TreeNavigator {
                 effects,
                 exchanges,
             });
-            hits.extend(self.confirm_files(pred, args, &open_files));
+            hits.extend(self.confirm_files(pred, args, &open_files, store));
             if need == Need::Truth && !hits.is_empty() && frontier.is_empty() {
                 break;
             }
@@ -506,7 +486,13 @@ impl TreeNavigator {
 
     /// Files flagged `investigate` in one listing. Their document Nouls do
     /// not depend on each other; the judge may post them concurrently.
-    fn confirm_files(&mut self, pred: &str, args: &[String], rels: &[String]) -> Vec<String> {
+    fn confirm_files(
+        &mut self,
+        pred: &str,
+        args: &[String],
+        rels: &[String],
+        store: &Store,
+    ) -> Vec<String> {
         struct Prepared {
             rel: String,
             body: String,
@@ -527,7 +513,11 @@ impl TreeNavigator {
                     args: args.to_vec(),
                     path: rel.clone(),
                     body,
-                    bindings: Vec::new(),
+                    bindings: store
+                        .all_bindings()
+                        .into_iter()
+                        .map(|b| (b.constant, b.entity))
+                        .collect(),
                     verbalization: self.verbalize(pred, args),
                 },
             });
@@ -605,23 +595,27 @@ fn is_member(store: &Store, label: &str, file: &str) -> bool {
         .any(|root| file == root || file.starts_with(&format!("{root}/")))
 }
 
-fn is_file_sort(name: &str) -> bool {
-    name.eq_ignore_ascii_case("file")
+fn bound_args(demand: &Demand) -> (Vec<String>, bool) {
+    let mut args = Vec::new();
+    let mut free = false;
+    for a in &demand.args {
+        match a {
+            Arg::Bound(v) => args.push(v.clone()),
+            Arg::Free(_) => free = true,
+        }
+    }
+    (args, free)
 }
 
-fn membership_tuple(
-    arity: usize,
-    file_i: usize,
-    comp_i: usize,
-    file: &str,
-    label: &str,
-) -> Vec<String> {
+fn demand_tuple(arity: usize, file_i: usize, file: &str, bound: &[(usize, String)]) -> Vec<String> {
     let mut row = vec![String::new(); arity];
     if file_i < arity {
         row[file_i] = file.to_string();
     }
-    if comp_i < arity {
-        row[comp_i] = label.to_string();
+    for (i, v) in bound {
+        if *i < arity {
+            row[*i] = v.clone();
+        }
     }
     row
 }
@@ -654,13 +648,47 @@ impl Navigator for TreeNavigator {
     }
 
     fn answer(&mut self, demand: &Demand, store: &Store) -> Answer {
-        match demand.pred.as_str() {
-            "file" | "File" => self.answer_file(demand),
-            _ if demand.args.len() <= 1 => self.answer_locate(demand, store),
-            _ if self.membership_slots(&demand.pred).is_some() => {
-                self.answer_membership(demand, store)
+        if matches!(demand.pred.as_str(), "file" | "File") {
+            return self.answer_file(demand);
+        }
+
+        let all_bound = demand.args.iter().all(|a| matches!(a, Arg::Bound(_)));
+        if all_bound {
+            let args: Vec<String> = demand
+                .args
+                .iter()
+                .map(|a| match a {
+                    Arg::Bound(s) => s.clone(),
+                    Arg::Free(_) => unreachable!(),
+                })
+                .collect();
+            if let Some(file_i) = args.iter().position(|a| repo_join(&self.root, a).is_file()) {
+                if let Some(answer) = self.answer_member_test(&demand.pred, &args, file_i, store) {
+                    return answer;
+                }
+                return self.answer_document(&demand.pred, &args, file_i, store);
             }
-            _ => self.answer_relation(demand, store),
+            return self.answer_locate(demand, store);
+        }
+
+        if let Some(answer) = self.answer_membership(demand, store) {
+            return answer;
+        }
+
+        if demand.args.iter().any(|a| matches!(a, Arg::Bound(_))) {
+            return Answer {
+                source: format!("nav:{}", demand.pred),
+                ..Answer::default()
+            };
+        }
+        // `exists [c] (component c)`: locate entities. A free n-ary atom is
+        // an unbounded cartesian; do not walk the repo for that.
+        if demand.args.len() <= 1 {
+            return self.answer_locate(demand, store);
+        }
+        Answer {
+            source: format!("nav:{}", demand.pred),
+            ..Answer::default()
         }
     }
 }
@@ -765,5 +793,209 @@ mod tests {
             })
             .collect();
         assert_eq!(docs, ["a.py", "b.py", "c.py"]);
+    }
+
+    struct CaptureDocs {
+        docs: Arc<Mutex<Vec<DocumentState>>>,
+    }
+
+    impl Judge for CaptureDocs {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            OpenAll.choose(state)
+        }
+
+        fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            self.docs.lock().unwrap().push(state.clone());
+            OpenAll.document(state)
+        }
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "autoground-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ))
+    }
+
+    fn knows_about_compiled() -> crate::core::Compiled {
+        let src = r#"
+(declare component "{String} is a (conceptual or concrete) component in the codebase")
+(declare knows_about "{component} knows about {component}")
+"#;
+        crate::core::compile(&crate::syntax::parse(src).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn nary_ground_atom_walks_and_judges_verbalized_document() {
+        let dir = scratch_dir("nary-locate");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hit.py"), "Judge talks to Evaluator\n").unwrap();
+        let docs = Arc::new(Mutex::new(Vec::new()));
+        let mut nav = TreeNavigator::new(&dir, Box::new(CaptureDocs { docs: docs.clone() }));
+        nav.prepare(&knows_about_compiled());
+        let demand = Demand {
+            pred: "knows_about".into(),
+            args: vec![Arg::Bound("Judge".into()), Arg::Bound("Evaluator".into())],
+            need: Need::Truth,
+        };
+        let answer = nav.answer(&demand, &Store::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            answer.tuples,
+            vec![vec!["Judge".to_string(), "Evaluator".to_string()]]
+        );
+        assert!(
+            answer.bindings.is_empty(),
+            "witness files are not a denotation: {:?}",
+            answer.bindings
+        );
+        assert!(
+            nav.trace
+                .iter()
+                .any(|s| matches!(s, GroundStep::Listing { .. })),
+            "expected a tree walk for a conceptual relation"
+        );
+        let docs = docs.lock().unwrap().clone();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].pred, "knows_about");
+        assert_eq!(docs[0].args, ["Judge".to_string(), "Evaluator".to_string()]);
+        assert_eq!(
+            docs[0].verbalization,
+            "component \"Judge\" knows about component \"Evaluator\""
+        );
+    }
+
+    #[test]
+    fn file_path_args_judge_document_without_walk() {
+        let dir = scratch_dir("file-args");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.py"), "from b import x\n").unwrap();
+        std::fs::write(dir.join("b.py"), "x = 1\n").unwrap();
+        let mut nav = TreeNavigator::new(&dir, Box::new(OpenAll));
+        let demand = Demand {
+            pred: "includes".into(),
+            args: vec![Arg::Bound("a.py".into()), Arg::Bound("b.py".into())],
+            need: Need::Truth,
+        };
+        let answer = nav.answer(&demand, &Store::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            answer.tuples,
+            vec![vec!["a.py".to_string(), "b.py".to_string()]]
+        );
+        assert!(
+            !nav.trace
+                .iter()
+                .any(|s| matches!(s, GroundStep::Listing { .. })),
+            "already-located file args should not walk"
+        );
+        assert!(nav
+            .trace
+            .iter()
+            .any(|s| matches!(s, GroundStep::Document { path, .. } if path == "a.py")));
+    }
+
+    #[test]
+    fn membership_generation_uses_bindings_not_declare_slots() {
+        let dir = scratch_dir("membership");
+        std::fs::create_dir_all(dir.join("ui")).unwrap();
+        std::fs::write(dir.join("ui/app.py"), "print(1)\n").unwrap();
+        let mut store = Store::new();
+        store.bind("Frontend", "ui");
+        let mut nav = TreeNavigator::new(&dir, Box::new(OpenAll));
+        let demand = Demand {
+            pred: "belongs_to".into(),
+            args: vec![Arg::Free("f".into()), Arg::Bound("Frontend".into())],
+            need: Need::Truth,
+        };
+        let answer = nav.answer(&demand, &store);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            answer.tuples,
+            vec![vec!["ui/app.py".to_string(), "Frontend".to_string()]]
+        );
+        assert!(
+            !nav.trace
+                .iter()
+                .any(|s| matches!(s, GroundStep::Listing { .. })),
+            "member files come from bindings, not a walk"
+        );
+    }
+
+    #[test]
+    fn free_nary_atom_does_not_walk() {
+        let dir = scratch_dir("free-nary");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.py"), "a\n").unwrap();
+        let mut nav = TreeNavigator::new(&dir, Box::new(OpenAll));
+        let answer = nav.answer(
+            &Demand {
+                pred: "includes".into(),
+                args: vec![Arg::Free("f1".into()), Arg::Free("f2".into())],
+                need: Need::Truth,
+            },
+            &Store::new(),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(answer.tuples.is_empty());
+        assert!(!answer.close);
+        assert!(
+            !nav.trace
+                .iter()
+                .any(|s| matches!(s, GroundStep::Listing { .. })),
+            "unbounded n-ary generation must not walk"
+        );
+    }
+
+    #[test]
+    fn ground_membership_is_path_prefix_not_a_document() {
+        let dir = scratch_dir("member-test");
+        std::fs::create_dir_all(dir.join("ui")).unwrap();
+        std::fs::create_dir_all(dir.join("api")).unwrap();
+        std::fs::write(dir.join("ui/app.py"), "from api import client\n").unwrap();
+        std::fs::write(dir.join("api/client.py"), "x = 1\n").unwrap();
+        let mut store = Store::new();
+        store.bind("Frontend", "ui");
+        store.bind("Backend", "api");
+        let mut nav = TreeNavigator::new(&dir, Box::new(OpenAll));
+        let yes = nav.answer(
+            &Demand {
+                pred: "belongs_to".into(),
+                args: vec![
+                    Arg::Bound("ui/app.py".into()),
+                    Arg::Bound("Frontend".into()),
+                ],
+                need: Need::Truth,
+            },
+            &store,
+        );
+        let no = nav.answer(
+            &Demand {
+                pred: "belongs_to".into(),
+                args: vec![Arg::Bound("ui/app.py".into()), Arg::Bound("Backend".into())],
+                need: Need::Truth,
+            },
+            &store,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            yes.tuples,
+            vec![vec!["ui/app.py".to_string(), "Frontend".to_string()]]
+        );
+        assert!(
+            no.tuples.is_empty(),
+            "app.py is not under Backend: {:?}",
+            no.tuples
+        );
+        assert!(
+            !nav.trace
+                .iter()
+                .any(|s| matches!(s, GroundStep::Document { .. })),
+            "membership is not a document Choice"
+        );
     }
 }

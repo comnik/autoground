@@ -1,0 +1,13 @@
+;; autoground architecture
+
+(declare component "{String} is a (conceptual or concrete) component in the codebase")
+(declare knows_about "{component} knows about {component}")
+
+(require
+ (and
+  (component "Judge")
+  (component "Evaluator")
+  (component "TUI")))
+
+(require
+ (knows_about "Evaluator" "Judge"))

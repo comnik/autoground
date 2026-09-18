@@ -214,32 +214,18 @@ pub fn listing_request(
 ) -> Value {
     let statement = atom_text(&state.pred, &state.args, &state.verbalization);
     let mut questions = serde_json::Map::new();
-    let mut children = serde_json::Map::new();
     for (i, child) in chunk.iter().enumerate() {
-        let id = format!("c{}", id_base + i);
-        let loc = format!("children.{id}");
-        children.insert(
-            id.clone(),
-            json!({
-                "name": child.name,
-                "path": child.rel_path,
-                "is_dir": child.is_dir,
-                "sample": child.sample,
-            }),
-        );
+        let path = listing_path(child);
         questions.insert(
-            id,
+            format!("c{}", id_base + i),
             json!({
                 "type": "choice",
-                "instructions": {
-                    "question": format!(
-                        "Does `{loc}` contain proof or disproof for `atom.statement`?"
-                    ),
-                    "inspect": loc,
-                },
+                "instructions": format!(
+                    "Should we look in {path} for proof or disproof of the following statement: {statement}"
+                ),
                 "criteria": {
-                    "skip": "This location does not contain proof or disproof.",
-                    "investigate": "This location contains proof or disproof. Directories are listed; files are opened.",
+                    "skip": "Do not look here. The name, path, and listing sample show this is unrelated.",
+                    "investigate": "Look here. Directories are listed next; files are opened and judged.",
                 }
             }),
         );
@@ -253,7 +239,12 @@ pub fn listing_request(
                 "statement": statement,
             },
             "directory": state.dir,
-            "children": children,
+            "children": state.children.iter().map(|c| json!({
+                "name": c.name,
+                "path": c.rel_path,
+                "is_dir": c.is_dir,
+                "sample": c.sample,
+            })).collect::<Vec<_>>(),
         },
         "questions": questions,
     })
@@ -374,6 +365,14 @@ fn atom_text(pred: &str, args: &[String], verbalization: &str) -> String {
     }
 }
 
+fn listing_path(child: &Child) -> String {
+    if child.is_dir {
+        format!("{}/", child.rel_path.trim_end_matches('/'))
+    } else {
+        child.rel_path.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,32 +405,39 @@ mod tests {
         assert_eq!(body["questions"]["c0"]["type"], "choice");
         assert_eq!(body["questions"]["c1"]["type"], "choice");
         assert_eq!(body["questions"]["c2"]["type"], "choice");
-        assert_eq!(body["state"]["children"]["c0"]["path"], "frontend");
-        assert_eq!(body["state"]["children"]["c1"]["path"], "decoy");
-        assert_eq!(body["state"]["children"]["c2"]["path"], "app.py");
+        assert_eq!(body["state"]["children"].as_array().unwrap().len(), 3);
+        assert_eq!(body["state"]["children"][0]["path"], "frontend");
+        assert_eq!(body["state"]["children"][1]["path"], "decoy");
+        assert_eq!(body["state"]["children"][2]["path"], "app.py");
         assert_eq!(
             body["state"]["atom"]["statement"],
             "\"Frontend\" is a component in the codebase"
         );
-        let instr = &body["questions"]["c0"]["instructions"];
+        let instr = body["questions"]["c0"]["instructions"].as_str().unwrap();
         assert_eq!(
-            instr["question"],
-            "Does `children.c0` contain proof or disproof for `atom.statement`?"
-        );
-        assert_eq!(instr["inspect"], "children.c0");
-        assert_eq!(
-            body["questions"]["c1"]["instructions"]["inspect"],
-            "children.c1"
+            instr,
+            "Should we look in frontend/ for proof or disproof of the following statement: \"Frontend\" is a component in the codebase"
         );
         assert_eq!(
-            body["questions"]["c2"]["instructions"]["inspect"],
-            "children.c2"
+            body["questions"]["c1"]["instructions"].as_str().unwrap(),
+            "Should we look in decoy/ for proof or disproof of the following statement: \"Frontend\" is a component in the codebase"
+        );
+        assert_eq!(
+            body["questions"]["c2"]["instructions"].as_str().unwrap(),
+            "Should we look in app.py for proof or disproof of the following statement: \"Frontend\" is a component in the codebase"
         );
         let criteria = body["questions"]["c0"]["criteria"].as_object().unwrap();
         assert!(criteria.contains_key("skip"));
         assert!(criteria.contains_key("investigate"));
         assert!(!criteria.contains_key("unknown"));
-        assert_eq!(body["state"]["children"]["c0"]["sample"], json!(["app.py"]));
+        assert!(
+            !criteria["skip"]
+                .as_str()
+                .unwrap()
+                .contains("does not contain proof or disproof"),
+            "skip must not mean 'no proof yet'; that makes every listing skip"
+        );
+        assert_eq!(body["state"]["children"][0]["sample"], json!(["app.py"]));
         assert!(!body["state"].get("body").is_some());
     }
 

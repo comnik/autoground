@@ -59,6 +59,7 @@ model couldn’t be grounded.
 
 *Note: these all need to be pressure tested still.*
 
+0. No baked-in assumptions about schema.
 1. Deterministic IDB and constraints.
 2. LLM-augmented EDB (pure LLM extract or LLM-selected deterministic grounder).
 3. Top-down evaluation to guide which parts of the codebase to include in-context.
