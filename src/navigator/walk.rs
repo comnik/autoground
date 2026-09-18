@@ -9,7 +9,8 @@ use super::judge::Child;
 
 const SAMPLE_N: usize = 8;
 
-/// Gitignored paths, plus the model file when it lives inside the repo.
+/// Gitignored paths, `.git` / `.gitignore`, plus the model file when it lives
+/// inside the repo.
 #[derive(Default)]
 pub struct ListingFilter {
     gitignore: Option<Gitignore>,
@@ -29,6 +30,9 @@ impl ListingFilter {
     }
 
     pub fn hide(&self, rel: &str, is_dir: bool) -> bool {
+        if is_git_meta(rel) {
+            return true;
+        }
         if self.model_rel.as_deref() == Some(rel) {
             return true;
         }
@@ -37,6 +41,12 @@ impl ListingFilter {
             None => false,
         }
     }
+}
+
+/// `.git` (and anything under it) and `.gitignore` are never listing children.
+fn is_git_meta(rel: &str) -> bool {
+    rel.split('/')
+        .any(|part| part == ".git" || part == ".gitignore")
 }
 
 fn load_gitignore(root: &Path) -> Option<Gitignore> {
@@ -321,9 +331,36 @@ mod tests {
         let names: Vec<_> = kids.iter().map(|c| c.name.as_str()).collect();
         let _ = std::fs::remove_dir_all(&root);
         assert!(names.contains(&"keep.txt"), "{names:?}");
-        assert!(names.contains(&".gitignore"), "{names:?}");
+        assert!(!names.contains(&".gitignore"), "{names:?}");
         assert!(!names.contains(&"secret.txt"), "{names:?}");
         assert!(!names.contains(&"build"), "{names:?}");
+    }
+
+    #[test]
+    fn git_dir_and_gitignore_are_hidden() {
+        let root = scratch_dir("git-meta");
+        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "/target\n").unwrap();
+        std::fs::write(root.join("keep.txt"), "yes\n").unwrap();
+        std::fs::write(root.join(".gitkeep"), "keep\n").unwrap();
+        let filter = ListingFilter::from_repo(&root);
+        let kids = list_dir(&root, "", &filter).unwrap();
+        let names: Vec<_> = kids.iter().map(|c| c.name.as_str()).collect();
+        let packed = pack_listing(&root, &[("".into(), 0)], &filter, &HashSet::new(), 100, 8);
+        let packed_paths = child_paths(&packed);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(names.contains(&"keep.txt"), "{names:?}");
+        assert!(names.contains(&".gitkeep"), "{names:?}");
+        assert!(!names.contains(&".git"), "{names:?}");
+        assert!(!names.contains(&".gitignore"), "{names:?}");
+        assert!(
+            packed_paths
+                .iter()
+                .all(|p| !p.split('/').any(|part| part == ".git")),
+            "{packed_paths:?}"
+        );
+        assert!(!packed_paths.contains(&".gitignore"), "{packed_paths:?}");
     }
 
     #[test]
