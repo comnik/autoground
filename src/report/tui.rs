@@ -11,7 +11,7 @@ use crossterm::{
 
 use super::step::{format_jev, format_step};
 use super::{format_duration, format_usd, jev_request_cost_usd, jev_request_intervals, RunTiming};
-use crate::navigator::judge::{DocumentVerdict, TAU_CONFIDENCE};
+use crate::navigator::judge::{Consistency, DocumentVerdict, ResolveValue, TAU_CONFIDENCE};
 use crate::navigator::trace::GroundStep;
 
 const JEV_BAR: Color = Color::Rgb {
@@ -447,6 +447,25 @@ fn color_line(out: &mut impl Write, line: &str, step: &GroundStep) -> std::io::R
 }
 
 fn document_line_color(line: &str, step: &GroundStep) -> Option<Color> {
+    if let GroundStep::Conflict {
+        value, consistency, ..
+    } = step
+    {
+        if line.contains("consistency") {
+            return Some(match consistency {
+                Consistency::Conflicting => Color::Yellow,
+                Consistency::Consistent => Color::Green,
+            });
+        }
+        if line.contains("value") {
+            return Some(match value {
+                ResolveValue::True => Color::Green,
+                ResolveValue::False => Color::Red,
+                ResolveValue::Unknown => Color::Yellow,
+            });
+        }
+        return None;
+    }
     let GroundStep::Document { judgement, .. } = step else {
         return None;
     };
@@ -456,9 +475,9 @@ fn document_line_color(line: &str, step: &GroundStep) -> Option<Color> {
             return None;
         }
         return Some(match judgement.verdict {
-            DocumentVerdict::True => Color::Green,
-            DocumentVerdict::False => Color::Red,
-            DocumentVerdict::Unknown => Color::Yellow,
+            DocumentVerdict::Entailed => Color::Green,
+            DocumentVerdict::Contradicted => Color::Red,
+            DocumentVerdict::Neutral => Color::Yellow,
         });
     }
     if line.contains("confidence") && !high {

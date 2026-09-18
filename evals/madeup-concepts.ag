@@ -1,0 +1,11 @@
+;; Made-up concepts should refuse to ground.
+
+(declare CLI "the system has a command-line interface")
+(declare GPUCompiler "the system has a gpu-based compiler for the s-exp representation")
+(declare EDBStorage "the system stores memoized EDBs in postgres")
+(declare Evaluator "the system has an evaluator based on a SAT solver")
+
+(require (CLI))
+(require (GPUCompiler))
+(require (EDBStorage))
+(require (Evaluator))

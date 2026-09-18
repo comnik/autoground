@@ -4,8 +4,9 @@ use std::time::SystemTime;
 use serde_json::{json, Value};
 
 use super::judge::{
-    Child, ChildChoice, DocumentAnswer, DocumentJudgement, DocumentState, DocumentVerdict, Judge,
-    JudgeError, JudgeExchange, ListingState, MultiListingState, Transition, LISTING_CHOICE_BUDGET,
+    Child, ChildChoice, ConflictAnswer, ConflictState, Consistency, DocumentAnswer,
+    DocumentJudgement, DocumentState, DocumentVerdict, Judge, JudgeError, JudgeExchange,
+    ListingState, MultiListingState, ResolveValue, Transition, LISTING_CHOICE_BUDGET,
 };
 use super::walk::parent_dir;
 
@@ -328,6 +329,15 @@ impl<T: Transport> Judge for JevJudge<T> {
             .collect()
     }
 
+    fn resolve_conflict(&mut self, state: &ConflictState) -> Result<ConflictAnswer, JudgeError> {
+        self.exchanges.clear();
+        let body = conflict_request(&self.model, state);
+        let resp = self.evaluate(&body)?;
+        let mut answer = parse_conflict_answer(&resp)?;
+        answer.exchanges = self.exchanges.clone();
+        Ok(answer)
+    }
+
     fn last_exchanges(&self) -> Vec<JudgeExchange> {
         self.exchanges.clone()
     }
@@ -490,11 +500,15 @@ fn entry_name(child: &Child) -> String {
 }
 
 pub fn investigation_request(model: &str, state: &DocumentState) -> Value {
-    let atom = atom_text(&state.pred, &state.args, &state.verbalization);
+    let statement = atom_text(&state.pred, &state.args, &state.verbalization);
     json!({
         "model": model,
         "state": {
-            "atom": { "pred": state.pred, "args": state.args },
+            "atom": {
+                "pred": state.pred,
+                "args": state.args,
+                "statement": statement,
+            },
             "path": state.path,
             "body": state.body,
             "bindings": state.bindings.iter().map(|(c, e)| json!({
@@ -503,15 +517,7 @@ pub fn investigation_request(model: &str, state: &DocumentState) -> Value {
             })).collect::<Vec<_>>(),
         },
         "questions": {
-            "ground": {
-                "type": "choice",
-                "instructions": atom,
-                "criteria": {
-                    "true": "The atom holds.",
-                    "false": "The atom does not hold.",
-                    "unknown": "Cannot tell.",
-                }
-            }
+            "ground": document_question(&statement),
         }
     })
 }
@@ -591,9 +597,9 @@ fn parse_document_choice(ans: &Value) -> Result<DocumentJudgement, JudgeError> {
         .and_then(|c| c.as_str())
         .ok_or_else(|| JudgeError::Parse("document answer missing choice".into()))?;
     let verdict = match choice {
-        "true" => DocumentVerdict::True,
-        "false" => DocumentVerdict::False,
-        "unknown" => DocumentVerdict::Unknown,
+        "entailed" => DocumentVerdict::Entailed,
+        "contradicted" => DocumentVerdict::Contradicted,
+        "neutral" => DocumentVerdict::Neutral,
         other => {
             return Err(JudgeError::Parse(format!(
                 "unknown document verdict `{other}`"
@@ -650,18 +656,7 @@ pub fn investigation_request_many(model: &str, states: &[DocumentState]) -> Valu
                 "statement": statement,
             }),
         );
-        questions.insert(
-            key,
-            json!({
-                "type": "choice",
-                "instructions": statement,
-                "criteria": {
-                    "true": "The atom holds.",
-                    "false": "The atom does not hold.",
-                    "unknown": "Cannot tell.",
-                }
-            }),
-        );
+        questions.insert(key, document_question(&statement));
     }
     json!({
         "model": model,
@@ -675,6 +670,95 @@ pub fn investigation_request_many(model: &str, states: &[DocumentState]) -> Valu
             "atoms": atoms,
         },
         "questions": questions,
+    })
+}
+
+pub fn conflict_request(model: &str, state: &ConflictState) -> Value {
+    let statement = atom_text(&state.pred, &state.args, &state.verbalization);
+    let evidence: Vec<Value> = state
+        .evidence
+        .iter()
+        .map(|e| {
+            json!({
+                "path": e.path,
+                "verdict": e.verdict.label(),
+                "confidence": e.confidence,
+                "excerpt": e.excerpt,
+            })
+        })
+        .collect();
+    json!({
+        "model": model,
+        "state": {
+            "atom": {
+                "pred": state.pred,
+                "args": state.args,
+                "statement": statement,
+            },
+            "evidence": evidence,
+        },
+        "questions": {
+            "value": {
+                "type": "choice",
+                "instructions": format!(
+                    "Given these document judgements of the following statement, what is the codebase's overall answer: {statement}"
+                ),
+                "criteria": {
+                    "true": "the statement holds of the codebase",
+                    "false": "the statement does not hold of the codebase",
+                    "unknown": "the evidence is insufficient to decide",
+                }
+            },
+            "consistency": {
+                "type": "choice",
+                "instructions": format!(
+                    "Do the polar judgements agree about the following statement, or do they conflict: {statement}"
+                ),
+                "criteria": {
+                    "consistent": "the entailed and contradicted files can be reconciled",
+                    "conflicting": "the files genuinely disagree about the statement",
+                }
+            }
+        }
+    })
+}
+
+fn parse_conflict_answer(resp: &Value) -> Result<ConflictAnswer, JudgeError> {
+    let answers = resp
+        .get("answers")
+        .and_then(|a| a.as_object())
+        .ok_or_else(|| JudgeError::Parse("response missing answers".into()))?;
+    let value = answers
+        .get("value")
+        .and_then(|v| v.get("choice"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| JudgeError::Parse("missing answer value".into()))?;
+    let consistency = answers
+        .get("consistency")
+        .and_then(|v| v.get("choice"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| JudgeError::Parse("missing answer consistency".into()))?;
+    let value = match value {
+        "true" => ResolveValue::True,
+        "false" => ResolveValue::False,
+        "unknown" => ResolveValue::Unknown,
+        other => {
+            return Err(JudgeError::Parse(format!(
+                "unknown resolve value `{other}`"
+            )));
+        }
+    };
+    let consistency = match consistency {
+        "consistent" => Consistency::Consistent,
+        "conflicting" => Consistency::Conflicting,
+        other => {
+            return Err(JudgeError::Parse(format!("unknown consistency `{other}`")));
+        }
+    };
+    Ok(ConflictAnswer {
+        value,
+        consistency,
+        exchanges: Vec::new(),
     })
 }
 
@@ -737,6 +821,20 @@ fn atom_text(pred: &str, args: &[String], verbalization: &str) -> String {
     }
 }
 
+fn document_question(statement: &str) -> Value {
+    json!({
+        "type": "choice",
+        "instructions": format!(
+            "How does `body` ground the following statement: {statement}"
+        ),
+        "criteria": {
+            "entailed": "body supplies information that makes the statement true",
+            "contradicted": "body supplies information that makes the statement false",
+            "neutral": "body neither supports nor refutes the statement",
+        }
+    })
+}
+
 fn listing_path(child: &Child) -> String {
     if child.is_dir {
         format!("{}/", child.rel_path.trim_end_matches('/'))
@@ -748,7 +846,10 @@ fn listing_path(child: &Child) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::navigator::judge::{Child, DocumentVerdict, ListingAtom, MultiListingState};
+    use crate::navigator::judge::{
+        Child, ConflictEvidence, ConflictState, Consistency, DocumentVerdict, ListingAtom,
+        MultiListingState, ResolveValue,
+    };
 
     fn child(name: &str, is_dir: bool) -> Child {
         Child {
@@ -918,18 +1019,86 @@ mod tests {
         let body = investigation_request("jev-latest", &state);
         assert_eq!(body["questions"]["ground"]["type"], "choice");
         let criteria = body["questions"]["ground"]["criteria"].as_object().unwrap();
-        assert!(criteria.contains_key("true"));
-        assert!(criteria.contains_key("false"));
-        assert!(criteria.contains_key("unknown"));
+        assert!(criteria.contains_key("entailed"));
+        assert!(criteria.contains_key("contradicted"));
+        assert!(criteria.contains_key("neutral"));
+        assert!(!criteria.contains_key("true"));
+        assert!(!criteria.contains_key("false"));
+        assert!(!criteria.contains_key("unknown"));
+        assert!(criteria["entailed"]
+            .as_str()
+            .unwrap()
+            .contains("body supplies information"));
+        assert!(criteria["neutral"]
+            .as_str()
+            .unwrap()
+            .contains("neither supports nor refutes"));
         assert!(body["state"].get("children").is_none());
         assert_eq!(body["state"]["path"], "ui/app.py");
+        assert_eq!(
+            body["state"]["atom"]["statement"],
+            "file \"ui/app.py\" (partially) defines component \"Backend\""
+        );
         let instr = body["questions"]["ground"]["instructions"]
             .as_str()
             .unwrap();
         assert_eq!(
             instr,
-            "file \"ui/app.py\" (partially) defines component \"Backend\""
+            "How does `body` ground the following statement: file \"ui/app.py\" (partially) defines component \"Backend\""
         );
+    }
+
+    #[test]
+    fn conflict_request_asks_value_and_consistency() {
+        let state = ConflictState {
+            pred: "GPUCompiler".into(),
+            args: vec![],
+            verbalization: "the system has a gpu-based compiler".into(),
+            evidence: vec![
+                ConflictEvidence {
+                    path: "a.rs".into(),
+                    verdict: DocumentVerdict::Entailed,
+                    confidence: 0.9,
+                    excerpt: "gpu backend".into(),
+                },
+                ConflictEvidence {
+                    path: "b.rs".into(),
+                    verdict: DocumentVerdict::Contradicted,
+                    confidence: 0.8,
+                    excerpt: "cpu only".into(),
+                },
+            ],
+        };
+        let body = conflict_request("jev-latest", &state);
+        assert_eq!(body["questions"]["value"]["type"], "choice");
+        assert_eq!(body["questions"]["consistency"]["type"], "choice");
+        let value = body["questions"]["value"]["criteria"].as_object().unwrap();
+        assert!(value.contains_key("true"));
+        assert!(value.contains_key("false"));
+        assert!(value.contains_key("unknown"));
+        let cons = body["questions"]["consistency"]["criteria"]
+            .as_object()
+            .unwrap();
+        assert!(cons.contains_key("consistent"));
+        assert!(cons.contains_key("conflicting"));
+        assert_eq!(body["state"]["evidence"].as_array().unwrap().len(), 2);
+        assert_eq!(body["state"]["evidence"][0]["verdict"], "entailed");
+        assert_eq!(body["state"]["evidence"][1]["verdict"], "contradicted");
+        assert!(body["questions"]["value"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("the system has a gpu-based compiler"));
+        assert!(body["state"].get("body").is_none());
+
+        let parsed = parse_conflict_answer(&json!({
+            "answers": {
+                "value": { "type": "choice", "choice": "unknown", "confidence": 0.7 },
+                "consistency": { "type": "choice", "choice": "conflicting", "confidence": 0.9 }
+            }
+        }))
+        .unwrap();
+        assert_eq!(parsed.value, ResolveValue::Unknown);
+        assert_eq!(parsed.consistency, Consistency::Conflicting);
     }
 
     #[test]
@@ -947,21 +1116,21 @@ mod tests {
 
         let doc_resp = json!({
             "answers": {
-                "ground": { "type": "choice", "choice": "true", "confidence": 0.9 }
+                "ground": { "type": "choice", "choice": "entailed", "confidence": 0.9 }
             }
         });
         let n = parse_document_answer(&doc_resp).unwrap();
-        assert_eq!(n.verdict, DocumentVerdict::True);
+        assert_eq!(n.verdict, DocumentVerdict::Entailed);
         assert!((n.confidence - 0.9).abs() < 1e-9);
 
         let unknown_resp = json!({
             "answers": {
-                "ground": { "type": "choice", "choice": "unknown", "confidence": 0.7 }
+                "ground": { "type": "choice", "choice": "neutral", "confidence": 0.7 }
             }
         });
         let u = parse_document_answer(&unknown_resp).unwrap();
-        assert_eq!(u.verdict, DocumentVerdict::Unknown);
-        assert!(!u.closed_true() && !u.closed_false());
+        assert_eq!(u.verdict, DocumentVerdict::Neutral);
+        assert!(!u.is_entailed() && !u.is_contradicted());
     }
 
     struct SeqTransport {
@@ -1064,7 +1233,7 @@ mod tests {
     fn true_doc_resp() -> Value {
         json!({
             "answers": {
-                "ground": { "type": "choice", "choice": "true", "confidence": 0.9 }
+                "ground": { "type": "choice", "choice": "entailed", "confidence": 0.9 }
             }
         })
     }
@@ -1111,7 +1280,7 @@ mod tests {
         assert_eq!(answers.len(), 3);
         assert!(answers
             .iter()
-            .all(|a| a.as_ref().unwrap().judgement.closed_true()));
+            .all(|a| a.as_ref().unwrap().judgement.is_entailed()));
         assert_eq!(*batches.lock().unwrap(), vec![3]);
         let ex = judge.last_exchanges();
         assert_eq!(ex.len(), 3);
@@ -1126,8 +1295,8 @@ mod tests {
     fn many_doc_resp() -> Value {
         json!({
             "answers": {
-                "q0": { "type": "choice", "choice": "true", "confidence": 0.9 },
-                "q1": { "type": "choice", "choice": "false", "confidence": 0.8 }
+                "q0": { "type": "choice", "choice": "entailed", "confidence": 0.9 },
+                "q1": { "type": "choice", "choice": "contradicted", "confidence": 0.8 }
             }
         })
     }
@@ -1158,14 +1327,28 @@ mod tests {
         };
         let answers = judge.documents(&[a, b]);
         assert_eq!(*batches.lock().unwrap(), vec![1]);
-        assert!(answers[0].as_ref().unwrap().judgement.closed_true());
-        assert!(answers[1].as_ref().unwrap().judgement.closed_false());
+        assert!(answers[0].as_ref().unwrap().judgement.is_entailed());
+        assert!(answers[1].as_ref().unwrap().judgement.is_contradicted());
         let ex = judge.last_exchanges();
         assert_eq!(ex.len(), 1);
         assert!(ex[0].request["questions"].get("q0").is_some());
         assert!(ex[0].request["questions"].get("q1").is_some());
         assert!(ex[0].request["questions"].get("ground").is_none());
         assert_eq!(ex[0].request["state"]["path"], "readme.md");
+        assert_eq!(
+            ex[0].request["questions"]["q0"]["instructions"],
+            "How does `body` ground the following statement: \"Frontend\" is a component in the codebase"
+        );
+        assert_eq!(
+            ex[0].request["questions"]["q1"]["instructions"],
+            "How does `body` ground the following statement: \"Backend\" is a component in the codebase"
+        );
+        let criteria = ex[0].request["questions"]["q0"]["criteria"]
+            .as_object()
+            .unwrap();
+        assert!(criteria.contains_key("entailed"));
+        assert!(criteria.contains_key("contradicted"));
+        assert!(criteria.contains_key("neutral"));
     }
 
     #[test]

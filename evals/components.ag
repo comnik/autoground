@@ -1,0 +1,10 @@
+(declare component "{String} is a component or module in the codebase")
+
+;; Assert that a component is directly represented by something in the codebase.
+(require
+ (and
+  (component "navigator")
+  (component "proposer")
+  (component "judge")
+  ;; Granularity is up to you.
+  (component "AST")))

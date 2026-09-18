@@ -102,14 +102,27 @@ pub struct ChildChoice {
     pub confidence: f64,
 }
 
-/// Three-way document judgement. Unknown is a named option, not a
-/// threshold on P(yes).
+/// How a file body relates to the demanded statement.
+/// `true`/`false`/`unknown` aliases load older traces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DocumentVerdict {
-    True,
-    False,
-    Unknown,
+    #[serde(alias = "true")]
+    Entailed,
+    #[serde(alias = "false")]
+    Contradicted,
+    #[serde(alias = "unknown")]
+    Neutral,
+}
+
+impl DocumentVerdict {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Entailed => "entailed",
+            Self::Contradicted => "contradicted",
+            Self::Neutral => "neutral",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -200,13 +213,85 @@ pub const TAU_CONFIDENCE: f64 = 0.6;
 pub const LISTING_CHOICE_BUDGET: usize = 100;
 
 impl DocumentJudgement {
-    pub fn closed_true(&self) -> bool {
-        self.verdict == DocumentVerdict::True && self.confidence >= TAU_CONFIDENCE
+    pub fn is_entailed(&self) -> bool {
+        self.verdict == DocumentVerdict::Entailed && self.confidence >= TAU_CONFIDENCE
     }
 
-    pub fn closed_false(&self) -> bool {
-        self.verdict == DocumentVerdict::False && self.confidence >= TAU_CONFIDENCE
+    pub fn is_contradicted(&self) -> bool {
+        self.verdict == DocumentVerdict::Contradicted && self.confidence >= TAU_CONFIDENCE
     }
+
+    pub fn note(&self) -> &'static str {
+        if self.is_entailed() {
+            "entailed"
+        } else if self.is_contradicted() {
+            "contradicted"
+        } else if self.confidence >= TAU_CONFIDENCE {
+            "neutral"
+        } else {
+            "undecided"
+        }
+    }
+}
+
+/// Polar document evidence for a ground-atom conflict resolve.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConflictEvidence {
+    pub path: String,
+    pub verdict: DocumentVerdict,
+    pub confidence: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub excerpt: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConflictState {
+    pub pred: String,
+    pub args: Vec<String>,
+    pub verbalization: String,
+    pub evidence: Vec<ConflictEvidence>,
+}
+
+/// Eval-facing 3VL from a conflict resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResolveValue {
+    True,
+    False,
+    Unknown,
+}
+
+impl ResolveValue {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::True => "true",
+            Self::False => "false",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Consistency {
+    Consistent,
+    Conflicting,
+}
+
+impl Consistency {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Consistent => "consistent",
+            Self::Conflicting => "conflicting",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConflictAnswer {
+    pub value: ResolveValue,
+    pub consistency: Consistency,
+    pub exchanges: Vec<JudgeExchange>,
 }
 
 #[derive(Debug, Clone)]
@@ -268,8 +353,18 @@ pub trait Judge {
             .collect()
     }
 
-    /// Request/response pairs from the most recent `choose` or `document`.
-    /// Empty for heuristic and fixture judges.
+    /// Resolve mixed entailed/contradicted documents for one ground atom.
+    /// Default leaves the atom unknown and marks the evidence conflicting.
+    fn resolve_conflict(&mut self, _state: &ConflictState) -> Result<ConflictAnswer, JudgeError> {
+        Ok(ConflictAnswer {
+            value: ResolveValue::Unknown,
+            consistency: Consistency::Conflicting,
+            exchanges: Vec::new(),
+        })
+    }
+
+    /// Request/response pairs from the most recent `choose`, `document`, or
+    /// `resolve_conflict`. Empty for heuristic and fixture judges.
     fn last_exchanges(&self) -> Vec<JudgeExchange> {
         Vec::new()
     }

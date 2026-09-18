@@ -75,12 +75,12 @@ impl Judge for HeuristicJudge {
                     .any(|label| path_matches(&state.path, label))
                 {
                     DocumentJudgement {
-                        verdict: DocumentVerdict::True,
+                        verdict: DocumentVerdict::Entailed,
                         confidence: 0.85,
                     }
                 } else {
                     DocumentJudgement {
-                        verdict: DocumentVerdict::False,
+                        verdict: DocumentVerdict::Contradicted,
                         confidence: 0.8,
                     }
                 }
@@ -89,12 +89,12 @@ impl Judge for HeuristicJudge {
                 let label = state.args.first().map(|s| s.as_str()).unwrap_or("");
                 if path_matches(&state.path, label) {
                     DocumentJudgement {
-                        verdict: DocumentVerdict::True,
+                        verdict: DocumentVerdict::Entailed,
                         confidence: 0.85,
                     }
                 } else {
                     DocumentJudgement {
-                        verdict: DocumentVerdict::False,
+                        verdict: DocumentVerdict::Contradicted,
                         confidence: 0.8,
                     }
                 }
@@ -123,12 +123,12 @@ fn document_defines(state: &DocumentState) -> DocumentJudgement {
     let hit = names.iter().any(|n| import_mentions(&state.body, n));
     if hit {
         DocumentJudgement {
-            verdict: DocumentVerdict::True,
+            verdict: DocumentVerdict::Entailed,
             confidence: 0.88,
         }
     } else {
         DocumentJudgement {
-            verdict: DocumentVerdict::False,
+            verdict: DocumentVerdict::Contradicted,
             confidence: 0.85,
         }
     }
@@ -276,7 +276,7 @@ mod tests {
             verbalization: String::new(),
         };
         let j = document_defines(&state);
-        assert_eq!(j.verdict, DocumentVerdict::True);
+        assert_eq!(j.verdict, DocumentVerdict::Entailed);
     }
 
     #[test]

@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::edb::Store;
 use crate::navigator::judge::{
-    ChildChoice, DocumentState, Judge, ListingAtom, MultiListingState, Transition,
+    ChildChoice, ConflictAnswer, ConflictEvidence, ConflictState, Consistency, DocumentState,
+    DocumentVerdict, Judge, ListingAtom, MultiListingState, ResolveValue, Transition,
     LISTING_CHOICE_BUDGET, TAU_CONFIDENCE,
 };
 use crate::navigator::trace::GroundStep;
@@ -169,7 +170,7 @@ impl TreeNavigator {
             },
             LocateResult::Absent => Answer {
                 tuples: Vec::new(),
-                close: demand.need == Need::Closed,
+                close: true,
                 bindings: Vec::new(),
                 source: source.clone(),
             },
@@ -246,30 +247,23 @@ impl TreeNavigator {
                 };
             }
         };
-        let note = if judgement.closed_true() {
-            "holds".into()
-        } else if judgement.closed_false() {
-            "does not hold".into()
-        } else {
-            "undecided".into()
-        };
         self.trace.push(GroundStep::Document {
             pred: pred.to_string(),
             args: args.to_vec(),
             path: file.to_string(),
             judgement: judgement.clone(),
             preview: preview_body(&body),
-            note,
+            note: judgement.note().into(),
             exchanges: self.judge.last_exchanges(),
         });
-        if judgement.closed_true() {
+        if judgement.is_entailed() {
             Answer {
                 tuples: vec![args.to_vec()],
                 close: true,
                 bindings: Vec::new(),
                 source,
             }
-        } else if judgement.closed_false() {
+        } else if judgement.is_contradicted() {
             Answer {
                 tuples: Vec::new(),
                 close: true,
@@ -321,23 +315,25 @@ impl TreeNavigator {
             .map(|d| AtomWalk {
                 args: bound_values(d),
                 need: d.need,
+                generating: d.args.iter().any(|a| matches!(a, Arg::Free(_))),
                 hits: Vec::new(),
+                refuted: false,
+                polar: Vec::new(),
                 skipped: HashSet::new(),
                 all_skips_confident: true,
+                aborted: false,
+                looked: false,
+                docs_decided: true,
             })
             .collect();
 
         while !frontier.is_empty() {
             if listings >= MAX_LISTINGS {
-                for atom in &mut atoms {
-                    atom.all_skips_confident = false;
-                }
+                abort_walk(&mut atoms);
                 break;
             }
             if frontier.iter().all(|(_, depth)| *depth > MAX_DEPTH) {
-                for atom in &mut atoms {
-                    atom.all_skips_confident = false;
-                }
+                abort_walk(&mut atoms);
                 break;
             }
             let packed = pack_listing(
@@ -351,14 +347,10 @@ impl TreeNavigator {
             listings += 1;
             self.listings.extend(packed.dir_depth.keys().cloned());
             if packed.depth_limited {
-                for atom in &mut atoms {
-                    atom.all_skips_confident = false;
-                }
+                abort_walk(&mut atoms);
             }
             if !packed.failed.is_empty() {
-                for atom in &mut atoms {
-                    atom.all_skips_confident = false;
-                }
+                abort_walk(&mut atoms);
             }
             if packed.children.is_empty() {
                 if packed.unfinished.is_empty() || packed.unfinished == frontier {
@@ -396,9 +388,7 @@ impl TreeNavigator {
                     Ok(c) => c,
                     Err(e) => {
                         self.errors.push(e.to_string());
-                        for atom in &mut atoms {
-                            atom.all_skips_confident = false;
-                        }
+                        abort_walk(&mut atoms);
                         frontier = packed.unfinished;
                         continue;
                     }
@@ -441,13 +431,13 @@ impl TreeNavigator {
                             if child.is_dir {
                                 atoms[atom_i].skipped.insert(child.rel_path.clone());
                             }
-                            if choice.confidence < TAU_CONFIDENCE {
+                            if choice.confidence < TAU_CONFIDENCE && atoms[atom_i].generating {
                                 atoms[atom_i].all_skips_confident = false;
                             }
                         }
                         Transition::Investigate => {
                             if child.is_dir {
-                                if atoms[atom_i].args.is_empty() {
+                                if names_entity_from_directory(&demands[atom_i]) {
                                     atoms[atom_i].hits.push(child.rel_path.clone());
                                 }
                                 if !packed.complete.contains(&child.rel_path) {
@@ -489,9 +479,7 @@ impl TreeNavigator {
             let mut seen_next = HashSet::new();
             for (dir, depth) in packed.unfinished {
                 if depth > MAX_DEPTH {
-                    for atom in &mut atoms {
-                        atom.all_skips_confident = false;
-                    }
+                    abort_walk(&mut atoms);
                     continue;
                 }
                 if atoms
@@ -506,9 +494,7 @@ impl TreeNavigator {
             }
             for (dir, depth) in incomplete {
                 if depth > MAX_DEPTH {
-                    for atom in &mut atoms {
-                        atom.all_skips_confident = false;
-                    }
+                    abort_walk(&mut atoms);
                     continue;
                 }
                 if seen_next.insert(dir.clone()) {
@@ -521,9 +507,16 @@ impl TreeNavigator {
                 .zip(open_by_atom)
                 .map(|(d, files)| (d.clone(), files))
                 .collect();
-            let hits = self.confirm_files_batch(&batch, store);
-            for (atom, h) in atoms.iter_mut().zip(hits) {
-                atom.hits.extend(h);
+            let confirmed = self.confirm_files_batch(&batch, store);
+            for (atom, c) in atoms.iter_mut().zip(confirmed) {
+                atom.hits.extend(c.hits);
+                atom.refuted |= c.refuted;
+                atom.polar.extend(c.polar);
+                atom.looked |= c.looked;
+                if !c.decided {
+                    atom.docs_decided = false;
+                    atom.all_skips_confident = false;
+                }
             }
             frontier = next;
             if atoms
@@ -537,23 +530,63 @@ impl TreeNavigator {
             }
         }
 
-        atoms
-            .into_iter()
-            .map(|atom| {
-                let mut binding = tightest_wholes(atom.hits);
-                binding.sort();
-                binding.dedup();
-                if binding.is_empty() {
-                    if atom.need == Need::Closed && atom.all_skips_confident {
-                        LocateResult::Absent
-                    } else {
-                        LocateResult::Unknown
-                    }
-                } else {
-                    LocateResult::Found(binding)
+        let mut out = Vec::with_capacity(atoms.len());
+        for (demand, atom) in demands.iter().zip(atoms) {
+            let mut binding = tightest_wholes(atom.hits.clone());
+            binding.sort();
+            binding.dedup();
+            let loc = if !atom.generating && polar_conflict(&atom.polar) {
+                self.resolve_atom(demand, &atom, binding)
+            } else {
+                reduce_locate(
+                    atom.generating,
+                    atom.refuted,
+                    atom.all_skips_confident,
+                    atom.looked && atom.docs_decided && !atom.aborted,
+                    binding,
+                )
+            };
+            out.push(loc);
+        }
+        out
+    }
+
+    fn resolve_atom(
+        &mut self,
+        demand: &Demand,
+        atom: &AtomWalk,
+        binding: Vec<String>,
+    ) -> LocateResult {
+        let state = ConflictState {
+            pred: demand.pred.clone(),
+            args: bound_values(demand),
+            verbalization: self.verbalize_demand(demand),
+            evidence: atom.polar.clone(),
+        };
+        let answer = match self.judge.resolve_conflict(&state) {
+            Ok(a) => a,
+            Err(e) => {
+                self.errors.push(e.to_string());
+                ConflictAnswer {
+                    value: ResolveValue::Unknown,
+                    consistency: Consistency::Conflicting,
+                    exchanges: Vec::new(),
                 }
-            })
-            .collect()
+            }
+        };
+        self.trace.push(GroundStep::Conflict {
+            pred: demand.pred.clone(),
+            args: bound_values(demand),
+            evidence: atom.polar.clone(),
+            value: answer.value,
+            consistency: answer.consistency,
+            exchanges: answer.exchanges,
+        });
+        match answer.value {
+            ResolveValue::True => LocateResult::Found(binding),
+            ResolveValue::False => LocateResult::Absent,
+            ResolveValue::Unknown => LocateResult::Unknown,
+        }
     }
 
     /// Files flagged `investigate` in one listing. Same-path questions
@@ -562,19 +595,31 @@ impl TreeNavigator {
         &mut self,
         per_atom: &[(Demand, Vec<String>)],
         store: &Store,
-    ) -> Vec<Vec<String>> {
+    ) -> Vec<ConfirmedFiles> {
         struct Prepared {
             atom: usize,
             rel: String,
             body: String,
             state: DocumentState,
         }
+        let mut out: Vec<ConfirmedFiles> = (0..per_atom.len())
+            .map(|_| ConfirmedFiles {
+                hits: Vec::new(),
+                refuted: false,
+                polar: Vec::new(),
+                decided: true,
+                looked: false,
+            })
+            .collect();
         let mut prepared = Vec::new();
         for (atom, (demand, rels)) in per_atom.iter().enumerate() {
             for rel in rels {
                 let (body, _) = match read_trimmed(&self.root, rel, BODY_BUDGET) {
                     Ok(v) => v,
-                    Err(_) => continue,
+                    Err(_) => {
+                        out[atom].decided = false;
+                        continue;
+                    }
                 };
                 self.documents.push(rel.clone());
                 let args = ground_demand(demand, rel);
@@ -597,9 +642,8 @@ impl TreeNavigator {
                 });
             }
         }
-        let mut hits: Vec<Vec<String>> = vec![Vec::new(); per_atom.len()];
         if prepared.is_empty() {
-            return hits;
+            return out;
         }
         let states: Vec<DocumentState> = prepared.iter().map(|p| p.state.clone()).collect();
         let answers = self.judge.documents(&states);
@@ -608,32 +652,43 @@ impl TreeNavigator {
                 Ok(a) => a,
                 Err(e) => {
                     self.errors.push(e.to_string());
+                    out[prep.atom].decided = false;
                     continue;
                 }
             };
-            let confirm = if a.judgement.closed_true() {
-                FileConfirm::Witness
+            if a.judgement.confidence < TAU_CONFIDENCE {
+                out[prep.atom].decided = false;
             } else {
-                FileConfirm::NotWitness
-            };
-            if confirm == FileConfirm::Witness {
-                hits[prep.atom].push(prep.rel.clone());
+                out[prep.atom].looked = true;
             }
-            let note = match confirm {
-                FileConfirm::Witness => "witness".into(),
-                FileConfirm::NotWitness => "not a witness".into(),
-            };
+            if a.judgement.is_entailed() {
+                out[prep.atom].hits.push(prep.rel.clone());
+                out[prep.atom].polar.push(ConflictEvidence {
+                    path: prep.rel.clone(),
+                    verdict: DocumentVerdict::Entailed,
+                    confidence: a.judgement.confidence,
+                    excerpt: excerpt_body(&prep.body),
+                });
+            } else if a.judgement.is_contradicted() {
+                out[prep.atom].refuted = true;
+                out[prep.atom].polar.push(ConflictEvidence {
+                    path: prep.rel.clone(),
+                    verdict: DocumentVerdict::Contradicted,
+                    confidence: a.judgement.confidence,
+                    excerpt: excerpt_body(&prep.body),
+                });
+            }
             self.trace.push(GroundStep::Document {
                 pred: prep.state.pred,
                 args: prep.state.args,
                 path: prep.rel,
-                judgement: a.judgement,
+                judgement: a.judgement.clone(),
                 preview: preview_body(&prep.body),
-                note,
+                note: a.judgement.note().into(),
                 exchanges: a.exchanges,
             });
         }
-        hits
+        out
     }
 }
 
@@ -651,10 +706,34 @@ fn preview_body(body: &str) -> String {
         .join("\n")
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FileConfirm {
-    Witness,
-    NotWitness,
+fn excerpt_body(body: &str) -> String {
+    body.lines()
+        .take(4)
+        .map(|l| {
+            if l.len() > 80 {
+                format!("{}…", &l[..80])
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn polar_conflict(polar: &[ConflictEvidence]) -> bool {
+    let entailed = polar.iter().any(|e| e.verdict == DocumentVerdict::Entailed);
+    let contradicted = polar
+        .iter()
+        .any(|e| e.verdict == DocumentVerdict::Contradicted);
+    entailed && contradicted
+}
+
+struct ConfirmedFiles {
+    hits: Vec<String>,
+    refuted: bool,
+    polar: Vec<ConflictEvidence>,
+    decided: bool,
+    looked: bool,
 }
 
 enum LocateResult {
@@ -666,13 +745,59 @@ enum LocateResult {
 struct AtomWalk {
     args: Vec<String>,
     need: Need,
+    generating: bool,
     hits: Vec<String>,
+    refuted: bool,
+    polar: Vec<ConflictEvidence>,
     skipped: HashSet<String>,
     all_skips_confident: bool,
+    aborted: bool,
+    looked: bool,
+    docs_decided: bool,
+}
+
+fn abort_walk(atoms: &mut [AtomWalk]) {
+    for atom in atoms {
+        atom.aborted = true;
+        atom.all_skips_confident = false;
+    }
+}
+
+fn reduce_locate(
+    generating: bool,
+    refuted: bool,
+    generating_complete: bool,
+    ground_complete: bool,
+    binding: Vec<String>,
+) -> LocateResult {
+    let entailed = !binding.is_empty();
+    if generating {
+        if entailed {
+            LocateResult::Found(binding)
+        } else if generating_complete {
+            LocateResult::Absent
+        } else {
+            LocateResult::Unknown
+        }
+    } else if entailed && refuted {
+        LocateResult::Unknown
+    } else if entailed {
+        LocateResult::Found(binding)
+    } else if refuted || ground_complete {
+        LocateResult::Absent
+    } else {
+        LocateResult::Unknown
+    }
 }
 
 fn atom_asks(atom: &AtomWalk, rel: &str) -> bool {
     !atom.skipped.contains(rel) && !has_skipped_ancestor(rel, &atom.skipped)
+}
+
+/// Investigated directories name a free argument (`api/` → `"api"`).
+fn names_entity_from_directory(demand: &Demand) -> bool {
+    demand.args.iter().any(|a| matches!(a, Arg::Free(_)))
+        && demand.args.iter().all(|a| matches!(a, Arg::Free(_)))
 }
 
 fn bound_values(demand: &Demand) -> Vec<String> {
@@ -880,8 +1005,8 @@ impl TreeNavigator {
 mod tests {
     use super::*;
     use crate::navigator::judge::{
-        ChildChoice, DocumentAnswer, DocumentJudgement, DocumentVerdict, JudgeError, ListingState,
-        MultiListingState,
+        ChildChoice, ConflictAnswer, Consistency, DocumentAnswer, DocumentJudgement,
+        DocumentVerdict, JudgeError, ListingState, MultiListingState, ResolveValue,
     };
     use crate::navigator::{Arg, Demand, Need};
     use std::sync::{Arc, Mutex};
@@ -903,7 +1028,7 @@ mod tests {
 
         fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
             Ok(DocumentJudgement {
-                verdict: DocumentVerdict::True,
+                verdict: DocumentVerdict::Entailed,
                 confidence: 0.9,
             })
         }
@@ -1306,7 +1431,7 @@ mod tests {
 
         fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
             Ok(DocumentJudgement {
-                verdict: DocumentVerdict::True,
+                verdict: DocumentVerdict::Entailed,
                 confidence: 0.9,
             })
         }
@@ -1342,5 +1467,313 @@ mod tests {
             }),
             "expected parent-skip effect on decoy/noise.py"
         );
+    }
+
+    struct InvestigateAllUnknownDocs;
+
+    impl Judge for InvestigateAllUnknownDocs {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            OpenAll.choose(state)
+        }
+
+        fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            Ok(DocumentJudgement {
+                verdict: DocumentVerdict::Neutral,
+                confidence: 0.9,
+            })
+        }
+    }
+
+    fn nullary(pred: &str) -> Demand {
+        Demand {
+            pred: pred.into(),
+            args: vec![],
+            need: Need::Truth,
+        }
+    }
+
+    #[test]
+    fn nullary_atom_is_not_proved_by_investigating_a_directory() {
+        let mut nav =
+            TreeNavigator::new("examples/toy-layered", Box::new(InvestigateAllUnknownDocs));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        assert!(
+            answer.tuples.is_empty(),
+            "investigating a directory is not a witness for a ground atom: {:?}",
+            answer.tuples
+        );
+        assert!(
+            answer.close,
+            "complete locate with no entailed witness is closed-world false"
+        );
+    }
+
+    struct InvestigateAllFalseDocs;
+
+    impl Judge for InvestigateAllFalseDocs {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            OpenAll.choose(state)
+        }
+
+        fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            Ok(DocumentJudgement {
+                verdict: DocumentVerdict::Contradicted,
+                confidence: 0.9,
+            })
+        }
+    }
+
+    #[test]
+    fn complete_locate_with_only_contradicted_documents_is_false() {
+        let mut nav = TreeNavigator::new("examples/toy-layered", Box::new(InvestigateAllFalseDocs));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        assert!(answer.tuples.is_empty());
+        assert!(answer.close);
+    }
+
+    struct SkipAllLowConfidence;
+
+    impl Judge for SkipAllLowConfidence {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            Ok(state
+                .children
+                .iter()
+                .map(|c| ChildChoice {
+                    rel_path: c.rel_path.clone(),
+                    transition: Transition::Skip,
+                    confidence: 0.2,
+                })
+                .collect())
+        }
+
+        fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            Ok(DocumentJudgement {
+                verdict: DocumentVerdict::Neutral,
+                confidence: 0.9,
+            })
+        }
+    }
+
+    #[test]
+    fn incomplete_locate_does_not_close_as_false() {
+        let mut nav = TreeNavigator::new("examples/toy-layered", Box::new(SkipAllLowConfidence));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        assert!(answer.tuples.is_empty());
+        assert!(!answer.close);
+    }
+
+    struct NeutralFilesSkipDirsLowConf;
+
+    impl Judge for NeutralFilesSkipDirsLowConf {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            Ok(state
+                .children
+                .iter()
+                .map(|c| ChildChoice {
+                    rel_path: c.rel_path.clone(),
+                    transition: if c.is_dir {
+                        Transition::Skip
+                    } else {
+                        Transition::Investigate
+                    },
+                    confidence: if c.is_dir { 0.2 } else { 0.9 },
+                })
+                .collect())
+        }
+
+        fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            Ok(DocumentJudgement {
+                verdict: DocumentVerdict::Neutral,
+                confidence: 0.9,
+            })
+        }
+    }
+
+    #[test]
+    fn ground_atom_closes_false_after_neutral_documents_despite_low_skips() {
+        let dir = scratch_dir("cwa-neutrals");
+        std::fs::create_dir_all(dir.join("extra")).unwrap();
+        std::fs::write(dir.join("a.py"), "hello\n").unwrap();
+        std::fs::write(dir.join("extra/b.py"), "there\n").unwrap();
+        let mut nav = TreeNavigator::new(&dir, Box::new(NeutralFilesSkipDirsLowConf));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(answer.tuples.is_empty());
+        assert!(
+            answer.close,
+            "looked at files, only neutrals: low-confidence skips must not keep a ground atom open: {:?}",
+            answer
+        );
+    }
+
+    struct ContradictFilesSkipRest;
+
+    impl Judge for ContradictFilesSkipRest {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            Ok(state
+                .children
+                .iter()
+                .map(|c| ChildChoice {
+                    rel_path: c.rel_path.clone(),
+                    transition: if c.is_dir {
+                        Transition::Skip
+                    } else {
+                        Transition::Investigate
+                    },
+                    confidence: if c.is_dir { 0.2 } else { 0.9 },
+                })
+                .collect())
+        }
+
+        fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            Ok(DocumentJudgement {
+                verdict: DocumentVerdict::Contradicted,
+                confidence: 0.9,
+            })
+        }
+    }
+
+    #[test]
+    fn a_contradicted_document_falsifies_even_if_the_walk_is_open() {
+        let dir = scratch_dir("refute-open");
+        std::fs::create_dir_all(dir.join("extra")).unwrap();
+        std::fs::write(dir.join("a.py"), "no gpu\n").unwrap();
+        std::fs::write(dir.join("extra/b.py"), "also no\n").unwrap();
+        let mut nav = TreeNavigator::new(&dir, Box::new(ContradictFilesSkipRest));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(answer.tuples.is_empty());
+        assert!(
+            answer.close,
+            "a confident refutation is as strong as a witness: {:?}",
+            answer
+        );
+    }
+
+    struct MixedDocs;
+
+    impl Judge for MixedDocs {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            OpenAll.choose(state)
+        }
+
+        fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            let true_file = state.path.ends_with("yes.py");
+            Ok(DocumentJudgement {
+                verdict: if true_file {
+                    DocumentVerdict::Entailed
+                } else {
+                    DocumentVerdict::Contradicted
+                },
+                confidence: 0.9,
+            })
+        }
+    }
+
+    #[test]
+    fn entailed_and_contradicted_documents_conflict() {
+        let dir = scratch_dir("conflict");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("yes.py"), "gpu compiler\n").unwrap();
+        std::fs::write(dir.join("no.py"), "cpu only\n").unwrap();
+        let mut nav = TreeNavigator::new(&dir, Box::new(MixedDocs));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(answer.tuples.is_empty());
+        assert!(
+            !answer.close,
+            "default resolve leaves a conflict unknown: {:?}",
+            answer
+        );
+        assert!(
+            nav.trace.iter().any(|s| matches!(
+                s,
+                GroundStep::Conflict {
+                    consistency: Consistency::Conflicting,
+                    value: ResolveValue::Unknown,
+                    ..
+                }
+            )),
+            "mixed polar documents should surface a conflict step"
+        );
+    }
+
+    struct ResolveConflictTrue;
+
+    impl Judge for ResolveConflictTrue {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            MixedDocs.choose(state)
+        }
+
+        fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            MixedDocs.document(state)
+        }
+
+        fn resolve_conflict(
+            &mut self,
+            _state: &ConflictState,
+        ) -> Result<ConflictAnswer, JudgeError> {
+            Ok(ConflictAnswer {
+                value: ResolveValue::True,
+                consistency: Consistency::Conflicting,
+                exchanges: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn conflict_resolve_can_accept_the_entailed_side() {
+        let dir = scratch_dir("conflict-true");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("yes.py"), "gpu compiler\n").unwrap();
+        std::fs::write(dir.join("no.py"), "cpu only\n").unwrap();
+        let mut nav = TreeNavigator::new(&dir, Box::new(ResolveConflictTrue));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(answer.tuples, vec![Vec::<String>::new()]);
+        assert!(answer.close);
+        assert!(nav.trace.iter().any(|s| matches!(
+            s,
+            GroundStep::Conflict {
+                value: ResolveValue::True,
+                consistency: Consistency::Conflicting,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn free_unary_still_binds_investigated_directories() {
+        let mut nav =
+            TreeNavigator::new("examples/toy-layered", Box::new(InvestigateAllUnknownDocs));
+        let answer = nav.answer(
+            &Demand {
+                pred: "component".into(),
+                args: vec![Arg::Free("c".into())],
+                need: Need::Truth,
+            },
+            &Store::new(),
+        );
+        assert!(
+            !answer.tuples.is_empty(),
+            "free unary locate takes names from investigated directories: {:?}",
+            answer.tuples
+        );
+        assert!(answer.close);
+    }
+
+    #[test]
+    fn nullary_atom_is_proved_by_a_true_document() {
+        let mut nav = TreeNavigator::new("examples/toy-layered", Box::new(OpenAll));
+        let answer = nav.answer(
+            &Demand {
+                pred: "CLI".into(),
+                args: vec![],
+                need: Need::Truth,
+            },
+            &Store::new(),
+        );
+        assert_eq!(answer.tuples, vec![Vec::<String>::new()]);
+        assert!(answer.close);
     }
 }

@@ -78,3 +78,6 @@ whether the atom is best supplied by a deterministic grounder or needs to be LLM
 
 Its not a requirement to use top-down evaluation, but it seems sensible, because it allows
 us to refine where to spend effort grounding.
+
+Grounding should talk about entailed / contradicted / neutral; evaluation should talk about
+true / false / unknown.

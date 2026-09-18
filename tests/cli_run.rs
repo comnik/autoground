@@ -40,18 +40,14 @@ fn run_prints_header_requires_and_trace_path() {
         out.contains("(require\n  (and\n    (component \"Frontend\")"),
         "{out}"
     );
-    assert!(
-        out.contains("(component \"Frontend\")") && out.contains("proved"),
-        "{out}"
-    );
+    assert!(out.contains("(component \"Frontend\")"), "{out}");
+    assert!(!out.contains("proved"), "{out}");
+    assert!(!out.contains("disproved"), "{out}");
     assert!(
         out.contains("(require\n  (depends_on \"Frontend\" \"Backend\"))"),
         "{out}"
     );
-    assert!(
-        out.contains("(includes \"frontend/app.py\"") && out.contains("proved"),
-        "{out}"
-    );
+    assert!(out.contains("(includes \"frontend/app.py\""), "{out}");
     assert!(
         out.contains("(belongs_to \"frontend/app.py\" \"Frontend\")"),
         "{out}"

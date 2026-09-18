@@ -67,11 +67,7 @@ pub fn format_step(step: &GroundStep, index: usize, total: usize, repo_name: &st
             let mut out = header(pred, args, "document", index, total);
             out.push_str(path);
             out.push('\n');
-            let v = match judgement.verdict {
-                DocumentVerdict::True => "true",
-                DocumentVerdict::False => "false",
-                DocumentVerdict::Unknown => "unknown",
-            };
+            let v = judgement.verdict.label();
             out.push_str(&format!(
                 "    verdict     {v}\n    confidence  {:.2}\n    {}\n",
                 judgement.confidence, note
@@ -100,6 +96,42 @@ pub fn format_step(step: &GroundStep, index: usize, total: usize, repo_name: &st
             } else {
                 for (c, e) in bindings {
                     out.push_str(&format!("    \"{c}\"  ←  {e}\n"));
+                }
+            }
+            out
+        }
+        GroundStep::Conflict {
+            pred,
+            args,
+            evidence,
+            value,
+            consistency,
+            exchanges: _,
+        } => {
+            let mut out = header(pred, args, "conflict", index, total);
+            out.push_str(&format!(
+                "    value        {}\n    consistency  {}\n",
+                value.label(),
+                consistency.label()
+            ));
+            let entailed: Vec<_> = evidence
+                .iter()
+                .filter(|e| e.verdict == DocumentVerdict::Entailed)
+                .collect();
+            let contradicted: Vec<_> = evidence
+                .iter()
+                .filter(|e| e.verdict == DocumentVerdict::Contradicted)
+                .collect();
+            if !entailed.is_empty() {
+                out.push_str("    entailed\n");
+                for e in entailed {
+                    out.push_str(&format!("      {}  {:.2}\n", e.path, e.confidence));
+                }
+            }
+            if !contradicted.is_empty() {
+                out.push_str("    contradicted\n");
+                for e in contradicted {
+                    out.push_str(&format!("      {}  {:.2}\n", e.path, e.confidence));
                 }
             }
             out

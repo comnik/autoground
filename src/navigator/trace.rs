@@ -1,4 +1,7 @@
-use super::judge::{Child, ChildChoice, DocumentJudgement, JudgeExchange};
+use super::judge::{
+    Child, ChildChoice, ConflictEvidence, Consistency, DocumentJudgement, JudgeExchange,
+    ResolveValue,
+};
 
 /// One human-facing moment in a grounding walk.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -34,12 +37,23 @@ pub enum GroundStep {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         bindings: Vec<(String, String)>,
     },
+    Conflict {
+        pred: String,
+        args: Vec<String>,
+        evidence: Vec<ConflictEvidence>,
+        value: ResolveValue,
+        consistency: Consistency,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exchanges: Vec<JudgeExchange>,
+    },
 }
 
 impl GroundStep {
     pub fn exchanges(&self) -> &[JudgeExchange] {
         match self {
-            Self::Listing { exchanges, .. } | Self::Document { exchanges, .. } => exchanges,
+            Self::Listing { exchanges, .. }
+            | Self::Document { exchanges, .. }
+            | Self::Conflict { exchanges, .. } => exchanges,
             Self::Result { .. } => &[],
         }
     }

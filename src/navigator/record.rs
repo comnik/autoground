@@ -1,7 +1,7 @@
 use super::fixture::{DocumentFixture, FixtureFile, JevRequestEvent, ListingFixture};
 use super::judge::{
-    epoch_ms, ChildChoice, DocumentAnswer, DocumentJudgement, DocumentState, Judge, JudgeError,
-    JudgeExchange, ListingState, MultiListingState,
+    epoch_ms, ChildChoice, ConflictAnswer, ConflictState, DocumentAnswer, DocumentJudgement,
+    DocumentState, Judge, JudgeError, JudgeExchange, ListingState, MultiListingState,
 };
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -120,6 +120,12 @@ impl Judge for RecordingJudge {
         out
     }
 
+    fn resolve_conflict(&mut self, state: &ConflictState) -> Result<ConflictAnswer, JudgeError> {
+        let answer = self.inner.resolve_conflict(state)?;
+        self.record_exchanges();
+        Ok(answer)
+    }
+
     fn last_exchanges(&self) -> Vec<JudgeExchange> {
         self.inner.last_exchanges()
     }
@@ -200,7 +206,7 @@ mod tests {
                 .map(|(i, _)| {
                     Ok(DocumentAnswer {
                         judgement: DocumentJudgement {
-                            verdict: crate::navigator::judge::DocumentVerdict::True,
+                            verdict: crate::navigator::judge::DocumentVerdict::Entailed,
                             confidence: 0.9,
                         },
                         exchanges: vec![self.exchanges[i].clone()],

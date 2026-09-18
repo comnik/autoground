@@ -189,7 +189,7 @@ fn format_edb_leaves(atoms: &[EdbAtom]) -> String {
     if atoms.is_empty() {
         return String::new();
     }
-    let rows: Vec<(String, &'static str)> = atoms
+    let rows: Vec<(String, String)> = atoms
         .iter()
         .map(|a| (print_ground_atom(&a.pred, &a.args), edb_verdict(a.value)))
         .collect();
@@ -202,18 +202,14 @@ fn format_edb_leaves(atoms: &[EdbAtom]) -> String {
             out.push_str(&" ".repeat(width - atom.len()));
         }
         out.push_str("  ");
-        out.push_str(verdict);
+        out.push_str(&verdict);
         out.push('\n');
     }
     out
 }
 
-fn edb_verdict(value: Value) -> &'static str {
-    match value {
-        Value::True => "proved",
-        Value::False => "disproved",
-        Value::Unknown => "unknown",
-    }
+fn edb_verdict(value: Value) -> String {
+    value.to_string()
 }
 
 pub fn outcome_exit_code(value: &Value) -> i32 {
@@ -273,13 +269,13 @@ mod tests {
         assert!(!text.contains(" ← "), "{text}");
         assert!(
             text.contains(
-                "(require\n  (component \"Frontend\"))\n  true\n  (component \"Frontend\")  proved\n"
+                "(require\n  (component \"Frontend\"))\n  true\n  (component \"Frontend\")  true\n"
             ),
             "{text}"
         );
         assert!(
             text.contains(
-                "(require\n  (component \"Missing\"))\n  false\n  (component \"Missing\")  disproved\n"
+                "(require\n  (component \"Missing\"))\n  false\n  (component \"Missing\")  false\n"
             ),
             "{text}"
         );

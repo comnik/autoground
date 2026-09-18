@@ -158,7 +158,7 @@ impl Judge for FixtureJudge {
                 confidence: f.confidence,
             })
             .unwrap_or(DocumentJudgement {
-                verdict: DocumentVerdict::Unknown,
+                verdict: DocumentVerdict::Neutral,
                 confidence: 0.0,
             }))
     }
