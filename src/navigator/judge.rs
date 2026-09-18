@@ -168,17 +168,22 @@ impl DocumentJudgement {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum JudgeError {
     Config(String),
     Http(String),
     Parse(String),
+    /// Cumulative Jev spend for this run hit the hard cap.
+    Limit(String),
 }
 
 impl std::fmt::Display for JudgeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            JudgeError::Config(s) | JudgeError::Http(s) | JudgeError::Parse(s) => {
+            JudgeError::Config(s)
+            | JudgeError::Http(s)
+            | JudgeError::Parse(s)
+            | JudgeError::Limit(s) => {
                 write!(f, "{s}")
             }
         }

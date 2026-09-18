@@ -14,6 +14,8 @@ const MAX_RETRIES: u32 = 4;
 const DOCUMENT_PARALLELISM: usize = 8;
 /// Published Jev input price. Output tokens are unmetered.
 const INPUT_USD_PER_MILLION_TOKENS: f64 = 0.042;
+/// Hard cap on recorded Jev spend for one `autoground run`.
+const RUN_COST_LIMIT_USD: f64 = 1.0;
 
 /// One transport round-trip, with wall-clock bounds for the trace.
 #[derive(Debug, Clone)]
@@ -133,6 +135,7 @@ pub struct JevJudge<T: Transport = UreqTransport> {
     endpoint: String,
     model: String,
     exchanges: Vec<JudgeExchange>,
+    spent_usd: f64,
 }
 
 impl JevJudge<UreqTransport> {
@@ -150,6 +153,7 @@ impl JevJudge<UreqTransport> {
             endpoint: format!("{}/v1/systemone", base.trim_end_matches('/')),
             model,
             exchanges: Vec::new(),
+            spent_usd: 0.0,
         })
     }
 }
@@ -161,14 +165,38 @@ impl<T: Transport> JevJudge<T> {
             endpoint: endpoint.into(),
             model: model.into(),
             exchanges: Vec::new(),
+            spent_usd: 0.0,
+        }
+    }
+
+    fn guard_budget(&self) -> Result<(), JudgeError> {
+        if self.spent_usd >= RUN_COST_LIMIT_USD {
+            Err(self.budget_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn budget_error(&self) -> JudgeError {
+        JudgeError::Limit(format!(
+            "run cost limit of ${:.2} exceeded (spent ${:.4})",
+            RUN_COST_LIMIT_USD, self.spent_usd
+        ))
+    }
+
+    fn add_spend(&mut self, cost: Option<f64>) {
+        if let Some(c) = cost {
+            self.spent_usd += c;
         }
     }
 
     fn evaluate(&mut self, body: &Value) -> Result<Value, JudgeError> {
+        self.guard_budget()?;
         let posted = self.transport.post_json(&self.endpoint, body)?;
         let value = posted.value.clone();
-        self.exchanges
-            .push(exchange_from_posted(body.clone(), posted));
+        let ex = exchange_from_posted(body.clone(), posted);
+        self.add_spend(ex.cost_usd);
+        self.exchanges.push(ex);
         Ok(value)
     }
 }
@@ -197,6 +225,9 @@ impl<T: Transport> Judge for JevJudge<T> {
         if states.is_empty() {
             return Vec::new();
         }
+        if let Err(e) = self.guard_budget() {
+            return states.iter().map(|_| Err(e.clone())).collect();
+        }
         let bodies: Vec<Value> = states
             .iter()
             .map(|s| investigation_request(&self.model, s))
@@ -208,6 +239,7 @@ impl<T: Transport> Judge for JevJudge<T> {
                 Ok(posted) => {
                     let response = posted.value.clone();
                     let ex = exchange_from_posted(request, posted);
+                    self.add_spend(ex.cost_usd);
                     self.exchanges.push(ex.clone());
                     out.push(
                         parse_document_answer(&response).map(|judgement| DocumentAnswer {
@@ -724,6 +756,82 @@ mod tests {
         assert_eq!(ex.input_tokens, Some(2000));
         assert_eq!(ex.output_tokens, Some(8));
         assert!((ex.cost_usd.unwrap() - 2000.0 * 0.042 / 1_000_000.0).abs() < 1e-15);
+    }
+
+    fn listing_state() -> ListingState {
+        ListingState {
+            pred: "component".into(),
+            args: vec!["Frontend".into()],
+            dir: "".into(),
+            children: vec![child("frontend", true)],
+            verbalization: String::new(),
+        }
+    }
+
+    fn listing_resp(cost_usd: f64) -> Value {
+        json!({
+            "answers": {
+                "c0": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
+            },
+            "usage": { "input_tokens": 10, "cost_usd": cost_usd }
+        })
+    }
+
+    #[test]
+    fn keeps_the_request_that_crosses_the_run_cost_limit() {
+        let state = listing_state();
+        let transport = SeqTransport {
+            responses: vec![listing_resp(1.25)],
+            bodies: Vec::new(),
+        };
+        let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
+        let choices = judge.choose(&state).unwrap();
+        assert_eq!(choices[0].transition, Transition::Investigate);
+        assert!((judge.last_exchanges()[0].cost_usd.unwrap() - 1.25).abs() < 1e-12);
+        assert!((judge.spent_usd - 1.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn refuses_further_jev_after_run_cost_limit() {
+        let state = listing_state();
+        let transport = SeqTransport {
+            responses: vec![listing_resp(1.0), listing_resp(0.01)],
+            bodies: Vec::new(),
+        };
+        let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
+        judge.choose(&state).unwrap();
+        let err = judge.choose(&state).unwrap_err();
+        assert!(matches!(err, JudgeError::Limit(_)), "{err}");
+        assert!(err.to_string().contains("$1.00"));
+        assert_eq!(judge.transport.bodies.len(), 1);
+    }
+
+    #[test]
+    fn requests_under_the_run_cost_limit_keep_going() {
+        let state = listing_state();
+        let transport = SeqTransport {
+            responses: vec![listing_resp(0.4), listing_resp(0.4)],
+            bodies: Vec::new(),
+        };
+        let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
+        judge.choose(&state).unwrap();
+        judge.choose(&state).unwrap();
+        assert_eq!(judge.transport.bodies.len(), 2);
+        assert!((judge.spent_usd - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn documents_do_not_post_after_run_cost_limit() {
+        let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let transport = BatchSpy {
+            batches: batches.clone(),
+            responses: vec![true_doc_resp()],
+        };
+        let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
+        judge.spent_usd = RUN_COST_LIMIT_USD;
+        let answers = judge.documents(&[doc_state("a.py")]);
+        assert!(matches!(answers[0], Err(JudgeError::Limit(_))));
+        assert!(batches.lock().unwrap().is_empty());
     }
 
     #[test]
