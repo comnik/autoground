@@ -1,63 +1,105 @@
 use serde_json::{json, Value};
 
 use super::judge::{
-    Child, ChildChoice, DocumentJudgement, DocumentState, DocumentVerdict, Judge, JudgeError,
-    JudgeExchange, ListingState, Transition,
+    Child, ChildChoice, DocumentAnswer, DocumentJudgement, DocumentState, DocumentVerdict, Judge,
+    JudgeError, JudgeExchange, ListingState, Transition,
 };
 
 const DEFAULT_BASE: &str = "https://api.typesafe.ai";
 const DEFAULT_MODEL: &str = "jev-latest";
 const CHOICE_CHUNK: usize = 100;
 const MAX_RETRIES: u32 = 4;
+const DOCUMENT_PARALLELISM: usize = 8;
 
 /// POST body / response transport. Live HTTP in production; a mock in tests.
 pub trait Transport {
     fn post_json(&mut self, url: &str, body: &Value) -> Result<Value, JudgeError>;
+
+    /// Default posts one body at a time. Live HTTP overrides this to overlap
+    /// independent document requests.
+    fn post_json_all(&mut self, url: &str, bodies: &[Value]) -> Vec<Result<Value, JudgeError>> {
+        bodies.iter().map(|b| self.post_json(url, b)).collect()
+    }
 }
 
 pub struct UreqTransport;
 
 impl Transport for UreqTransport {
     fn post_json(&mut self, url: &str, body: &Value) -> Result<Value, JudgeError> {
-        let key = std::env::var("TYPESAFE_API_KEY")
-            .map_err(|_| JudgeError::Config("TYPESAFE_API_KEY is not set".into()))?;
-        let mut delay_ms = 200u64;
-        let mut last = String::new();
-        for attempt in 0..MAX_RETRIES {
-            let req = ureq::post(url)
-                .set("Authorization", &format!("Bearer {key}"))
-                .set("Content-Type", "application/json")
-                .timeout(std::time::Duration::from_secs(120));
-            match req.send_json(body.clone()) {
-                Ok(resp) => {
-                    return resp
-                        .into_json()
-                        .map_err(|e| JudgeError::Parse(e.to_string()));
+        post_json_with_retries(url, body)
+    }
+
+    fn post_json_all(&mut self, url: &str, bodies: &[Value]) -> Vec<Result<Value, JudgeError>> {
+        parallel_map(bodies, DOCUMENT_PARALLELISM, |body| {
+            post_json_with_retries(url, body)
+        })
+    }
+}
+
+fn post_json_with_retries(url: &str, body: &Value) -> Result<Value, JudgeError> {
+    let key = std::env::var("TYPESAFE_API_KEY")
+        .map_err(|_| JudgeError::Config("TYPESAFE_API_KEY is not set".into()))?;
+    let mut delay_ms = 200u64;
+    let mut last = String::new();
+    for attempt in 0..MAX_RETRIES {
+        let req = ureq::post(url)
+            .set("Authorization", &format!("Bearer {key}"))
+            .set("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(120));
+        match req.send_json(body.clone()) {
+            Ok(resp) => {
+                return resp
+                    .into_json()
+                    .map_err(|e| JudgeError::Parse(e.to_string()));
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                last = resp
+                    .into_string()
+                    .unwrap_or_else(|_| format!("HTTP {code}"));
+                if matches!(code, 429 | 529 | 500 | 502 | 503) && attempt + 1 < MAX_RETRIES {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    delay_ms = delay_ms.saturating_mul(2);
+                    continue;
                 }
-                Err(ureq::Error::Status(code, resp)) => {
-                    last = resp
-                        .into_string()
-                        .unwrap_or_else(|_| format!("HTTP {code}"));
-                    if matches!(code, 429 | 529 | 500 | 502 | 503) && attempt + 1 < MAX_RETRIES {
-                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                        delay_ms = delay_ms.saturating_mul(2);
-                        continue;
-                    }
-                    return Err(JudgeError::Http(format!("HTTP {code}: {last}")));
+                return Err(JudgeError::Http(format!("HTTP {code}: {last}")));
+            }
+            Err(e) => {
+                last = e.to_string();
+                if attempt + 1 < MAX_RETRIES {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    delay_ms = delay_ms.saturating_mul(2);
+                    continue;
                 }
-                Err(e) => {
-                    last = e.to_string();
-                    if attempt + 1 < MAX_RETRIES {
-                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                        delay_ms = delay_ms.saturating_mul(2);
-                        continue;
-                    }
-                    return Err(JudgeError::Http(last));
-                }
+                return Err(JudgeError::Http(last));
             }
         }
-        Err(JudgeError::Http(last))
     }
+    Err(JudgeError::Http(last))
+}
+
+fn parallel_map<T, R, F>(items: &[T], limit: usize, f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> R + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let limit = limit.max(1);
+    if items.len() == 1 || limit == 1 {
+        return items.iter().map(f).collect();
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for chunk in items.chunks(limit) {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk.iter().map(|item| scope.spawn(|| f(item))).collect();
+            for handle in handles {
+                out.push(handle.join().expect("parallel document request panicked"));
+            }
+        });
+    }
+    out
 }
 
 /// Jev System One judge. One listing request = one Choice per child.
@@ -121,10 +163,42 @@ impl<T: Transport> Judge for JevJudge<T> {
     }
 
     fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+        self.documents(std::slice::from_ref(state))
+            .pop()
+            .unwrap_or_else(|| Err(JudgeError::Parse("missing document answer".into())))
+            .map(|a| a.judgement)
+    }
+
+    fn documents(&mut self, states: &[DocumentState]) -> Vec<Result<DocumentAnswer, JudgeError>> {
         self.exchanges.clear();
-        let body = investigation_request(&self.model, state);
-        let resp = self.evaluate(&body)?;
-        parse_document_answer(&resp)
+        if states.is_empty() {
+            return Vec::new();
+        }
+        let bodies: Vec<Value> = states
+            .iter()
+            .map(|s| investigation_request(&self.model, s))
+            .collect();
+        let responses = self.transport.post_json_all(&self.endpoint, &bodies);
+        let mut out = Vec::with_capacity(states.len());
+        for (request, resp) in bodies.into_iter().zip(responses) {
+            match resp {
+                Ok(response) => {
+                    let ex = JudgeExchange {
+                        request,
+                        response: response.clone(),
+                    };
+                    self.exchanges.push(ex.clone());
+                    out.push(
+                        parse_document_answer(&response).map(|judgement| DocumentAnswer {
+                            judgement,
+                            exchanges: vec![ex],
+                        }),
+                    );
+                }
+                Err(e) => out.push(Err(e)),
+            }
+        }
+        out
     }
 
     fn last_exchanges(&self) -> Vec<JudgeExchange> {
@@ -426,5 +500,95 @@ mod tests {
         assert_eq!(ex.len(), 1);
         assert_eq!(ex[0].request["model"], "jev-latest");
         assert_eq!(ex[0].response["answers"]["c0"]["choice"], "investigate");
+    }
+
+    fn doc_state(path: &str) -> DocumentState {
+        DocumentState {
+            pred: "component".into(),
+            args: vec!["Frontend".into()],
+            path: path.into(),
+            body: format!("// {path}"),
+            bindings: Vec::new(),
+            verbalization: String::new(),
+        }
+    }
+
+    fn true_doc_resp() -> Value {
+        json!({
+            "answers": {
+                "ground": { "type": "choice", "choice": "true", "confidence": 0.9 }
+            }
+        })
+    }
+
+    struct BatchSpy {
+        batches: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+        responses: Vec<Value>,
+    }
+
+    impl Transport for BatchSpy {
+        fn post_json(&mut self, _url: &str, _body: &Value) -> Result<Value, JudgeError> {
+            panic!("documents should post via post_json_all");
+        }
+
+        fn post_json_all(
+            &mut self,
+            _url: &str,
+            bodies: &[Value],
+        ) -> Vec<Result<Value, JudgeError>> {
+            self.batches.lock().unwrap().push(bodies.len());
+            bodies
+                .iter()
+                .map(|_| {
+                    if self.responses.is_empty() {
+                        Err(JudgeError::Http("no more responses".into()))
+                    } else {
+                        Ok(self.responses.remove(0))
+                    }
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn documents_posts_one_batch() {
+        let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let transport = BatchSpy {
+            batches: batches.clone(),
+            responses: vec![true_doc_resp(), true_doc_resp(), true_doc_resp()],
+        };
+        let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
+        let states = vec![doc_state("a.py"), doc_state("b.py"), doc_state("c.py")];
+        let answers = judge.documents(&states);
+        assert_eq!(answers.len(), 3);
+        assert!(answers
+            .iter()
+            .all(|a| a.as_ref().unwrap().judgement.closed_true()));
+        assert_eq!(*batches.lock().unwrap(), vec![3]);
+        let ex = judge.last_exchanges();
+        assert_eq!(ex.len(), 3);
+        assert_eq!(ex[0].request["state"]["path"], "a.py");
+        assert_eq!(ex[1].request["state"]["path"], "b.py");
+        assert_eq!(ex[2].request["state"]["path"], "c.py");
+    }
+
+    #[test]
+    fn parallel_map_overlaps_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let inflight = AtomicUsize::new(0);
+        let max = AtomicUsize::new(0);
+        let items: Vec<u8> = (0..6).collect();
+        let _ = parallel_map(&items, 6, |_| {
+            let n = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            max.fetch_max(n, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            inflight.fetch_sub(1, Ordering::SeqCst);
+            1u8
+        });
+        assert!(
+            max.load(Ordering::SeqCst) > 1,
+            "expected overlapping document work, max inflight {}",
+            max.load(Ordering::SeqCst)
+        );
     }
 }

@@ -22,7 +22,7 @@ fn trace_path(stdout: &str) -> &str {
 }
 
 #[test]
-fn run_prints_outcome_bindings_and_trace_path() {
+fn run_prints_header_requires_and_trace_path() {
     let (out, err, code) = stdout(&[
         "run",
         "examples/layered.ag",
@@ -31,8 +31,9 @@ fn run_prints_outcome_bindings_and_trace_path() {
     ]);
     assert_eq!(err, "", "{out}");
     assert_eq!(code, 0);
-    assert!(out.contains("GROUNDED"), "{out}");
-    assert!(out.contains("\"Frontend\""), "{out}");
+    assert!(out.starts_with("GROUNDED\n"), "{out}");
+    assert!(out.contains("jev requests: "), "{out}");
+    assert!(!out.contains(" ← "), "{out}");
     assert!(
         out.contains("(require\n  (and\n    (component \"Frontend\")"),
         "{out}"
@@ -59,6 +60,10 @@ fn run_prints_outcome_bindings_and_trace_path() {
         "unexpected trace path {path}"
     );
     assert!(path.ends_with(".json"), "{path}");
+    assert!(
+        out.contains(&format!("trace: {path}\njev requests: ")),
+        "{out}"
+    );
     let body = std::fs::read_to_string(path).unwrap();
     assert!(body.contains("\"listings\""), "{body}");
     assert!(body.contains("\"documents\""), "{body}");

@@ -87,6 +87,13 @@ pub struct JudgeExchange {
     pub response: serde_json::Value,
 }
 
+/// One document judgement plus the exchanges that produced it.
+#[derive(Debug, Clone)]
+pub struct DocumentAnswer {
+    pub judgement: DocumentJudgement,
+    pub exchanges: Vec<JudgeExchange>,
+}
+
 pub const TAU_CONFIDENCE: f64 = 0.6;
 
 impl DocumentJudgement {
@@ -123,6 +130,20 @@ impl std::error::Error for JudgeError {}
 pub trait Judge {
     fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError>;
     fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError>;
+
+    /// Judge several documents. Default calls `document` in order.
+    /// Results line up with `states`. Jev overrides this to post concurrently.
+    fn documents(&mut self, states: &[DocumentState]) -> Vec<Result<DocumentAnswer, JudgeError>> {
+        states
+            .iter()
+            .map(|s| {
+                self.document(s).map(|judgement| DocumentAnswer {
+                    judgement,
+                    exchanges: self.last_exchanges(),
+                })
+            })
+            .collect()
+    }
 
     /// Request/response pairs from the most recent `choose` or `document`.
     /// Empty for heuristic and fixture judges.

@@ -483,11 +483,7 @@ impl TreeNavigator {
                 effects,
                 exchanges,
             });
-            for rel in open_files {
-                if self.confirm_file(pred, args, &rel) == FileConfirm::Witness {
-                    hits.push(rel);
-                }
-            }
+            hits.extend(self.confirm_files(pred, args, &open_files));
             if need == Need::Truth && !hits.is_empty() && frontier.is_empty() {
                 break;
             }
@@ -508,46 +504,71 @@ impl TreeNavigator {
         }
     }
 
-    fn confirm_file(&mut self, pred: &str, args: &[String], rel: &str) -> FileConfirm {
-        let (body, _) = match read_trimmed(&self.root, rel, BODY_BUDGET) {
-            Ok(v) => v,
-            Err(_) => return FileConfirm::NotWitness,
-        };
-        self.documents.push(rel.to_string());
-        let verbalization = self.verbalize(pred, args);
-        let j = match self.judge.document(&DocumentState {
-            pred: pred.to_string(),
-            args: args.to_vec(),
-            path: rel.to_string(),
-            body: body.clone(),
-            bindings: Vec::new(),
-            verbalization,
-        }) {
-            Ok(j) => j,
-            Err(e) => {
-                self.errors.push(e.to_string());
-                return FileConfirm::NotWitness;
+    /// Files flagged `investigate` in one listing. Their document Nouls do
+    /// not depend on each other; the judge may post them concurrently.
+    fn confirm_files(&mut self, pred: &str, args: &[String], rels: &[String]) -> Vec<String> {
+        struct Prepared {
+            rel: String,
+            body: String,
+            state: DocumentState,
+        }
+        let mut prepared = Vec::new();
+        for rel in rels {
+            let (body, _) = match read_trimmed(&self.root, rel, BODY_BUDGET) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            self.documents.push(rel.clone());
+            prepared.push(Prepared {
+                rel: rel.clone(),
+                body: body.clone(),
+                state: DocumentState {
+                    pred: pred.to_string(),
+                    args: args.to_vec(),
+                    path: rel.clone(),
+                    body,
+                    bindings: Vec::new(),
+                    verbalization: self.verbalize(pred, args),
+                },
+            });
+        }
+        if prepared.is_empty() {
+            return Vec::new();
+        }
+        let states: Vec<DocumentState> = prepared.iter().map(|p| p.state.clone()).collect();
+        let answers = self.judge.documents(&states);
+        let mut hits = Vec::new();
+        for (prep, answer) in prepared.into_iter().zip(answers) {
+            let a = match answer {
+                Ok(a) => a,
+                Err(e) => {
+                    self.errors.push(e.to_string());
+                    continue;
+                }
+            };
+            let confirm = if a.judgement.closed_true() {
+                FileConfirm::Witness
+            } else {
+                FileConfirm::NotWitness
+            };
+            if confirm == FileConfirm::Witness {
+                hits.push(prep.rel.clone());
             }
-        };
-        let confirm = if j.closed_true() {
-            FileConfirm::Witness
-        } else {
-            FileConfirm::NotWitness
-        };
-        let note = match confirm {
-            FileConfirm::Witness => "witness".into(),
-            FileConfirm::NotWitness => "not a witness".into(),
-        };
-        self.trace.push(GroundStep::Document {
-            pred: pred.to_string(),
-            args: args.to_vec(),
-            path: rel.to_string(),
-            judgement: j,
-            preview: preview_body(&body),
-            note,
-            exchanges: self.judge.last_exchanges(),
-        });
-        confirm
+            let note = match confirm {
+                FileConfirm::Witness => "witness".into(),
+                FileConfirm::NotWitness => "not a witness".into(),
+            };
+            self.trace.push(GroundStep::Document {
+                pred: pred.to_string(),
+                args: args.to_vec(),
+                path: prep.rel,
+                judgement: a.judgement,
+                preview: preview_body(&prep.body),
+                note,
+                exchanges: a.exchanges,
+            });
+        }
+        hits
     }
 }
 
@@ -641,5 +662,108 @@ impl Navigator for TreeNavigator {
             }
             _ => self.answer_relation(demand, store),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::navigator::judge::{
+        ChildChoice, DocumentAnswer, DocumentJudgement, DocumentVerdict, JudgeError,
+    };
+    use crate::navigator::{Arg, Demand, Need};
+    use std::sync::{Arc, Mutex};
+
+    struct OpenAll;
+
+    impl Judge for OpenAll {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            Ok(state
+                .children
+                .iter()
+                .map(|c| ChildChoice {
+                    rel_path: c.rel_path.clone(),
+                    transition: if c.is_dir {
+                        Transition::Skip
+                    } else {
+                        Transition::Investigate
+                    },
+                    confidence: 0.9,
+                })
+                .collect())
+        }
+
+        fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            Ok(DocumentJudgement {
+                verdict: DocumentVerdict::True,
+                confidence: 0.9,
+            })
+        }
+    }
+
+    struct BatchProbe {
+        sizes: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl Judge for BatchProbe {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            OpenAll.choose(state)
+        }
+
+        fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            OpenAll.document(state)
+        }
+
+        fn documents(
+            &mut self,
+            states: &[DocumentState],
+        ) -> Vec<Result<DocumentAnswer, JudgeError>> {
+            self.sizes.lock().unwrap().push(states.len());
+            OpenAll.documents(states)
+        }
+    }
+
+    #[test]
+    fn locate_judges_open_files_as_one_batch() {
+        let dir = std::env::temp_dir().join(format!(
+            "autoground-doc-batch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.py"), "a").unwrap();
+        std::fs::write(dir.join("b.py"), "b").unwrap();
+        std::fs::write(dir.join("c.py"), "c").unwrap();
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let mut nav = TreeNavigator::new(
+            &dir,
+            Box::new(BatchProbe {
+                sizes: sizes.clone(),
+            }),
+        );
+        let demand = Demand {
+            pred: "component".into(),
+            args: vec![Arg::Bound("X".into())],
+            need: Need::Truth,
+        };
+        let _ = nav.answer(&demand, &Store::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        let sizes = sizes.lock().unwrap().clone();
+        assert!(
+            sizes.iter().any(|&n| n >= 3),
+            "expected one document batch of 3 files, got {sizes:?}"
+        );
+        let docs: Vec<_> = nav
+            .trace
+            .iter()
+            .filter_map(|s| match s {
+                GroundStep::Document { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(docs, ["a.py", "b.py", "c.py"]);
     }
 }

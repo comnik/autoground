@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::Compiled;
-use crate::edb::Store;
 use crate::eval::{EdbAtom, Outcome, RunResult, Value};
+use crate::navigator::GroundStep;
 use crate::syntax::{print_ground_atom, print_require};
 
 pub const DEFAULT_TRACE_DIR: &str = "/tmp/autoground";
@@ -39,22 +39,30 @@ pub fn allocate_record_path() -> std::io::Result<PathBuf> {
     allocate_unique_file(Path::new(DEFAULT_TRACE_DIR), "json")
 }
 
-/// Human-readable summary of a run: each `require` and the EDB it bottomed out on.
-pub fn format_run(compiled: &Compiled, store: &Store, result: &RunResult) -> String {
-    let mut out = String::new();
-    match result.outcome {
-        Outcome::Grounded => out.push_str("GROUNDED\n"),
-        Outcome::Violated => out.push_str("VIOLATED\n"),
-        Outcome::Ungrounded => out.push_str("UNGROUNDED\n"),
-    }
+pub fn jev_request_count(steps: &[GroundStep]) -> usize {
+    steps.iter().map(|s| s.exchanges().len()).sum()
+}
 
-    let bindings = store.all_bindings();
-    if !bindings.is_empty() {
-        out.push('\n');
-        for b in bindings {
-            out.push_str(&format!("\"{}\"  ←  {}\n", b.constant, b.entity));
-        }
+fn outcome_label(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Grounded => "GROUNDED",
+        Outcome::Violated => "VIOLATED",
+        Outcome::Ungrounded => "UNKNOWN",
     }
+}
+
+/// Human-readable summary of a run: header, then each `require` and the EDB it bottomed out on.
+pub fn format_run(
+    compiled: &Compiled,
+    result: &RunResult,
+    trace_path: &Path,
+    jev_requests: usize,
+) -> String {
+    let mut out = String::new();
+    out.push_str(outcome_label(&result.outcome));
+    out.push('\n');
+    out.push_str(&format!("trace: {}\n", trace_path.display()));
+    out.push_str(&format!("jev requests: {jev_requests}\n"));
 
     for (i, req) in result.requires.iter().enumerate() {
         out.push('\n');
@@ -151,19 +159,25 @@ mod tests {
     }
 
     #[test]
-    fn format_run_prints_each_require_and_edb_verdicts() {
+    fn format_run_prints_header_each_require_and_edb_verdicts() {
         let src = r#"
 (require (component "Frontend"))
 (require (component "Missing"))
 (require (component "Open"))
 "#;
         let compiled = compile(&parse(src).unwrap()).unwrap();
-        let mut store = Store::new();
+        let mut store = crate::edb::Store::new();
         store.insert_fact("component", vec!["Frontend".into()], "test");
         store.close_pattern("component", vec![Some("Missing".into())]);
+        store.bind("Frontend", "ui/app.py");
         let result = run(&compiled, &mut store, None);
-        let text = format_run(&compiled, &store, &result);
-        assert!(text.starts_with("VIOLATED\n"), "{text}");
+        let trace = Path::new("/tmp/autoground/trace-test.json");
+        let text = format_run(&compiled, &result, trace, 7);
+        assert!(
+            text.starts_with("VIOLATED\ntrace: /tmp/autoground/trace-test.json\njev requests: 7\n"),
+            "{text}"
+        );
+        assert!(!text.contains(" ← "), "{text}");
         assert!(
             text.contains(
                 "(require\n  (component \"Frontend\"))\n  true\n  (component \"Frontend\")  proved\n"
@@ -182,5 +196,42 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn outcome_label_prints_unknown_for_ungrounded() {
+        assert_eq!(outcome_label(&Outcome::Ungrounded), "UNKNOWN");
+        assert_eq!(outcome_label(&Outcome::Grounded), "GROUNDED");
+        assert_eq!(outcome_label(&Outcome::Violated), "VIOLATED");
+    }
+
+    #[test]
+    fn jev_request_count_sums_exchanges() {
+        use crate::navigator::judge::JudgeExchange;
+        let empty = GroundStep::Result {
+            pred: "component".into(),
+            args: vec!["Frontend".into()],
+            status: "bound".into(),
+            bindings: vec![],
+        };
+        let listing = GroundStep::Listing {
+            pred: "component".into(),
+            args: vec!["Frontend".into()],
+            dir: String::new(),
+            children: vec![],
+            choices: vec![],
+            effects: vec![],
+            exchanges: vec![
+                JudgeExchange {
+                    request: serde_json::json!({}),
+                    response: serde_json::json!({}),
+                },
+                JudgeExchange {
+                    request: serde_json::json!({}),
+                    response: serde_json::json!({}),
+                },
+            ],
+        };
+        assert_eq!(jev_request_count(&[empty, listing]), 2);
     }
 }

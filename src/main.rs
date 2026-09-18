@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use autoground::edb::Store;
 use autoground::eval::run;
 use autoground::navigator::{FixtureJudge, JevJudge, RecordingJudge, TreeNavigator};
-use autoground::report::{allocate_record_path, format_run, run_exit_code};
+use autoground::report::{allocate_record_path, format_run, jev_request_count, run_exit_code};
 use autoground::{compile, parse, verbalize_source};
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -129,8 +129,7 @@ fn run_model(
         (run(&compiled, &mut store, None), Vec::new(), false)
     };
 
-    let mut printed = format_run(&compiled, &store, &result);
-    printed.push_str(&format!("trace: {}\n", record_path.display()));
+    let printed = format_run(&compiled, &result, &record_path, jev_request_count(&steps));
     autoground::report::tui::present_run(&printed, &steps, repo_name)?;
     if judge_failed {
         Ok(3)
