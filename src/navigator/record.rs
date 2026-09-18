@@ -1,7 +1,7 @@
 use super::fixture::{DocumentFixture, FixtureFile, JevRequestEvent, ListingFixture};
 use super::judge::{
     epoch_ms, ChildChoice, DocumentAnswer, DocumentJudgement, DocumentState, Judge, JudgeError,
-    JudgeExchange, ListingState,
+    JudgeExchange, ListingState, MultiListingState,
 };
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -73,6 +73,27 @@ impl Judge for RecordingJudge {
         });
         self.record_exchanges();
         Ok(choices)
+    }
+
+    fn choose_many(
+        &mut self,
+        state: &MultiListingState,
+    ) -> Result<Vec<Vec<ChildChoice>>, JudgeError> {
+        let all = self.inner.choose_many(state)?;
+        for (atom, choices) in state.atoms.iter().zip(&all) {
+            let mut map = std::collections::HashMap::new();
+            for c in choices {
+                map.insert(c.rel_path.clone(), c.transition);
+            }
+            self.file.listings.push(ListingFixture {
+                pred: atom.pred.clone(),
+                args: atom.args.clone(),
+                dir: state.dir.clone(),
+                choices: map,
+            });
+        }
+        self.record_exchanges();
+        Ok(all)
     }
 
     fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {

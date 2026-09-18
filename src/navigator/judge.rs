@@ -21,6 +21,42 @@ pub struct ListingState {
     pub verbalization: String,
 }
 
+/// One atom sharing a listing tree with others.
+#[derive(Debug, Clone)]
+pub struct ListingAtom {
+    pub pred: String,
+    pub args: Vec<String>,
+    pub verbalization: String,
+}
+
+/// Several atoms, one directory tree. Each child is a Choice per atom.
+#[derive(Debug, Clone)]
+pub struct MultiListingState {
+    pub atoms: Vec<ListingAtom>,
+    pub dir: String,
+    pub children: Vec<Child>,
+}
+
+impl MultiListingState {
+    pub fn for_atom(atom: ListingAtom, dir: String, children: Vec<Child>) -> Self {
+        Self {
+            atoms: vec![atom],
+            dir,
+            children,
+        }
+    }
+
+    pub fn listing_state(&self, atom: &ListingAtom) -> ListingState {
+        ListingState {
+            pred: atom.pred.clone(),
+            args: atom.args.clone(),
+            dir: self.dir.clone(),
+            children: self.children.clone(),
+            verbalization: atom.verbalization.clone(),
+        }
+    }
+}
+
 /// One file presented to the judge. Separate request from listings.
 #[derive(Debug, Clone)]
 pub struct DocumentState {
@@ -203,8 +239,23 @@ pub trait Judge {
     fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError>;
     fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError>;
 
+    /// One listing tree, Choices for every atom. Default calls `choose` per atom.
+    /// Outer results line up with `state.atoms`; each inner vec is that atom's
+    /// per-child Choices. Jev overrides this to post one (chunked) request.
+    fn choose_many(
+        &mut self,
+        state: &MultiListingState,
+    ) -> Result<Vec<Vec<ChildChoice>>, JudgeError> {
+        state
+            .atoms
+            .iter()
+            .map(|atom| self.choose(&state.listing_state(atom)))
+            .collect()
+    }
+
     /// Judge several documents. Default calls `document` in order.
-    /// Results line up with `states`. Jev overrides this to post concurrently.
+    /// Results line up with `states`. Jev overrides this to post concurrently,
+    /// grouping questions that share a file into one request.
     fn documents(&mut self, states: &[DocumentState]) -> Vec<Result<DocumentAnswer, JudgeError>> {
         states
             .iter()

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::judge::{
     Child, ChildChoice, DocumentAnswer, DocumentJudgement, DocumentState, DocumentVerdict, Judge,
-    JudgeError, JudgeExchange, ListingState, Transition, LISTING_CHOICE_BUDGET,
+    JudgeError, JudgeExchange, ListingState, MultiListingState, Transition, LISTING_CHOICE_BUDGET,
 };
 use super::walk::parent_dir;
 
@@ -215,6 +215,50 @@ impl<T: Transport> Judge for JevJudge<T> {
         Ok(out)
     }
 
+    fn choose_many(
+        &mut self,
+        state: &MultiListingState,
+    ) -> Result<Vec<Vec<ChildChoice>>, JudgeError> {
+        if state.atoms.len() <= 1 {
+            let choices = match state.atoms.first() {
+                Some(atom) => self.choose(&state.listing_state(atom))?,
+                None => Vec::new(),
+            };
+            return Ok(state.atoms.iter().map(|_| choices.clone()).collect());
+        }
+        self.exchanges.clear();
+        let n_atoms = state.atoms.len();
+        let n_children = state.children.len();
+        let mut tables: Vec<Vec<Option<ChildChoice>>> = vec![vec![None; n_children]; n_atoms];
+        let pairs: Vec<(usize, usize)> = (0..n_atoms)
+            .flat_map(|a| (0..n_children).map(move |c| (a, c)))
+            .collect();
+        for chunk in pairs.chunks(LISTING_CHOICE_BUDGET) {
+            let body = listing_request_many(&self.model, state, chunk);
+            let resp = self.evaluate(&body)?;
+            for &(a, c) in chunk {
+                let key = listing_pair_key(a, c);
+                tables[a][c] = Some(parse_listing_choice(&resp, &key, &state.children[c])?);
+            }
+        }
+        tables
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .enumerate()
+                    .map(|(c, choice)| {
+                        choice.ok_or_else(|| {
+                            JudgeError::Parse(format!(
+                                "missing listing choice for {}",
+                                state.children[c].rel_path
+                            ))
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
         self.documents(std::slice::from_ref(state))
             .pop()
@@ -230,30 +274,58 @@ impl<T: Transport> Judge for JevJudge<T> {
         if let Err(e) = self.guard_budget() {
             return states.iter().map(|_| Err(e.clone())).collect();
         }
-        let bodies: Vec<Value> = states
+        let groups = group_documents_by_path(states);
+        let bodies: Vec<Value> = groups
             .iter()
-            .map(|s| investigation_request(&self.model, s))
+            .map(|idxs| document_group_request(&self.model, states, idxs))
             .collect();
         let responses = self.transport.post_json_all(&self.endpoint, &bodies);
-        let mut out = Vec::with_capacity(states.len());
-        for (request, resp) in bodies.into_iter().zip(responses) {
+        let mut out: Vec<Option<Result<DocumentAnswer, JudgeError>>> =
+            (0..states.len()).map(|_| None).collect();
+        for ((idxs, request), resp) in groups.iter().zip(bodies).zip(responses) {
             match resp {
                 Ok(posted) => {
                     let response = posted.value.clone();
                     let ex = exchange_from_posted(request, posted);
                     self.add_spend(ex.cost_usd);
                     self.exchanges.push(ex.clone());
-                    out.push(
-                        parse_document_answer(&response).map(|judgement| DocumentAnswer {
-                            judgement,
-                            exchanges: vec![ex],
-                        }),
-                    );
+                    if idxs.len() == 1 {
+                        out[idxs[0]] = Some(parse_document_answer(&response).map(|judgement| {
+                            DocumentAnswer {
+                                judgement,
+                                exchanges: vec![ex],
+                            }
+                        }));
+                    } else {
+                        match parse_document_answers_many(&response, idxs.len()) {
+                            Ok(judgements) => {
+                                for (k, &i) in idxs.iter().enumerate() {
+                                    let exchanges =
+                                        if k == 0 { vec![ex.clone()] } else { Vec::new() };
+                                    out[i] = Some(Ok(DocumentAnswer {
+                                        judgement: judgements[k].clone(),
+                                        exchanges,
+                                    }));
+                                }
+                            }
+                            Err(e) => {
+                                for &i in idxs {
+                                    out[i] = Some(Err(e.clone()));
+                                }
+                            }
+                        }
+                    }
                 }
-                Err(e) => out.push(Err(e)),
+                Err(e) => {
+                    for &i in idxs {
+                        out[i] = Some(Err(e.clone()));
+                    }
+                }
             }
         }
-        out
+        out.into_iter()
+            .map(|o| o.expect("document group covered every state"))
+            .collect()
     }
 
     fn last_exchanges(&self) -> Vec<JudgeExchange> {
@@ -296,6 +368,61 @@ pub fn listing_request(
             "directory": state.dir,
             "tree": listing_tree(&state.children),
             "children": children_by_question(chunk, id_base),
+        },
+        "questions": questions,
+    })
+}
+
+fn listing_pair_key(atom: usize, child: usize) -> String {
+    format!("a{atom}c{child}")
+}
+
+/// One listing tree, a Choice per (atom, child) pair. `pairs` are
+/// `(atom_index, child_index)` into `state`.
+pub fn listing_request_many(
+    model: &str,
+    state: &MultiListingState,
+    pairs: &[(usize, usize)],
+) -> Value {
+    let mut questions = serde_json::Map::new();
+    let mut atoms = serde_json::Map::new();
+    let mut children = serde_json::Map::new();
+    for &(a, c) in pairs {
+        let atom = &state.atoms[a];
+        let child = &state.children[c];
+        let statement = atom_text(&atom.pred, &atom.args, &atom.verbalization);
+        let path = listing_path(child);
+        atoms.entry(format!("a{a}")).or_insert_with(|| {
+            json!({
+                "pred": atom.pred,
+                "args": atom.args,
+                "statement": statement,
+            })
+        });
+        children
+            .entry(format!("c{c}"))
+            .or_insert_with(|| json!(path));
+        questions.insert(
+            listing_pair_key(a, c),
+            json!({
+                "type": "choice",
+                "instructions": format!(
+                    "Should we look in {path} for proof or disproof of the following statement: {statement}"
+                ),
+                "criteria": {
+                    "skip": "Do not look here, or in anything nested under this path. The name, path, and listing tree show this is unrelated.",
+                    "investigate": "Look here. Nested paths already in this listing are used when a directory is investigated; files are opened and judged.",
+                }
+            }),
+        );
+    }
+    json!({
+        "model": model,
+        "state": {
+            "atoms": atoms,
+            "directory": state.dir,
+            "tree": listing_tree(&state.children),
+            "children": children,
         },
         "questions": questions,
     })
@@ -394,44 +521,71 @@ pub fn parse_listing_answers(
     chunk: &[Child],
     id_base: usize,
 ) -> Result<Vec<ChildChoice>, JudgeError> {
-    let answers = resp
-        .get("answers")
-        .and_then(|a| a.as_object())
-        .ok_or_else(|| JudgeError::Parse("response missing answers".into()))?;
     let mut out = Vec::new();
     for (i, child) in chunk.iter().enumerate() {
         let key = format!("c{}", id_base + i);
-        let ans = answers
-            .get(&key)
-            .ok_or_else(|| JudgeError::Parse(format!("missing answer {key}")))?;
-        let choice = ans.get("choice").and_then(|c| c.as_str()).unwrap_or("skip");
-        let confidence = ans
-            .get("confidence")
-            .and_then(|c| c.as_f64())
-            .unwrap_or(0.0);
-        let transition = match choice {
-            "skip" => Transition::Skip,
-            "investigate" => Transition::Investigate,
-            other => {
-                return Err(JudgeError::Parse(format!(
-                    "unknown listing choice `{other}` for {}",
-                    child.rel_path
-                )));
-            }
-        };
-        out.push(ChildChoice {
-            rel_path: child.rel_path.clone(),
-            transition,
-            confidence,
-        });
+        out.push(parse_listing_choice(resp, &key, child)?);
     }
     Ok(out)
 }
 
+fn parse_listing_choice(resp: &Value, key: &str, child: &Child) -> Result<ChildChoice, JudgeError> {
+    let answers = resp
+        .get("answers")
+        .and_then(|a| a.as_object())
+        .ok_or_else(|| JudgeError::Parse("response missing answers".into()))?;
+    let ans = answers
+        .get(key)
+        .ok_or_else(|| JudgeError::Parse(format!("missing answer {key}")))?;
+    let choice = ans.get("choice").and_then(|c| c.as_str()).unwrap_or("skip");
+    let confidence = ans
+        .get("confidence")
+        .and_then(|c| c.as_f64())
+        .unwrap_or(0.0);
+    let transition = match choice {
+        "skip" => Transition::Skip,
+        "investigate" => Transition::Investigate,
+        other => {
+            return Err(JudgeError::Parse(format!(
+                "unknown listing choice `{other}` for {}",
+                child.rel_path
+            )));
+        }
+    };
+    Ok(ChildChoice {
+        rel_path: child.rel_path.clone(),
+        transition,
+        confidence,
+    })
+}
+
 pub fn parse_document_answer(resp: &Value) -> Result<DocumentJudgement, JudgeError> {
-    let ans = resp
-        .pointer("/answers/ground")
-        .ok_or_else(|| JudgeError::Parse("response missing answers.ground".into()))?;
+    parse_document_choice(
+        resp.pointer("/answers/ground")
+            .ok_or_else(|| JudgeError::Parse("response missing answers.ground".into()))?,
+    )
+}
+
+fn parse_document_answers_many(
+    resp: &Value,
+    n: usize,
+) -> Result<Vec<DocumentJudgement>, JudgeError> {
+    let answers = resp
+        .get("answers")
+        .and_then(|a| a.as_object())
+        .ok_or_else(|| JudgeError::Parse("response missing answers".into()))?;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let key = format!("q{i}");
+        let ans = answers
+            .get(&key)
+            .ok_or_else(|| JudgeError::Parse(format!("missing answer {key}")))?;
+        out.push(parse_document_choice(ans)?);
+    }
+    Ok(out)
+}
+
+fn parse_document_choice(ans: &Value) -> Result<DocumentJudgement, JudgeError> {
     let choice = ans
         .get("choice")
         .and_then(|c| c.as_str())
@@ -453,6 +607,74 @@ pub fn parse_document_answer(resp: &Value) -> Result<DocumentJudgement, JudgeErr
     Ok(DocumentJudgement {
         verdict,
         confidence,
+    })
+}
+
+fn group_documents_by_path(states: &[DocumentState]) -> Vec<Vec<usize>> {
+    let mut order = Vec::new();
+    let mut by_path: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, s) in states.iter().enumerate() {
+        let entry = by_path.entry(s.path.clone()).or_insert_with(|| {
+            order.push(s.path.clone());
+            Vec::new()
+        });
+        entry.push(i);
+    }
+    order
+        .into_iter()
+        .map(|p| by_path.remove(&p).unwrap_or_default())
+        .collect()
+}
+
+fn document_group_request(model: &str, states: &[DocumentState], idxs: &[usize]) -> Value {
+    if idxs.len() == 1 {
+        investigation_request(model, &states[idxs[0]])
+    } else {
+        let group: Vec<DocumentState> = idxs.iter().map(|&i| states[i].clone()).collect();
+        investigation_request_many(model, &group)
+    }
+}
+
+pub fn investigation_request_many(model: &str, states: &[DocumentState]) -> Value {
+    let first = &states[0];
+    let mut questions = serde_json::Map::new();
+    let mut atoms = serde_json::Map::new();
+    for (i, s) in states.iter().enumerate() {
+        let key = format!("q{i}");
+        let statement = atom_text(&s.pred, &s.args, &s.verbalization);
+        atoms.insert(
+            key.clone(),
+            json!({
+                "pred": s.pred,
+                "args": s.args,
+                "statement": statement,
+            }),
+        );
+        questions.insert(
+            key,
+            json!({
+                "type": "choice",
+                "instructions": statement,
+                "criteria": {
+                    "true": "The atom holds.",
+                    "false": "The atom does not hold.",
+                    "unknown": "Cannot tell.",
+                }
+            }),
+        );
+    }
+    json!({
+        "model": model,
+        "state": {
+            "path": first.path,
+            "body": first.body,
+            "bindings": first.bindings.iter().map(|(c, e)| json!({
+                "constant": c,
+                "entity": e,
+            })).collect::<Vec<_>>(),
+            "atoms": atoms,
+        },
+        "questions": questions,
     })
 }
 
@@ -526,7 +748,7 @@ fn listing_path(child: &Child) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::navigator::judge::{Child, DocumentVerdict};
+    use crate::navigator::judge::{Child, DocumentVerdict, ListingAtom, MultiListingState};
 
     fn child(name: &str, is_dir: bool) -> Child {
         Child {
@@ -610,6 +832,39 @@ mod tests {
             criteria["investigate"]
         );
         assert!(!body["state"].get("body").is_some());
+    }
+
+    #[test]
+    fn listing_request_many_one_choice_per_atom_and_child() {
+        let state = MultiListingState {
+            atoms: vec![
+                ListingAtom {
+                    pred: "component".into(),
+                    args: vec!["Frontend".into()],
+                    verbalization: "\"Frontend\" is a component in the codebase".into(),
+                },
+                ListingAtom {
+                    pred: "component".into(),
+                    args: vec!["Backend".into()],
+                    verbalization: "\"Backend\" is a component in the codebase".into(),
+                },
+            ],
+            dir: "".into(),
+            children: vec![child("frontend", true), child("backend", true)],
+        };
+        let pairs = vec![(0, 0), (0, 1), (1, 0), (1, 1)];
+        let body = listing_request_many("jev-latest", &state, &pairs);
+        assert_eq!(body["questions"]["a0c0"]["type"], "choice");
+        assert_eq!(body["questions"]["a1c1"]["type"], "choice");
+        assert_eq!(body["state"]["children"]["c0"], "frontend/");
+        assert_eq!(body["state"]["atoms"]["a0"]["args"][0], "Frontend");
+        assert_eq!(body["state"]["atoms"]["a1"]["args"][0], "Backend");
+        assert!(body["state"].get("atom").is_none());
+        let instr = body["questions"]["a0c0"]["instructions"].as_str().unwrap();
+        assert!(instr.contains("frontend/"));
+        assert!(instr.contains("\"Frontend\" is a component in the codebase"));
+        let instr_b = body["questions"]["a1c0"]["instructions"].as_str().unwrap();
+        assert!(instr_b.contains("\"Backend\" is a component in the codebase"));
     }
 
     #[test]
@@ -725,6 +980,48 @@ mod tests {
     }
 
     #[test]
+    fn choose_many_posts_one_listing_for_two_atoms() {
+        let state = MultiListingState {
+            atoms: vec![
+                ListingAtom {
+                    pred: "component".into(),
+                    args: vec!["Frontend".into()],
+                    verbalization: String::new(),
+                },
+                ListingAtom {
+                    pred: "component".into(),
+                    args: vec!["Backend".into()],
+                    verbalization: String::new(),
+                },
+            ],
+            dir: "".into(),
+            children: vec![child("frontend", true), child("backend", true)],
+        };
+        let transport = SeqTransport {
+            responses: vec![json!({
+                "answers": {
+                    "a0c0": { "type": "choice", "choice": "investigate", "confidence": 0.9 },
+                    "a0c1": { "type": "choice", "choice": "skip", "confidence": 0.9 },
+                    "a1c0": { "type": "choice", "choice": "skip", "confidence": 0.9 },
+                    "a1c1": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
+                }
+            })],
+            bodies: Vec::new(),
+        };
+        let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
+        let choices = judge.choose_many(&state).unwrap();
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0][0].transition, Transition::Investigate);
+        assert_eq!(choices[0][1].transition, Transition::Skip);
+        assert_eq!(choices[1][0].transition, Transition::Skip);
+        assert_eq!(choices[1][1].transition, Transition::Investigate);
+        assert_eq!(judge.transport.bodies.len(), 1);
+        assert!(judge.transport.bodies[0]["questions"].get("a0c0").is_some());
+        assert!(judge.transport.bodies[0]["state"].get("atom").is_none());
+        assert_eq!(judge.last_exchanges().len(), 1);
+    }
+
+    #[test]
     fn judge_uses_transport() {
         let state = ListingState {
             pred: "component".into(),
@@ -824,6 +1121,51 @@ mod tests {
         assert!(ex
             .iter()
             .all(|e| e.started_at.is_some() && e.ended_at.is_some()));
+    }
+
+    fn many_doc_resp() -> Value {
+        json!({
+            "answers": {
+                "q0": { "type": "choice", "choice": "true", "confidence": 0.9 },
+                "q1": { "type": "choice", "choice": "false", "confidence": 0.8 }
+            }
+        })
+    }
+
+    #[test]
+    fn documents_group_same_path_into_one_post() {
+        let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let transport = BatchSpy {
+            batches: batches.clone(),
+            responses: vec![many_doc_resp()],
+        };
+        let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
+        let a = DocumentState {
+            pred: "component".into(),
+            args: vec!["Frontend".into()],
+            path: "readme.md".into(),
+            body: "hello".into(),
+            bindings: Vec::new(),
+            verbalization: "\"Frontend\" is a component in the codebase".into(),
+        };
+        let b = DocumentState {
+            pred: "component".into(),
+            args: vec!["Backend".into()],
+            path: "readme.md".into(),
+            body: "hello".into(),
+            bindings: Vec::new(),
+            verbalization: "\"Backend\" is a component in the codebase".into(),
+        };
+        let answers = judge.documents(&[a, b]);
+        assert_eq!(*batches.lock().unwrap(), vec![1]);
+        assert!(answers[0].as_ref().unwrap().judgement.closed_true());
+        assert!(answers[1].as_ref().unwrap().judgement.closed_false());
+        let ex = judge.last_exchanges();
+        assert_eq!(ex.len(), 1);
+        assert!(ex[0].request["questions"].get("q0").is_some());
+        assert!(ex[0].request["questions"].get("q1").is_some());
+        assert!(ex[0].request["questions"].get("ground").is_none());
+        assert_eq!(ex[0].request["state"]["path"], "readme.md");
     }
 
     #[test]

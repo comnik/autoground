@@ -18,7 +18,7 @@ pub use trace::GroundStep;
 pub use tree::TreeNavigator;
 
 /// What the evaluator needs from an EDB atom.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Need {
     Truth,
     Closed,
@@ -49,6 +49,13 @@ pub struct Answer {
 
 pub trait Navigator {
     fn answer(&mut self, demand: &Demand, store: &Store) -> Answer;
+
+    /// Answer several demands. Default calls `answer` in order. A tree
+    /// navigator overrides this so locate atoms share one listing walk and
+    /// document questions on the same file share one request.
+    fn answer_many(&mut self, demands: &[Demand], store: &Store) -> Vec<Answer> {
+        demands.iter().map(|d| self.answer(d, store)).collect()
+    }
 
     /// Receive declarations from the compiled model (verbalization, signatures).
     fn prepare(&mut self, _compiled: &crate::core::Compiled) {}

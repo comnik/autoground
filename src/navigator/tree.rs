@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::edb::Store;
 use crate::navigator::judge::{
-    ChildChoice, DocumentState, Judge, ListingState, Transition, LISTING_CHOICE_BUDGET,
-    TAU_CONFIDENCE,
+    ChildChoice, DocumentState, Judge, ListingAtom, MultiListingState, Transition,
+    LISTING_CHOICE_BUDGET, TAU_CONFIDENCE,
 };
 use crate::navigator::trace::GroundStep;
 use crate::navigator::walk::{pack_listing, parent_dir, read_trimmed, repo_join, ListingFilter};
@@ -15,8 +15,9 @@ const MAX_LISTINGS: usize = 32;
 const MAX_DEPTH: usize = 8;
 const BODY_BUDGET: usize = 8192;
 
-/// Goal-directed walk of a repo tree. Packs nested listings into one Choice
-/// per request; asks a `Judge` at each listing and document; never evaluates IDB.
+/// Goal-directed walk of a repo tree. Locate atoms share one listing request
+/// (a Choice per atom per child). Document questions on the same file share
+/// one request. Never evaluates IDB.
 pub struct TreeNavigator {
     root: PathBuf,
     filter: ListingFilter,
@@ -26,6 +27,7 @@ pub struct TreeNavigator {
     pub errors: Vec<String>,
     pub trace: Vec<GroundStep>,
     declarations: HashMap<String, Declare>,
+    answered: HashMap<(String, Vec<Option<String>>, Need), Answer>,
 }
 
 impl TreeNavigator {
@@ -41,6 +43,7 @@ impl TreeNavigator {
             errors: Vec::new(),
             trace: Vec::new(),
             declarations: HashMap::new(),
+            answered: HashMap::new(),
         }
     }
 
@@ -76,6 +79,19 @@ impl TreeNavigator {
         }
     }
 
+    fn cached(&self, demand: &Demand) -> Option<Answer> {
+        self.answered
+            .get(&(demand.pred.clone(), demand_pattern(demand), demand.need))
+            .cloned()
+    }
+
+    fn remember(&mut self, demand: &Demand, answer: Answer) {
+        self.answered.insert(
+            (demand.pred.clone(), demand_pattern(demand), demand.need),
+            answer,
+        );
+    }
+
     fn answer_locate(&mut self, demand: &Demand, store: &Store) -> Answer {
         let pred = demand.pred.as_str();
         let source = format!("nav:{pred}");
@@ -94,6 +110,13 @@ impl TreeNavigator {
             }
         }
         let located = self.locate(demand, store);
+        self.finish_locate(demand, located)
+    }
+
+    fn finish_locate(&mut self, demand: &Demand, located: LocateResult) -> Answer {
+        let pred = demand.pred.as_str();
+        let source = format!("nav:{pred}");
+        let any_free = demand.args.iter().any(|a| matches!(a, Arg::Free(_)));
         let bound = bound_values(demand);
         let unary = demand.args.len() == 1;
         let answer = match located {
@@ -164,6 +187,7 @@ impl TreeNavigator {
             status: status.into(),
             bindings: answer.bindings.clone(),
         });
+        self.remember(demand, answer.clone());
         answer
     }
 
@@ -280,22 +304,40 @@ impl TreeNavigator {
     }
 
     fn locate(&mut self, demand: &Demand, store: &Store) -> LocateResult {
-        let pred = demand.pred.as_str();
-        let args = bound_values(demand);
-        let need = demand.need;
+        self.locate_many(std::slice::from_ref(demand), store)
+            .pop()
+            .unwrap_or(LocateResult::Unknown)
+    }
+
+    fn locate_many(&mut self, demands: &[Demand], store: &Store) -> Vec<LocateResult> {
+        if demands.is_empty() {
+            return Vec::new();
+        }
         let mut frontier: Vec<(String, usize)> = vec![("".to_string(), 0)];
         let mut already = HashSet::new();
-        let mut hits = Vec::new();
         let mut listings = 0;
-        let mut all_skips_confident = true;
+        let mut atoms: Vec<AtomWalk> = demands
+            .iter()
+            .map(|d| AtomWalk {
+                args: bound_values(d),
+                need: d.need,
+                hits: Vec::new(),
+                skipped: HashSet::new(),
+                all_skips_confident: true,
+            })
+            .collect();
 
         while !frontier.is_empty() {
             if listings >= MAX_LISTINGS {
-                all_skips_confident = false;
+                for atom in &mut atoms {
+                    atom.all_skips_confident = false;
+                }
                 break;
             }
             if frontier.iter().all(|(_, depth)| *depth > MAX_DEPTH) {
-                all_skips_confident = false;
+                for atom in &mut atoms {
+                    atom.all_skips_confident = false;
+                }
                 break;
             }
             let packed = pack_listing(
@@ -309,10 +351,14 @@ impl TreeNavigator {
             listings += 1;
             self.listings.extend(packed.dir_depth.keys().cloned());
             if packed.depth_limited {
-                all_skips_confident = false;
+                for atom in &mut atoms {
+                    atom.all_skips_confident = false;
+                }
             }
             if !packed.failed.is_empty() {
-                all_skips_confident = false;
+                for atom in &mut atoms {
+                    atom.all_skips_confident = false;
+                }
             }
             if packed.children.is_empty() {
                 if packed.unfinished.is_empty() || packed.unfinished == frontier {
@@ -321,87 +367,137 @@ impl TreeNavigator {
                 frontier = packed.unfinished;
                 continue;
             }
-            let verbalization = self.verbalize_demand(demand);
-            let choices = match self.judge.choose(&ListingState {
-                pred: pred.to_string(),
-                args: args.clone(),
+
+            let asking: Vec<usize> = (0..atoms.len())
+                .filter(|&i| {
+                    packed
+                        .children
+                        .iter()
+                        .any(|c| atom_asks(&atoms[i], c.rel_path.as_str()))
+                })
+                .collect();
+            let listing_atoms: Vec<ListingAtom> = asking
+                .iter()
+                .map(|&i| ListingAtom {
+                    pred: demands[i].pred.clone(),
+                    args: atoms[i].args.clone(),
+                    verbalization: self.verbalize_demand(&demands[i]),
+                })
+                .collect();
+            let multi = MultiListingState {
+                atoms: listing_atoms,
                 dir: packed.origin.clone(),
                 children: packed.children.clone(),
-                verbalization,
-            }) {
-                Ok(c) => c,
-                Err(e) => {
-                    self.errors.push(e.to_string());
-                    all_skips_confident = false;
-                    frontier = packed.unfinished;
-                    continue;
+            };
+            let choices_by_ask = if asking.is_empty() {
+                Vec::new()
+            } else {
+                match self.judge.choose_many(&multi) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.errors.push(e.to_string());
+                        for atom in &mut atoms {
+                            atom.all_skips_confident = false;
+                        }
+                        frontier = packed.unfinished;
+                        continue;
+                    }
                 }
             };
             for child in &packed.children {
                 already.insert(child.rel_path.clone());
             }
             let exchanges = self.judge.last_exchanges();
-            let mut applied = Vec::new();
-            let mut effects = Vec::new();
-            let mut open_files = Vec::new();
-            let mut skipped = HashSet::new();
-            let mut incomplete = Vec::new();
-            for child in &packed.children {
-                let choice = choices
-                    .iter()
-                    .find(|c| c.rel_path == child.rel_path)
-                    .cloned()
-                    .unwrap_or(ChildChoice {
-                        rel_path: child.rel_path.clone(),
-                        transition: Transition::Skip,
-                        confidence: 0.0,
-                    });
-                if has_skipped_ancestor(&child.rel_path, &skipped) {
-                    if choice.transition == Transition::Investigate {
-                        effects.push(format!("{}: ignored (parent skip)", child.rel_path));
+
+            let mut open_by_atom: Vec<Vec<String>> = vec![Vec::new(); atoms.len()];
+            let mut incomplete: Vec<(String, usize)> = Vec::new();
+            let mut incomplete_seen = HashSet::new();
+
+            for (ask_i, &atom_i) in asking.iter().enumerate() {
+                let choices = choices_by_ask.get(ask_i).cloned().unwrap_or_default();
+                let mut applied = Vec::new();
+                let mut effects = Vec::new();
+                for child in &packed.children {
+                    let choice = choices
+                        .iter()
+                        .find(|c| c.rel_path == child.rel_path)
+                        .cloned()
+                        .unwrap_or(ChildChoice {
+                            rel_path: child.rel_path.clone(),
+                            transition: Transition::Skip,
+                            confidence: 0.0,
+                        });
+                    if has_skipped_ancestor(&child.rel_path, &atoms[atom_i].skipped)
+                        || atoms[atom_i].skipped.contains(&child.rel_path)
+                    {
+                        if choice.transition == Transition::Investigate {
+                            effects.push(format!("{}: ignored (parent skip)", child.rel_path));
+                        }
+                        applied.push(choice);
+                        continue;
+                    }
+                    match choice.transition {
+                        Transition::Skip => {
+                            if child.is_dir {
+                                atoms[atom_i].skipped.insert(child.rel_path.clone());
+                            }
+                            if choice.confidence < TAU_CONFIDENCE {
+                                atoms[atom_i].all_skips_confident = false;
+                            }
+                        }
+                        Transition::Investigate => {
+                            if child.is_dir {
+                                if atoms[atom_i].args.is_empty() {
+                                    atoms[atom_i].hits.push(child.rel_path.clone());
+                                }
+                                if !packed.complete.contains(&child.rel_path) {
+                                    if incomplete_seen.insert(child.rel_path.clone()) {
+                                        incomplete.push((
+                                            child.rel_path.clone(),
+                                            child_depth(&child.rel_path, &packed.dir_depth),
+                                        ));
+                                    }
+                                    effects.push(format!("{}: investigate → list", child.rel_path));
+                                } else {
+                                    effects.push(format!("{}: investigate", child.rel_path));
+                                }
+                            } else {
+                                open_by_atom[atom_i].push(child.rel_path.clone());
+                                effects.push(format!("{}: investigate → open", child.rel_path));
+                            }
+                        }
                     }
                     applied.push(choice);
-                    continue;
                 }
-                match choice.transition {
-                    Transition::Skip => {
-                        if child.is_dir {
-                            skipped.insert(child.rel_path.clone());
-                        }
-                        if choice.confidence < TAU_CONFIDENCE {
-                            all_skips_confident = false;
-                        }
-                    }
-                    Transition::Investigate => {
-                        if child.is_dir {
-                            if args.is_empty() {
-                                hits.push(child.rel_path.clone());
-                            }
-                            if !packed.complete.contains(&child.rel_path) {
-                                incomplete.push((
-                                    child.rel_path.clone(),
-                                    child_depth(&child.rel_path, &packed.dir_depth),
-                                ));
-                                effects.push(format!("{}: investigate → list", child.rel_path));
-                            } else {
-                                effects.push(format!("{}: investigate", child.rel_path));
-                            }
-                        } else {
-                            open_files.push(child.rel_path.clone());
-                            effects.push(format!("{}: investigate → open", child.rel_path));
-                        }
-                    }
-                }
-                applied.push(choice);
+                let step_exchanges = if ask_i == 0 {
+                    exchanges.clone()
+                } else {
+                    Vec::new()
+                };
+                self.trace.push(GroundStep::Listing {
+                    pred: demands[atom_i].pred.clone(),
+                    args: atoms[atom_i].args.clone(),
+                    dir: packed.origin.clone(),
+                    children: packed.children.clone(),
+                    choices: applied,
+                    effects,
+                    exchanges: step_exchanges,
+                });
             }
+
             let mut next = Vec::new();
             let mut seen_next = HashSet::new();
             for (dir, depth) in packed.unfinished {
                 if depth > MAX_DEPTH {
-                    all_skips_confident = false;
+                    for atom in &mut atoms {
+                        atom.all_skips_confident = false;
+                    }
                     continue;
                 }
-                if skipped.contains(&dir) || has_skipped_ancestor(&dir, &skipped) {
+                if atoms
+                    .iter()
+                    .all(|a| a.skipped.contains(&dir) || has_skipped_ancestor(&dir, &a.skipped))
+                {
                     continue;
                 }
                 if seen_next.insert(dir.clone()) {
@@ -410,83 +506,103 @@ impl TreeNavigator {
             }
             for (dir, depth) in incomplete {
                 if depth > MAX_DEPTH {
-                    all_skips_confident = false;
+                    for atom in &mut atoms {
+                        atom.all_skips_confident = false;
+                    }
                     continue;
                 }
                 if seen_next.insert(dir.clone()) {
                     next.push((dir, depth));
                 }
             }
-            self.trace.push(GroundStep::Listing {
-                pred: pred.to_string(),
-                args: args.to_vec(),
-                dir: packed.origin.clone(),
-                children: packed.children.clone(),
-                choices: applied,
-                effects,
-                exchanges,
-            });
-            hits.extend(self.confirm_files(demand, &open_files, store));
+
+            let batch: Vec<(Demand, Vec<String>)> = demands
+                .iter()
+                .zip(open_by_atom)
+                .map(|(d, files)| (d.clone(), files))
+                .collect();
+            let hits = self.confirm_files_batch(&batch, store);
+            for (atom, h) in atoms.iter_mut().zip(hits) {
+                atom.hits.extend(h);
+            }
             frontier = next;
-            if need == Need::Truth && !hits.is_empty() && frontier.is_empty() {
+            if atoms
+                .iter()
+                .all(|a| a.need == Need::Truth && !a.hits.is_empty() && frontier.is_empty())
+            {
+                break;
+            }
+            if frontier.is_empty() {
                 break;
             }
         }
 
-        let mut binding = tightest_wholes(hits);
-        binding.sort();
-        binding.dedup();
-
-        if binding.is_empty() {
-            if need == Need::Closed && all_skips_confident {
-                LocateResult::Absent
-            } else {
-                LocateResult::Unknown
-            }
-        } else {
-            LocateResult::Found(binding)
-        }
+        atoms
+            .into_iter()
+            .map(|atom| {
+                let mut binding = tightest_wholes(atom.hits);
+                binding.sort();
+                binding.dedup();
+                if binding.is_empty() {
+                    if atom.need == Need::Closed && atom.all_skips_confident {
+                        LocateResult::Absent
+                    } else {
+                        LocateResult::Unknown
+                    }
+                } else {
+                    LocateResult::Found(binding)
+                }
+            })
+            .collect()
     }
 
-    /// Files flagged `investigate` in one listing. Their document Nouls do
-    /// not depend on each other; the judge may post them concurrently.
-    fn confirm_files(&mut self, demand: &Demand, rels: &[String], store: &Store) -> Vec<String> {
+    /// Files flagged `investigate` in one listing. Same-path questions
+    /// (several atoms, one file) share one request.
+    fn confirm_files_batch(
+        &mut self,
+        per_atom: &[(Demand, Vec<String>)],
+        store: &Store,
+    ) -> Vec<Vec<String>> {
         struct Prepared {
+            atom: usize,
             rel: String,
             body: String,
             state: DocumentState,
         }
         let mut prepared = Vec::new();
-        for rel in rels {
-            let (body, _) = match read_trimmed(&self.root, rel, BODY_BUDGET) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            self.documents.push(rel.clone());
-            let args = ground_demand(demand, rel);
-            prepared.push(Prepared {
-                rel: rel.clone(),
-                body: body.clone(),
-                state: DocumentState {
-                    pred: demand.pred.clone(),
-                    args: args.clone(),
-                    path: rel.clone(),
-                    body,
-                    bindings: store
-                        .all_bindings()
-                        .into_iter()
-                        .map(|b| (b.constant, b.entity))
-                        .collect(),
-                    verbalization: self.verbalize(&demand.pred, &args),
-                },
-            });
+        for (atom, (demand, rels)) in per_atom.iter().enumerate() {
+            for rel in rels {
+                let (body, _) = match read_trimmed(&self.root, rel, BODY_BUDGET) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                self.documents.push(rel.clone());
+                let args = ground_demand(demand, rel);
+                prepared.push(Prepared {
+                    atom,
+                    rel: rel.clone(),
+                    body: body.clone(),
+                    state: DocumentState {
+                        pred: demand.pred.clone(),
+                        args: args.clone(),
+                        path: rel.clone(),
+                        body,
+                        bindings: store
+                            .all_bindings()
+                            .into_iter()
+                            .map(|b| (b.constant, b.entity))
+                            .collect(),
+                        verbalization: self.verbalize(&demand.pred, &args),
+                    },
+                });
+            }
         }
+        let mut hits: Vec<Vec<String>> = vec![Vec::new(); per_atom.len()];
         if prepared.is_empty() {
-            return Vec::new();
+            return hits;
         }
         let states: Vec<DocumentState> = prepared.iter().map(|p| p.state.clone()).collect();
         let answers = self.judge.documents(&states);
-        let mut hits = Vec::new();
         for (prep, answer) in prepared.into_iter().zip(answers) {
             let a = match answer {
                 Ok(a) => a,
@@ -501,15 +617,15 @@ impl TreeNavigator {
                 FileConfirm::NotWitness
             };
             if confirm == FileConfirm::Witness {
-                hits.push(prep.rel.clone());
+                hits[prep.atom].push(prep.rel.clone());
             }
             let note = match confirm {
                 FileConfirm::Witness => "witness".into(),
                 FileConfirm::NotWitness => "not a witness".into(),
             };
             self.trace.push(GroundStep::Document {
-                pred: demand.pred.clone(),
-                args: prep.state.args.clone(),
+                pred: prep.state.pred,
+                args: prep.state.args,
                 path: prep.rel,
                 judgement: a.judgement,
                 preview: preview_body(&prep.body),
@@ -545,6 +661,18 @@ enum LocateResult {
     Found(Vec<String>),
     Unknown,
     Absent,
+}
+
+struct AtomWalk {
+    args: Vec<String>,
+    need: Need,
+    hits: Vec<String>,
+    skipped: HashSet<String>,
+    all_skips_confident: bool,
+}
+
+fn atom_asks(atom: &AtomWalk, rel: &str) -> bool {
+    !atom.skipped.contains(rel) && !has_skipped_ancestor(rel, &atom.skipped)
 }
 
 fn bound_values(demand: &Demand) -> Vec<String> {
@@ -637,12 +765,82 @@ fn tightest_wholes(mut paths: Vec<String>) -> Vec<String> {
     keep
 }
 
+fn walks_tree(demand: &Demand, root: &Path) -> bool {
+    if matches!(demand.pred.as_str(), "file" | "File") {
+        return false;
+    }
+    let all_bound = demand.args.iter().all(|a| matches!(a, Arg::Bound(_)));
+    if all_bound {
+        let args: Vec<String> = demand
+            .args
+            .iter()
+            .map(|a| match a {
+                Arg::Bound(s) => s.clone(),
+                Arg::Free(_) => unreachable!(),
+            })
+            .collect();
+        if args.iter().any(|a| repo_join(root, a).is_file()) {
+            return false;
+        }
+        return true;
+    }
+    if demand.args.iter().any(|a| matches!(a, Arg::Bound(_))) {
+        return true;
+    }
+    demand.args.len() <= 1
+}
+
 impl Navigator for TreeNavigator {
     fn prepare(&mut self, compiled: &crate::core::Compiled) {
         self.declarations = compiled.declarations.clone();
     }
 
     fn answer(&mut self, demand: &Demand, store: &Store) -> Answer {
+        if let Some(cached) = self.cached(demand) {
+            return cached;
+        }
+        let answer = self.answer_fresh(demand, store);
+        self.remember(demand, answer.clone());
+        answer
+    }
+
+    fn answer_many(&mut self, demands: &[Demand], store: &Store) -> Vec<Answer> {
+        if demands.len() <= 1 {
+            return demands.iter().map(|d| self.answer(d, store)).collect();
+        }
+        let mut walk = Vec::new();
+        let mut rest = Vec::new();
+        for (i, d) in demands.iter().enumerate() {
+            if self.cached(d).is_some() {
+                rest.push(i);
+            } else if walks_tree(d, &self.root) {
+                walk.push(i);
+            } else {
+                rest.push(i);
+            }
+        }
+        let mut out: Vec<Option<Answer>> = vec![None; demands.len()];
+        for i in rest {
+            out[i] = Some(self.answer(&demands[i], store));
+        }
+        if walk.len() == 1 {
+            let i = walk[0];
+            out[i] = Some(self.answer(&demands[i], store));
+        } else if walk.len() > 1 {
+            let walk_demands: Vec<Demand> = walk.iter().map(|&i| demands[i].clone()).collect();
+            let located = self.locate_many(&walk_demands, store);
+            for (&i, loc) in walk.iter().zip(located) {
+                out[i] = Some(self.finish_locate(&demands[i], loc));
+            }
+        }
+        out.into_iter()
+            .map(|a| a.expect("every demand answered"))
+            .collect()
+    }
+}
+
+impl TreeNavigator {
+    fn answer_fresh(&mut self, demand: &Demand, store: &Store) -> Answer {
         if matches!(demand.pred.as_str(), "file" | "File") {
             return self.answer_file(demand);
         }
@@ -682,7 +880,8 @@ impl Navigator for TreeNavigator {
 mod tests {
     use super::*;
     use crate::navigator::judge::{
-        ChildChoice, DocumentAnswer, DocumentJudgement, DocumentVerdict, JudgeError,
+        ChildChoice, DocumentAnswer, DocumentJudgement, DocumentVerdict, JudgeError, ListingState,
+        MultiListingState,
     };
     use crate::navigator::{Arg, Demand, Need};
     use std::sync::{Arc, Mutex};
@@ -1022,6 +1221,68 @@ mod tests {
             .filter(|s| matches!(s, GroundStep::Listing { .. }))
             .collect();
         assert_eq!(listings.len(), 1);
+    }
+
+    struct CaptureChooseMany {
+        n_atoms: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl Judge for CaptureChooseMany {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            OpenAll.choose(state)
+        }
+
+        fn choose_many(
+            &mut self,
+            state: &MultiListingState,
+        ) -> Result<Vec<Vec<ChildChoice>>, JudgeError> {
+            self.n_atoms.lock().unwrap().push(state.atoms.len());
+            state
+                .atoms
+                .iter()
+                .map(|atom| self.choose(&state.listing_state(atom)))
+                .collect()
+        }
+
+        fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            OpenAll.document(state)
+        }
+    }
+
+    #[test]
+    fn two_locate_atoms_share_one_listing() {
+        let n_atoms = Arc::new(Mutex::new(Vec::new()));
+        let mut nav = TreeNavigator::new(
+            "examples/toy-split",
+            Box::new(CaptureChooseMany {
+                n_atoms: n_atoms.clone(),
+            }),
+        );
+        let demands = vec![
+            Demand {
+                pred: "component".into(),
+                args: vec![Arg::Bound("Frontend".into())],
+                need: Need::Truth,
+            },
+            Demand {
+                pred: "component".into(),
+                args: vec![Arg::Bound("Backend".into())],
+                need: Need::Truth,
+            },
+        ];
+        let answers = nav.answer_many(&demands, &Store::new());
+        assert_eq!(answers.len(), 2);
+        assert!(!answers[0].tuples.is_empty());
+        assert!(!answers[1].tuples.is_empty());
+        let n = n_atoms.lock().unwrap().clone();
+        assert!(
+            n.iter().any(|&k| k == 2),
+            "expected a shared listing of both atoms, got {n:?}"
+        );
+        assert!(
+            n.iter().all(|&k| k == 2),
+            "follow-up listings should keep both atoms, got {n:?}"
+        );
     }
 
     struct SkipDecoyInvestigateRest;

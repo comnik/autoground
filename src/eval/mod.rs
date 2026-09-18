@@ -125,6 +125,7 @@ pub fn run<'a>(
     if let Some(nav) = eng.navigator.as_mut() {
         nav.prepare(compiled);
     }
+    eng.prefetch_ground_edb();
     let mut requires = Vec::new();
     for req in &compiled.requires {
         eng.last_exists_witness = None;
@@ -447,6 +448,30 @@ impl Engine<'_> {
         }
     }
 
+    fn prefetch_ground_edb(&mut self) {
+        if self.navigator.is_none() {
+            return;
+        }
+        let demands = ground_edb_demands(self.compiled, self.store);
+        if demands.is_empty() {
+            return;
+        }
+        self.fill_many(&demands);
+    }
+
+    fn fill_many(&mut self, demands: &[Demand]) {
+        let Some(nav) = self.navigator.as_mut() else {
+            return;
+        };
+        for d in demands {
+            self.demands.push(d.clone());
+        }
+        let answers = nav.answer_many(demands, self.store);
+        for (demand, answer) in demands.iter().zip(answers) {
+            apply_answer(self.store, demand, answer);
+        }
+    }
+
     fn demand_and_fill(&mut self, pred: &str, args: &[Arg], need: Need) {
         let demand = Demand {
             pred: pred.to_string(),
@@ -458,23 +483,7 @@ impl Engine<'_> {
             return;
         };
         let answer = nav.answer(&demand, self.store);
-        for row in answer.tuples {
-            self.store.insert_fact(pred, row, answer.source.clone());
-        }
-        for (c, e) in answer.bindings {
-            self.store.bind(c, e);
-        }
-        if answer.close {
-            let pattern: Vec<Option<String>> = demand
-                .args
-                .iter()
-                .map(|a| match a {
-                    Arg::Bound(v) => Some(v.clone()),
-                    Arg::Free(_) => None,
-                })
-                .collect();
-            self.store.close_pattern(pred, pattern);
-        }
+        apply_answer(self.store, &demand, answer);
     }
 
     /// An EDB atom generates exists-vars when every non-exists argument is
@@ -543,6 +552,80 @@ fn collect_edb_preds(f: &Formula, idb: &HashSet<String>, out: &mut HashSet<Strin
             out.insert(p.to_string());
         }
     });
+}
+
+fn apply_answer(store: &mut Store, demand: &Demand, answer: crate::navigator::Answer) {
+    for row in answer.tuples {
+        store.insert_fact(&demand.pred, row, answer.source.clone());
+    }
+    for (c, e) in answer.bindings {
+        store.bind(c, e);
+    }
+    if answer.close {
+        let pattern: Vec<Option<String>> = demand
+            .args
+            .iter()
+            .map(|a| match a {
+                Arg::Bound(v) => Some(v.clone()),
+                Arg::Free(_) => None,
+            })
+            .collect();
+        store.close_pattern(&demand.pred, pattern);
+    }
+}
+
+fn ground_edb_demands(compiled: &Compiled, store: &Store) -> Vec<Demand> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for req in &compiled.requires {
+        collect_ground_edb(req, &compiled.idb_preds, &mut |pred, args| {
+            if store.has_fact(&pred, &args) || store.is_closed_for(&pred, &args) {
+                return;
+            }
+            if seen.insert((pred.clone(), args.clone())) {
+                out.push(Demand {
+                    pred,
+                    args: args.into_iter().map(Arg::Bound).collect(),
+                    need: Need::Truth,
+                });
+            }
+        });
+    }
+    out
+}
+
+fn collect_ground_edb(
+    f: &Formula,
+    idb: &HashSet<String>,
+    emit: &mut impl FnMut(String, Vec<String>),
+) {
+    match f {
+        Formula::And(xs) | Formula::Or(xs) => {
+            for x in xs {
+                collect_ground_edb(x, idb, emit);
+            }
+        }
+        Formula::Not(x) | Formula::Exists(_, x) | Formula::Forall(_, x) => {
+            collect_ground_edb(x, idb, emit);
+        }
+        Formula::Implies(a, b) => {
+            collect_ground_edb(a, idb, emit);
+            collect_ground_edb(b, idb, emit);
+        }
+        Formula::Atom { pred, args } => {
+            if idb.contains(pred) {
+                return;
+            }
+            let mut ground = Vec::new();
+            for t in args {
+                match t {
+                    Term::Const(c) | Term::Typed { value: c, .. } => ground.push(c.clone()),
+                    Term::Var(_) => return,
+                }
+            }
+            emit(pred.clone(), ground);
+        }
+    }
 }
 
 fn collect_edb_atoms(
@@ -638,6 +721,71 @@ mod tests {
         for p in ["component", "file", "includes", "belongs_to"] {
             store.close_pred(p);
         }
+    }
+
+    #[test]
+    fn ground_edb_demands_collects_constants_not_idb() {
+        let c = layered();
+        let store = Store::new();
+        let demands = ground_edb_demands(&c, &store);
+        let atoms: Vec<(String, Vec<String>)> = demands
+            .iter()
+            .map(|d| {
+                (
+                    d.pred.clone(),
+                    d.args
+                        .iter()
+                        .filter_map(|a| match a {
+                            Arg::Bound(v) => Some(v.clone()),
+                            Arg::Free(_) => None,
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            atoms,
+            vec![
+                ("component".into(), vec!["Frontend".into()]),
+                ("component".into(), vec!["Backend".into()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn ground_edb_demands_includes_nary_constants() {
+        let src = r#"
+(require (component "Syntax"))
+(require (not (knows_about "Syntax" "Evaluator")))
+"#;
+        let c = compile(&parse(src).unwrap()).unwrap();
+        let store = Store::new();
+        let demands = ground_edb_demands(&c, &store);
+        let atoms: Vec<(String, Vec<String>)> = demands
+            .iter()
+            .map(|d| {
+                (
+                    d.pred.clone(),
+                    d.args
+                        .iter()
+                        .filter_map(|a| match a {
+                            Arg::Bound(v) => Some(v.clone()),
+                            Arg::Free(_) => None,
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            atoms,
+            vec![
+                ("component".into(), vec!["Syntax".into()]),
+                (
+                    "knows_about".into(),
+                    vec!["Syntax".into(), "Evaluator".into()]
+                ),
+            ]
+        );
     }
 
     #[test]
