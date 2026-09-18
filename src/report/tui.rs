@@ -272,8 +272,6 @@ fn wrap_lines(body: &str, width: usize) -> Vec<String> {
 fn color_line(out: &mut impl Write, line: &str, step: &GroundStep) -> std::io::Result<()> {
     let color = if line.contains(" * investigate") {
         Some(Color::Green)
-    } else if line.contains("noise") {
-        Some(Color::DarkGrey)
     } else if let Some(c) = document_line_color(line, step) {
         Some(c)
     } else if line.contains("found") {

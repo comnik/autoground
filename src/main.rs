@@ -106,7 +106,7 @@ fn run_model(
     let repo_name = repo.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
     let record_path = allocate_record_path()?;
 
-    let mut nav = make_nav(repo, judge, fixtures, &record_path)?;
+    let mut nav = make_nav(repo, judge, fixtures, &record_path, model)?;
     let result = run(&compiled, &mut store, Some(&mut nav));
     let judge_failed = !nav.errors.is_empty();
     if judge_failed {
@@ -147,6 +147,7 @@ fn make_nav(
     judge: JudgeKind,
     fixtures: Option<&PathBuf>,
     record: &Path,
+    model: &str,
 ) -> Result<TreeNavigator, Box<dyn std::error::Error>> {
     let inner: Box<dyn autoground::navigator::Judge> = if let Some(path) = fixtures {
         Box::new(FixtureJudge::load(path)?)
@@ -156,8 +157,10 @@ fn make_nav(
             JudgeKind::Jev => Box::new(JevJudge::from_env()?),
         }
     };
-    Ok(TreeNavigator::new(
-        repo,
-        Box::new(RecordingJudge::new(inner, record)),
-    ))
+    let mut nav = TreeNavigator::new(repo, Box::new(RecordingJudge::new(inner, record)));
+    let model_path = Path::new(model);
+    if model_path.is_file() {
+        nav.hide_model(model_path);
+    }
+    Ok(nav)
 }

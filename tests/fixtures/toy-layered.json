@@ -37,6 +37,44 @@
         "__init__.py": "investigate",
         "api.py": "investigate"
       }
+    },
+    {
+      "pred": "belongs_to",
+      "args": ["Frontend"],
+      "dir": "",
+      "choices": {
+        "frontend": "investigate",
+        "backend": "skip",
+        "decoy": "skip"
+      }
+    },
+    {
+      "pred": "belongs_to",
+      "args": ["Frontend"],
+      "dir": "frontend",
+      "choices": {
+        "__init__.py": "investigate",
+        "app.py": "investigate"
+      }
+    },
+    {
+      "pred": "belongs_to",
+      "args": ["Backend"],
+      "dir": "",
+      "choices": {
+        "frontend": "skip",
+        "backend": "investigate",
+        "decoy": "skip"
+      }
+    },
+    {
+      "pred": "belongs_to",
+      "args": ["Backend"],
+      "dir": "backend",
+      "choices": {
+        "__init__.py": "investigate",
+        "api.py": "investigate"
+      }
     }
   ],
   "documents": [
@@ -44,6 +82,10 @@
     {"pred": "component", "args": ["Frontend"], "path": "frontend/__init__.py", "verdict": "true", "confidence": 0.85},
     {"pred": "component", "args": ["Backend"], "path": "backend/api.py", "verdict": "true", "confidence": 0.85},
     {"pred": "component", "args": ["Backend"], "path": "backend/__init__.py", "verdict": "true", "confidence": 0.85},
+    {"pred": "belongs_to", "args": ["frontend/app.py", "Frontend"], "path": "frontend/app.py", "verdict": "true", "confidence": 0.85},
+    {"pred": "belongs_to", "args": ["frontend/__init__.py", "Frontend"], "path": "frontend/__init__.py", "verdict": "true", "confidence": 0.85},
+    {"pred": "belongs_to", "args": ["backend/api.py", "Backend"], "path": "backend/api.py", "verdict": "true", "confidence": 0.85},
+    {"pred": "belongs_to", "args": ["backend/__init__.py", "Backend"], "path": "backend/__init__.py", "verdict": "true", "confidence": 0.85},
     {"pred": "includes", "args": ["frontend/app.py", "backend/api.py"], "path": "frontend/app.py", "verdict": "true", "confidence": 0.88},
     {"pred": "includes", "args": ["frontend/app.py", "backend/__init__.py"], "path": "frontend/app.py", "verdict": "false", "confidence": 0.85},
     {"pred": "includes", "args": ["frontend/__init__.py", "backend/api.py"], "path": "frontend/__init__.py", "verdict": "false", "confidence": 0.85},

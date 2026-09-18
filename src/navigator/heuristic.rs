@@ -34,9 +34,7 @@ impl Judge for HeuristicJudge {
             .children
             .iter()
             .map(|c| {
-                let transition = if crate::navigator::walk::is_noise_name(&c.name) {
-                    Transition::Skip
-                } else if c.is_dir
+                let transition = if c.is_dir
                     && labels
                         .iter()
                         .any(|label| child_matches(c, label) || sample_matches(c, label))
@@ -47,13 +45,7 @@ impl Judge for HeuristicJudge {
                 } else {
                     Transition::Skip
                 };
-                let confidence: f64 = if crate::navigator::walk::is_noise_name(&c.name) {
-                    0.95
-                } else if matches.len() <= 2 {
-                    0.9
-                } else {
-                    0.75
-                };
+                let confidence: f64 = if matches.len() <= 2 { 0.9 } else { 0.75 };
                 ChildChoice {
                     rel_path: c.rel_path.clone(),
                     transition,
@@ -69,7 +61,28 @@ impl Judge for HeuristicJudge {
     ) -> Result<DocumentJudgement, super::judge::JudgeError> {
         Ok(match state.pred.as_str() {
             "defines" => document_defines(state),
-            _ if state.args.len() >= 2 => document_defines(state),
+            _ if state.args.len() >= 2 => {
+                let conceptual: Vec<&str> = state
+                    .args
+                    .iter()
+                    .map(|s| s.as_str())
+                    .filter(|a| *a != state.path && !looks_like_repo_path(a))
+                    .collect();
+                if conceptual.is_empty() {
+                    document_defines(state)
+                } else if conceptual.iter().any(|label| path_matches(&state.path, label))
+                {
+                    DocumentJudgement {
+                        verdict: DocumentVerdict::True,
+                        confidence: 0.85,
+                    }
+                } else {
+                    DocumentJudgement {
+                        verdict: DocumentVerdict::False,
+                        confidence: 0.8,
+                    }
+                }
+            }
             _ => {
                 let label = state.args.first().map(|s| s.as_str()).unwrap_or("");
                 if path_matches(&state.path, label) {
@@ -124,14 +137,9 @@ fn enumerate_components(state: &ListingState) -> Vec<ChildChoice> {
         .children
         .iter()
         .map(|c| {
-            let transition = if crate::navigator::walk::is_noise_name(&c.name) {
-                Transition::Skip
-            } else {
-                Transition::Investigate
-            };
             ChildChoice {
                 rel_path: c.rel_path.clone(),
-                transition,
+                transition: Transition::Investigate,
                 confidence: 0.85,
             }
         })
@@ -164,6 +172,10 @@ fn name_matches(name: &str, label: &str) -> bool {
             ext(name).as_str(),
             "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "vue"
         )
+}
+
+fn looks_like_repo_path(s: &str) -> bool {
+    s.contains('/') || s.contains('\\') || !ext(s).is_empty()
 }
 
 fn ext(name: &str) -> String {

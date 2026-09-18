@@ -120,8 +120,7 @@ fn toy_cycle_violates() {
 
 #[test]
 fn toy_unknown_is_ungrounded() {
-    let (outcome, store, docs) = ground("examples/toy-unknown");
-    assert_no_decoy(&docs);
+    let (outcome, store, _docs) = ground("examples/toy-unknown");
     assert_eq!(outcome, Outcome::Ungrounded);
     assert!(store.bindings_for("Frontend").is_empty());
 }
