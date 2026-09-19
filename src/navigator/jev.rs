@@ -825,7 +825,7 @@ fn document_question(statement: &str) -> Value {
     json!({
         "type": "choice",
         "instructions": format!(
-            "How does `body` ground the following statement: {statement}"
+            "How does `body` at `path` ground the following statement: {statement}"
         ),
         "criteria": {
             "entailed": "body supplies information that makes the statement true",
