@@ -60,10 +60,11 @@ model couldn’t be grounded.
 *Note: these all need to be pressure tested still.*
 
 0. No baked-in assumptions about schema.
-1. Deterministic IDB and constraints.
-2. LLM-augmented EDB (pure LLM extract or LLM-selected deterministic grounder).
-3. Top-down evaluation to guide which parts of the codebase to include in-context.
-4. Stateless, optionally with EDB cached per revision, like a build artefact.
+1. Three-valued logic, so we can distinguish "entailed", "unsupported", _and_ "contradicted".
+2. Deterministic IDB and constraints.
+3. LLM-augmented EDB (pure LLM extract or LLM-selected deterministic grounder).
+4. Top-down evaluation to guide which parts of the codebase to include in-context.
+5. Stateless, optionally with EDB cached per revision, like a build artefact.
 
 ### Implementation notes
 
