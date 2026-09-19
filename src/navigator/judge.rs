@@ -206,19 +206,24 @@ pub struct DocumentAnswer {
     pub exchanges: Vec<JudgeExchange>,
 }
 
-pub const TAU_CONFIDENCE: f64 = 0.6;
-
 /// Max children in one listing Choice. Packing and Jev chunking share this so
 /// a filled listing is one HTTP request.
 pub const LISTING_CHOICE_BUDGET: usize = 100;
 
 impl DocumentJudgement {
+    /// Entailed at [`super::confidence::SUPPORT`]: this file may be a witness.
     pub fn is_entailed(&self) -> bool {
-        self.verdict == DocumentVerdict::Entailed && self.confidence >= TAU_CONFIDENCE
+        super::confidence::is_witness(self.verdict, self.confidence)
     }
 
+    /// Contradicted at [`super::confidence::FLOOR`]: blocks support.
     pub fn is_contradicted(&self) -> bool {
-        self.verdict == DocumentVerdict::Contradicted && self.confidence >= TAU_CONFIDENCE
+        super::confidence::vetoes(self.verdict, self.confidence)
+    }
+
+    /// Contradicted at [`super::confidence::SUPPORT`]: may close the atom false.
+    pub fn is_refutation(&self) -> bool {
+        super::confidence::is_refutation(self.verdict, self.confidence)
     }
 
     pub fn note(&self) -> &'static str {
@@ -226,7 +231,7 @@ impl DocumentJudgement {
             "entailed"
         } else if self.is_contradicted() {
             "contradicted"
-        } else if self.confidence >= TAU_CONFIDENCE {
+        } else if super::confidence::confident_look(self.confidence) {
             "neutral"
         } else {
             "undecided"
@@ -291,7 +296,22 @@ impl Consistency {
 pub struct ConflictAnswer {
     pub value: ResolveValue,
     pub consistency: Consistency,
+    pub value_confidence: f64,
+    pub consistency_confidence: f64,
     pub exchanges: Vec<JudgeExchange>,
+}
+
+impl ConflictAnswer {
+    /// Local judges that already picked a side.
+    pub fn sure(value: ResolveValue, consistency: Consistency) -> Self {
+        Self {
+            value,
+            consistency,
+            value_confidence: super::confidence::sure_confidence(),
+            consistency_confidence: super::confidence::sure_confidence(),
+            exchanges: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -356,11 +376,10 @@ pub trait Judge {
     /// Resolve mixed entailed/contradicted documents for one ground atom.
     /// Default leaves the atom unknown and marks the evidence conflicting.
     fn resolve_conflict(&mut self, _state: &ConflictState) -> Result<ConflictAnswer, JudgeError> {
-        Ok(ConflictAnswer {
-            value: ResolveValue::Unknown,
-            consistency: Consistency::Conflicting,
-            exchanges: Vec::new(),
-        })
+        Ok(ConflictAnswer::sure(
+            ResolveValue::Unknown,
+            Consistency::Conflicting,
+        ))
     }
 
     /// Request/response pairs from the most recent `choose`, `document`, or

@@ -1,3 +1,4 @@
+pub mod confidence;
 pub mod fixture;
 pub mod heuristic;
 pub mod jev;

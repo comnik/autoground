@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::edb::Store;
+use crate::navigator::confidence::{self, confident_look, confident_skip};
 use crate::navigator::judge::{
     ChildChoice, ConflictAnswer, ConflictEvidence, ConflictState, Consistency, DocumentState,
     DocumentVerdict, Judge, ListingAtom, MultiListingState, ResolveValue, Transition,
-    LISTING_CHOICE_BUDGET, TAU_CONFIDENCE,
+    LISTING_CHOICE_BUDGET,
 };
 use crate::navigator::trace::GroundStep;
 use crate::navigator::walk::{pack_listing, parent_dir, read_trimmed, repo_join, ListingFilter};
@@ -263,7 +264,7 @@ impl TreeNavigator {
                 bindings: Vec::new(),
                 source,
             }
-        } else if judgement.is_contradicted() {
+        } else if judgement.is_refutation() {
             Answer {
                 tuples: Vec::new(),
                 close: true,
@@ -431,7 +432,7 @@ impl TreeNavigator {
                             if child.is_dir {
                                 atoms[atom_i].skipped.insert(child.rel_path.clone());
                             }
-                            if choice.confidence < TAU_CONFIDENCE && atoms[atom_i].generating {
+                            if !confident_skip(choice.confidence) && atoms[atom_i].generating {
                                 atoms[atom_i].all_skips_confident = false;
                             }
                         }
@@ -567,11 +568,7 @@ impl TreeNavigator {
             Ok(a) => a,
             Err(e) => {
                 self.errors.push(e.to_string());
-                ConflictAnswer {
-                    value: ResolveValue::Unknown,
-                    consistency: Consistency::Conflicting,
-                    exchanges: Vec::new(),
-                }
+                ConflictAnswer::sure(ResolveValue::Unknown, Consistency::Conflicting)
             }
         };
         self.trace.push(GroundStep::Conflict {
@@ -580,9 +577,10 @@ impl TreeNavigator {
             evidence: atom.polar.clone(),
             value: answer.value,
             consistency: answer.consistency,
+            value_confidence: answer.value_confidence,
             exchanges: answer.exchanges,
         });
-        match answer.value {
+        match confidence::accept_resolve(answer.value, answer.value_confidence) {
             ResolveValue::True => LocateResult::Found(binding),
             ResolveValue::False => LocateResult::Absent,
             ResolveValue::Unknown => LocateResult::Unknown,
@@ -656,10 +654,11 @@ impl TreeNavigator {
                     continue;
                 }
             };
-            if a.judgement.confidence < TAU_CONFIDENCE {
-                out[prep.atom].decided = false;
-            } else {
+            if confident_look(a.judgement.confidence) {
                 out[prep.atom].looked = true;
+            } else if a.judgement.verdict == DocumentVerdict::Entailed {
+                // Uncounted potential witness: do not close false.
+                out[prep.atom].decided = false;
             }
             if a.judgement.is_entailed() {
                 out[prep.atom].hits.push(prep.rel.clone());
@@ -670,7 +669,9 @@ impl TreeNavigator {
                     excerpt: excerpt_body(&prep.body),
                 });
             } else if a.judgement.is_contradicted() {
-                out[prep.atom].refuted = true;
+                if a.judgement.is_refutation() {
+                    out[prep.atom].refuted = true;
+                }
                 out[prep.atom].polar.push(ConflictEvidence {
                     path: prep.rel.clone(),
                     verdict: DocumentVerdict::Contradicted,
@@ -1589,6 +1590,42 @@ mod tests {
         }
     }
 
+    struct NeutralFilesWeakContradict;
+
+    impl Judge for NeutralFilesWeakContradict {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            OpenAll.choose(state)
+        }
+
+        fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            let weak = state.path.ends_with("no.py");
+            Ok(DocumentJudgement {
+                verdict: if weak {
+                    DocumentVerdict::Contradicted
+                } else {
+                    DocumentVerdict::Neutral
+                },
+                confidence: if weak { 0.42 } else { 0.9 },
+            })
+        }
+    }
+
+    #[test]
+    fn ground_atom_closes_false_despite_a_weak_contradict() {
+        let dir = scratch_dir("weak-contradict");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.py"), "hello\n").unwrap();
+        std::fs::write(dir.join("no.py"), "not a sat solver\n").unwrap();
+        let mut nav = TreeNavigator::new(&dir, Box::new(NeutralFilesWeakContradict));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(answer.tuples.is_empty());
+        assert!(
+            answer.close,
+            "confident neutrals still close false when one look is a weak contradict: {answer:?}"
+        );
+    }
+
     #[test]
     fn ground_atom_closes_false_after_neutral_documents_despite_low_skips() {
         let dir = scratch_dir("cwa-neutrals");
@@ -1713,11 +1750,10 @@ mod tests {
             &mut self,
             _state: &ConflictState,
         ) -> Result<ConflictAnswer, JudgeError> {
-            Ok(ConflictAnswer {
-                value: ResolveValue::True,
-                consistency: Consistency::Conflicting,
-                exchanges: Vec::new(),
-            })
+            Ok(ConflictAnswer::sure(
+                ResolveValue::True,
+                Consistency::Conflicting,
+            ))
         }
     }
 
@@ -1775,5 +1811,182 @@ mod tests {
         );
         assert_eq!(answer.tuples, vec![Vec::<String>::new()]);
         assert!(answer.close);
+    }
+
+    struct MediumEntailment;
+
+    impl Judge for MediumEntailment {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            OpenAll.choose(state)
+        }
+
+        fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            Ok(DocumentJudgement {
+                verdict: DocumentVerdict::Entailed,
+                confidence: 0.61,
+            })
+        }
+    }
+
+    #[test]
+    fn medium_entailment_is_not_a_witness() {
+        let mut nav = TreeNavigator::new("examples/toy-layered", Box::new(MediumEntailment));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        assert!(answer.tuples.is_empty(), "{answer:?}");
+        assert!(
+            !answer.close,
+            "entailed below SUPPORT must not close true: {answer:?}"
+        );
+    }
+
+    struct FloorContradiction;
+
+    impl Judge for FloorContradiction {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            OpenAll.choose(state)
+        }
+
+        fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            Ok(DocumentJudgement {
+                verdict: DocumentVerdict::Contradicted,
+                confidence: 0.55,
+            })
+        }
+    }
+
+    #[test]
+    fn floor_contradiction_vetoes_without_closing_false() {
+        let mut nav = TreeNavigator::new("examples/toy-layered", Box::new(FloorContradiction));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        assert!(answer.tuples.is_empty(), "{answer:?}");
+        assert!(
+            !answer.close,
+            "contradicted at FLOOR blocks support but does not assert false: {answer:?}"
+        );
+    }
+
+    struct WitnessAndFloorVeto;
+
+    impl Judge for WitnessAndFloorVeto {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            OpenAll.choose(state)
+        }
+
+        fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            let true_file = state.path.ends_with("yes.py");
+            Ok(DocumentJudgement {
+                verdict: if true_file {
+                    DocumentVerdict::Entailed
+                } else {
+                    DocumentVerdict::Contradicted
+                },
+                confidence: if true_file { 0.9 } else { 0.55 },
+            })
+        }
+    }
+
+    #[test]
+    fn floor_contradiction_vetoes_a_support_witness() {
+        let dir = scratch_dir("floor-veto");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("yes.py"), "gpu compiler\n").unwrap();
+        std::fs::write(dir.join("no.py"), "cpu only\n").unwrap();
+        let mut nav = TreeNavigator::new(&dir, Box::new(WitnessAndFloorVeto));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(answer.tuples.is_empty(), "{answer:?}");
+        assert!(
+            !answer.close,
+            "a FLOOR veto must enter conflict: {answer:?}"
+        );
+        assert!(nav.trace.iter().any(|s| matches!(
+            s,
+            GroundStep::Conflict {
+                value: ResolveValue::Unknown,
+                ..
+            }
+        )));
+    }
+
+    struct ResolveConflictTrueLow;
+
+    impl Judge for ResolveConflictTrueLow {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            MixedDocs.choose(state)
+        }
+
+        fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            MixedDocs.document(state)
+        }
+
+        fn resolve_conflict(
+            &mut self,
+            _state: &ConflictState,
+        ) -> Result<ConflictAnswer, JudgeError> {
+            Ok(ConflictAnswer {
+                value: ResolveValue::True,
+                consistency: Consistency::Conflicting,
+                value_confidence: 0.7,
+                consistency_confidence: 0.9,
+                exchanges: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn conflict_true_below_resolve_stays_unknown() {
+        let dir = scratch_dir("conflict-true-low");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("yes.py"), "gpu compiler\n").unwrap();
+        std::fs::write(dir.join("no.py"), "cpu only\n").unwrap();
+        let mut nav = TreeNavigator::new(&dir, Box::new(ResolveConflictTrueLow));
+        let answer = nav.answer(&nullary("GPUCompiler"), &Store::new());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(answer.tuples.is_empty(), "{answer:?}");
+        assert!(
+            !answer.close,
+            "conflict true below RESOLVE must not close supported: {answer:?}"
+        );
+    }
+
+    struct SkipAllAtOldTau;
+
+    impl Judge for SkipAllAtOldTau {
+        fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
+            Ok(state
+                .children
+                .iter()
+                .map(|c| ChildChoice {
+                    rel_path: c.rel_path.clone(),
+                    transition: Transition::Skip,
+                    confidence: 0.6,
+                })
+                .collect())
+        }
+
+        fn document(&mut self, _state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
+            Ok(DocumentJudgement {
+                verdict: DocumentVerdict::Neutral,
+                confidence: 0.9,
+            })
+        }
+    }
+
+    #[test]
+    fn generating_skip_below_support_does_not_close() {
+        let mut nav = TreeNavigator::new("examples/toy-layered", Box::new(SkipAllAtOldTau));
+        let answer = nav.answer(
+            &Demand {
+                pred: "component".into(),
+                args: vec![Arg::Free("c".into())],
+                need: Need::Truth,
+            },
+            &Store::new(),
+        );
+        assert!(answer.tuples.is_empty(), "{answer:?}");
+        assert!(
+            !answer.close,
+            "a 0.6 skip is below SUPPORT and must not close a generating atom: {answer:?}"
+        );
     }
 }

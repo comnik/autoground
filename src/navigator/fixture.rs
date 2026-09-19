@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::confidence::FLOOR;
 use super::judge::{
     ChildChoice, DocumentJudgement, DocumentState, DocumentVerdict, Judge, JudgeError,
-    ListingState, Transition, TAU_CONFIDENCE,
+    ListingState, Transition,
 };
 use super::trace::GroundStep;
 use super::walk::parent_dir;
@@ -138,11 +139,7 @@ impl Judge for FixtureJudge {
                 ChildChoice {
                     rel_path: c.rel_path.clone(),
                     transition,
-                    confidence: if atom_known {
-                        0.9
-                    } else {
-                        TAU_CONFIDENCE - 0.1
-                    },
+                    confidence: if atom_known { 0.9 } else { FLOOR - 0.1 },
                 }
             })
             .collect())
@@ -250,7 +247,7 @@ mod tests {
             }],
         };
         let file = FixtureFile {
-            outcome: Some(Outcome::Grounded),
+            outcome: Some(Outcome::Supported),
             repo_name: "toy-layered".into(),
             requires: vec![RequireTrace {
                 formula: "(require (component \"Frontend\"))".into(),
@@ -267,7 +264,7 @@ mod tests {
         assert!(text.contains("\"type\": \"listing\""), "{text}");
         assert!(text.contains("\"started_at_ms\": 1700000000000"), "{text}");
         let back: FixtureFile = serde_json::from_str(&text).unwrap();
-        assert_eq!(back.outcome, Some(Outcome::Grounded));
+        assert_eq!(back.outcome, Some(Outcome::Supported));
         assert_eq!(back.repo_name, "toy-layered");
         assert_eq!(back.steps, vec![step]);
         assert_eq!(back.requires.len(), 1);

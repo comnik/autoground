@@ -75,13 +75,17 @@ pub struct RequireResult {
     pub edb: Vec<EdbAtom>,
 }
 
+/// How the codebase stands relative to the model: supported, unsupported, or
+/// contradicted by what the navigator found.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
-    Grounded,
-    Violated,
-    #[serde(rename = "unknown")]
-    Ungrounded,
+    #[serde(alias = "grounded")]
+    Supported,
+    #[serde(alias = "violated")]
+    Contradicted,
+    #[serde(alias = "unknown", alias = "ungrounded")]
+    Unsupported,
 }
 
 #[derive(Debug, Clone)]
@@ -149,11 +153,11 @@ pub fn run<'a>(
     let demands = eng.demands;
 
     let outcome = if requires.iter().any(|r| r.value == Value::False) {
-        Outcome::Violated
+        Outcome::Contradicted
     } else if requires.iter().any(|r| r.value == Value::Unknown) {
-        Outcome::Ungrounded
+        Outcome::Unsupported
     } else {
-        Outcome::Grounded
+        Outcome::Supported
     };
 
     RunResult {
@@ -798,11 +802,39 @@ mod tests {
     }
 
     #[test]
+    fn outcome_json_uses_supported_and_accepts_legacy_names() {
+        assert_eq!(
+            serde_json::to_string(&Outcome::Supported).unwrap(),
+            "\"supported\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Outcome::Unsupported).unwrap(),
+            "\"unsupported\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Outcome::Contradicted).unwrap(),
+            "\"contradicted\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Outcome>("\"grounded\"").unwrap(),
+            Outcome::Supported
+        );
+        assert_eq!(
+            serde_json::from_str::<Outcome>("\"unknown\"").unwrap(),
+            Outcome::Unsupported
+        );
+        assert_eq!(
+            serde_json::from_str::<Outcome>("\"violated\"").unwrap(),
+            Outcome::Contradicted
+        );
+    }
+
+    #[test]
     fn empty_open_edb_acyclicity_is_unknown() {
         let c = layered();
         let mut store = Store::new();
         let result = run(&c, &mut store, None);
-        assert_eq!(result.outcome, Outcome::Ungrounded);
+        assert_eq!(result.outcome, Outcome::Unsupported);
         assert!(result.requires.iter().all(|r| r.value == Value::Unknown));
     }
 
@@ -821,7 +853,7 @@ mod tests {
         assert_eq!(result.requires[1].value, Value::False);
         assert_eq!(result.requires[2].value, Value::True);
         assert_eq!(result.requires[3].value, Value::True);
-        assert_eq!(result.outcome, Outcome::Violated);
+        assert_eq!(result.outcome, Outcome::Contradicted);
     }
 
     #[test]
@@ -842,7 +874,7 @@ mod tests {
         store.close_pred("component");
         let result = run(&c, &mut store, None);
         assert_eq!(result.requires[0].value, Value::True);
-        assert_eq!(result.outcome, Outcome::Grounded);
+        assert_eq!(result.outcome, Outcome::Supported);
     }
 
     #[test]
@@ -855,7 +887,7 @@ mod tests {
             result.requires.iter().map(|r| r.value).collect::<Vec<_>>(),
             vec![Value::True, Value::True, Value::True, Value::True]
         );
-        assert_eq!(result.outcome, Outcome::Grounded);
+        assert_eq!(result.outcome, Outcome::Supported);
     }
 
     #[test]
@@ -868,7 +900,7 @@ mod tests {
         assert_eq!(result.requires[1].value, Value::True);
         assert_eq!(result.requires[2].value, Value::False);
         assert_eq!(result.requires[3].value, Value::False);
-        assert_eq!(result.outcome, Outcome::Violated);
+        assert_eq!(result.outcome, Outcome::Contradicted);
         assert!(result.requires[3].witness.is_some());
     }
 
@@ -1005,7 +1037,7 @@ mod tests {
             )
             .closing("component");
         let result = run(&c, &mut store, Some(&mut nav));
-        assert_eq!(result.outcome, Outcome::Grounded);
+        assert_eq!(result.outcome, Outcome::Supported);
         assert_eq!(result.requires[0].value, Value::True);
         assert!(
             nav.log
@@ -1026,7 +1058,7 @@ mod tests {
         let mut store = Store::new();
         let result = run(&c, &mut store, None);
         assert_eq!(result.requires[0].value, Value::Unknown);
-        assert_eq!(result.outcome, Outcome::Ungrounded);
+        assert_eq!(result.outcome, Outcome::Unsupported);
     }
 
     fn every_component_has_a_file() -> Compiled {
@@ -1052,7 +1084,7 @@ mod tests {
         let mut store = Store::new();
         let result = run(&c, &mut store, None);
         assert_eq!(result.requires[0].value, Value::Unknown);
-        assert_eq!(result.outcome, Outcome::Ungrounded);
+        assert_eq!(result.outcome, Outcome::Unsupported);
     }
 
     #[test]
@@ -1071,7 +1103,7 @@ mod tests {
             .closing("belongs_to");
         let result = run(&c, &mut store, Some(&mut nav));
         assert_eq!(result.requires[0].value, Value::True);
-        assert_eq!(result.outcome, Outcome::Grounded);
+        assert_eq!(result.outcome, Outcome::Supported);
         assert!(
             nav.log
                 .iter()
@@ -1092,7 +1124,7 @@ mod tests {
             .closing("belongs_to");
         let result = run(&c, &mut store, Some(&mut nav));
         assert_eq!(result.requires[0].value, Value::False);
-        assert_eq!(result.outcome, Outcome::Violated);
+        assert_eq!(result.outcome, Outcome::Contradicted);
         let w = result.requires[0].witness.as_ref().expect("counterexample");
         assert_eq!(w.assignment, vec![("c".into(), "Frontend".into())]);
     }

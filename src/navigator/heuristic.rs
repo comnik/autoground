@@ -1,6 +1,6 @@
+use super::confidence::SUPPORT;
 use super::judge::{
-    ChildChoice, DocumentJudgement, DocumentState, DocumentVerdict, Judge, ListingState,
-    Transition, TAU_CONFIDENCE,
+    ChildChoice, DocumentJudgement, DocumentState, DocumentVerdict, Judge, ListingState, Transition,
 };
 
 /// Local stand-in for Jev on the documented toys. Answers the same questions
@@ -49,7 +49,7 @@ impl Judge for HeuristicJudge {
                 ChildChoice {
                     rel_path: c.rel_path.clone(),
                     transition,
-                    confidence: confidence.max(TAU_CONFIDENCE),
+                    confidence: confidence.max(SUPPORT),
                 }
             })
             .collect())
@@ -81,7 +81,7 @@ impl Judge for HeuristicJudge {
                 } else {
                     DocumentJudgement {
                         verdict: DocumentVerdict::Contradicted,
-                        confidence: 0.8,
+                        confidence: SUPPORT,
                     }
                 }
             }
@@ -95,7 +95,7 @@ impl Judge for HeuristicJudge {
                 } else {
                     DocumentJudgement {
                         verdict: DocumentVerdict::Contradicted,
-                        confidence: 0.8,
+                        confidence: SUPPORT,
                     }
                 }
             }

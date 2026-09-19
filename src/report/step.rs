@@ -106,12 +106,14 @@ pub fn format_step(step: &GroundStep, index: usize, total: usize, repo_name: &st
             evidence,
             value,
             consistency,
+            value_confidence,
             exchanges: _,
         } => {
             let mut out = header(pred, args, "conflict", index, total);
             out.push_str(&format!(
-                "    value        {}\n    consistency  {}\n",
+                "    value        {}\n    confidence   {:.2}\n    consistency  {}\n",
                 value.label(),
+                value_confidence,
                 consistency.label()
             ));
             let entailed: Vec<_> = evidence

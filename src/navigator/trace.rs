@@ -43,6 +43,8 @@ pub enum GroundStep {
         evidence: Vec<ConflictEvidence>,
         value: ResolveValue,
         consistency: Consistency,
+        #[serde(default = "crate::navigator::confidence::sure_confidence")]
+        value_confidence: f64,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exchanges: Vec<JudgeExchange>,
     },

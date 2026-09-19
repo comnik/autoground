@@ -755,9 +755,21 @@ fn parse_conflict_answer(resp: &Value) -> Result<ConflictAnswer, JudgeError> {
             return Err(JudgeError::Parse(format!("unknown consistency `{other}`")));
         }
     };
+    let value_confidence = answers
+        .get("value")
+        .and_then(|v| v.get("confidence"))
+        .and_then(|c| c.as_f64())
+        .unwrap_or(0.0);
+    let consistency_confidence = answers
+        .get("consistency")
+        .and_then(|v| v.get("confidence"))
+        .and_then(|c| c.as_f64())
+        .unwrap_or(0.0);
     Ok(ConflictAnswer {
         value,
         consistency,
+        value_confidence,
+        consistency_confidence,
         exchanges: Vec::new(),
     })
 }
@@ -825,7 +837,7 @@ fn document_question(statement: &str) -> Value {
     json!({
         "type": "choice",
         "instructions": format!(
-            "How does `body` at `path` ground the following statement: {statement}"
+            "How does document '`body`' at `path`  ground the following statement: {statement}"
         ),
         "criteria": {
             "entailed": "body supplies information that makes the statement true",
@@ -1099,6 +1111,8 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.value, ResolveValue::Unknown);
         assert_eq!(parsed.consistency, Consistency::Conflicting);
+        assert!((parsed.value_confidence - 0.7).abs() < 1e-9);
+        assert!((parsed.consistency_confidence - 0.9).abs() < 1e-9);
     }
 
     #[test]

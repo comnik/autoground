@@ -11,7 +11,8 @@ use crossterm::{
 
 use super::step::{format_jev, format_step};
 use super::{format_duration, format_usd, jev_request_cost_usd, jev_request_intervals, RunTiming};
-use crate::navigator::judge::{Consistency, DocumentVerdict, ResolveValue, TAU_CONFIDENCE};
+use crate::navigator::confidence::{accept_resolve, confident_look, RESOLVE};
+use crate::navigator::judge::{Consistency, DocumentVerdict, ResolveValue};
 use crate::navigator::trace::GroundStep;
 
 const JEV_BAR: Color = Color::Rgb {
@@ -448,7 +449,10 @@ fn color_line(out: &mut impl Write, line: &str, step: &GroundStep) -> std::io::R
 
 fn document_line_color(line: &str, step: &GroundStep) -> Option<Color> {
     if let GroundStep::Conflict {
-        value, consistency, ..
+        value,
+        consistency,
+        value_confidence,
+        ..
     } = step
     {
         if line.contains("consistency") {
@@ -457,21 +461,34 @@ fn document_line_color(line: &str, step: &GroundStep) -> Option<Color> {
                 Consistency::Consistent => Color::Green,
             });
         }
-        if line.contains("value") {
-            return Some(match value {
-                ResolveValue::True => Color::Green,
-                ResolveValue::False => Color::Red,
-                ResolveValue::Unknown => Color::Yellow,
-            });
+        if line.contains("value") || line.contains("confidence") {
+            let accepted = accept_resolve(*value, *value_confidence);
+            if accepted == ResolveValue::Unknown && *value != ResolveValue::Unknown {
+                return Some(Color::Yellow);
+            }
+            if line.contains("value") {
+                return Some(match accepted {
+                    ResolveValue::True => Color::Green,
+                    ResolveValue::False => Color::Red,
+                    ResolveValue::Unknown => Color::Yellow,
+                });
+            }
+            if *value_confidence < RESOLVE {
+                return Some(Color::Yellow);
+            }
         }
         return None;
     }
     let GroundStep::Document { judgement, .. } = step else {
         return None;
     };
-    let high = judgement.confidence >= TAU_CONFIDENCE;
+    let actionable = match judgement.verdict {
+        DocumentVerdict::Entailed => judgement.is_entailed(),
+        DocumentVerdict::Contradicted => judgement.is_contradicted(),
+        DocumentVerdict::Neutral => confident_look(judgement.confidence),
+    };
     if line.contains("verdict") {
-        if !high {
+        if !actionable {
             return None;
         }
         return Some(match judgement.verdict {
@@ -480,7 +497,7 @@ fn document_line_color(line: &str, step: &GroundStep) -> Option<Color> {
             DocumentVerdict::Neutral => Color::Yellow,
         });
     }
-    if line.contains("confidence") && !high {
+    if line.contains("confidence") && !actionable {
         return Some(Color::Yellow);
     }
     None

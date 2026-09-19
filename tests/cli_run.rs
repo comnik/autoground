@@ -33,7 +33,7 @@ fn run_prints_header_requires_and_trace_path() {
     ]);
     assert_eq!(err, "", "{out}");
     assert_eq!(code, 0);
-    assert!(out.starts_with("GROUNDED\n"), "{out}");
+    assert!(out.starts_with("SUPPORTED\n"), "{out}");
     assert!(out.contains("jev requests: "), "{out}");
     assert!(!out.contains(" ← "), "{out}");
     assert!(
@@ -68,7 +68,7 @@ fn run_prints_header_requires_and_trace_path() {
     let started = json_u64(&body, "started_at_ms");
     let ended = json_u64(&body, "ended_at_ms");
     assert!(ended >= started, "{body}");
-    assert!(body.contains("\"outcome\": \"grounded\""), "{body}");
+    assert!(body.contains("\"outcome\": \"supported\""), "{body}");
     assert!(body.contains("\"steps\""), "{body}");
     assert!(body.contains("\"requires\""), "{body}");
     assert!(body.contains("\"repo_name\""), "{body}");
@@ -101,7 +101,7 @@ fn run_defaults_repo_to_cwd() {
     let code = out.status.code().unwrap_or(1);
     assert_eq!(stderr.as_ref(), "", "{stdout}");
     assert_eq!(code, 0);
-    assert!(stdout.starts_with("GROUNDED\n"), "{stdout}");
+    assert!(stdout.starts_with("SUPPORTED\n"), "{stdout}");
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn run_accepts_inline_model_source() {
     ]);
     assert_eq!(err, "", "{out}");
     assert_eq!(code, 0);
-    assert!(out.contains("GROUNDED"), "{out}");
+    assert!(out.contains("SUPPORTED"), "{out}");
     assert!(out.contains("trace: /tmp/autoground/"), "{out}");
 }
 

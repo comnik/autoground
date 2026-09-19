@@ -111,9 +111,9 @@ pub fn format_usd(cost: f64) -> String {
 
 fn outcome_label(outcome: &Outcome) -> &'static str {
     match outcome {
-        Outcome::Grounded => "GROUNDED",
-        Outcome::Violated => "VIOLATED",
-        Outcome::Ungrounded => "UNKNOWN",
+        Outcome::Supported => "SUPPORTED",
+        Outcome::Unsupported => "UNSUPPORTED",
+        Outcome::Contradicted => "CONTRADICTED",
     }
 }
 
@@ -222,9 +222,9 @@ pub fn outcome_exit_code(value: &Value) -> i32 {
 
 pub fn run_exit_code(outcome: &Outcome) -> i32 {
     match outcome {
-        Outcome::Grounded => 0,
-        Outcome::Ungrounded => 1,
-        Outcome::Violated => 2,
+        Outcome::Supported => 0,
+        Outcome::Unsupported => 1,
+        Outcome::Contradicted => 2,
     }
 }
 
@@ -263,7 +263,9 @@ mod tests {
         let trace = Path::new("/tmp/autoground/trace-test.json");
         let text = format_run(&compiled, &result, trace, 7);
         assert!(
-            text.starts_with("VIOLATED\ntrace: /tmp/autoground/trace-test.json\njev requests: 7\n"),
+            text.starts_with(
+                "CONTRADICTED\ntrace: /tmp/autoground/trace-test.json\njev requests: 7\n"
+            ),
             "{text}"
         );
         assert!(!text.contains(" ← "), "{text}");
@@ -288,10 +290,10 @@ mod tests {
     }
 
     #[test]
-    fn outcome_label_prints_unknown_for_ungrounded() {
-        assert_eq!(outcome_label(&Outcome::Ungrounded), "UNKNOWN");
-        assert_eq!(outcome_label(&Outcome::Grounded), "GROUNDED");
-        assert_eq!(outcome_label(&Outcome::Violated), "VIOLATED");
+    fn outcome_label_reads_as_how_the_codebase_stands() {
+        assert_eq!(outcome_label(&Outcome::Unsupported), "UNSUPPORTED");
+        assert_eq!(outcome_label(&Outcome::Supported), "SUPPORTED");
+        assert_eq!(outcome_label(&Outcome::Contradicted), "CONTRADICTED");
     }
 
     #[test]

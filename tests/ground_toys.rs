@@ -98,7 +98,7 @@ fn parse_ground_atom_question_mark() {
 fn toy_layered_grounds() {
     let (outcome, store, docs) = ground("examples/toy-layered");
     assert_no_decoy(&docs);
-    assert_eq!(outcome, Outcome::Grounded);
+    assert_eq!(outcome, Outcome::Supported);
     assert!(store
         .bindings_for("Frontend")
         .iter()
@@ -115,13 +115,13 @@ fn toy_layered_grounds() {
 fn toy_cycle_violates() {
     let (outcome, _store, docs) = ground("examples/toy-cycle");
     assert_no_decoy(&docs);
-    assert_eq!(outcome, Outcome::Violated);
+    assert_eq!(outcome, Outcome::Contradicted);
 }
 
 #[test]
 fn toy_unknown_violates() {
     let (outcome, store, _docs) = ground("examples/toy-unknown");
-    assert_eq!(outcome, Outcome::Violated);
+    assert_eq!(outcome, Outcome::Contradicted);
     assert!(store.bindings_for("Frontend").is_empty());
 }
 
@@ -152,7 +152,7 @@ fn jev_collapsed_trace_does_not_bind_both_to_one_file() {
 fn toy_split_binds_two_backend_roots() {
     let (outcome, store, docs) = ground("examples/toy-split");
     assert_no_decoy(&docs);
-    assert_eq!(outcome, Outcome::Grounded);
+    assert_eq!(outcome, Outcome::Supported);
     assert_eq!(
         store.bindings_for("Frontend"),
         vec!["ui/app.py".to_string()]
@@ -180,7 +180,7 @@ fn toy_layered_from_fixture() {
     let judge = FixtureJudge::load("tests/fixtures/toy-layered.json").unwrap();
     let mut nav = TreeNavigator::new("examples/toy-layered", Box::new(judge));
     let result = run(&compiled, &mut store, Some(&mut nav));
-    assert_eq!(result.outcome, Outcome::Grounded);
+    assert_eq!(result.outcome, Outcome::Supported);
     assert!(nav.documents.iter().all(|p| !p.contains("decoy")));
 }
 
@@ -188,7 +188,7 @@ fn toy_layered_from_fixture() {
 fn toy_file_binds_app_js() {
     let (outcome, store, docs) = ground("examples/toy-file");
     assert_no_decoy(&docs);
-    assert_eq!(outcome, Outcome::Grounded);
+    assert_eq!(outcome, Outcome::Supported);
     assert_eq!(
         store.bindings_for("Frontend"),
         vec!["src/app.js".to_string()]
@@ -218,7 +218,7 @@ fn forall_components_have_a_file_on_toy_split() {
     let mut store = Store::new();
     let mut nav = TreeNavigator::heuristic("examples/toy-split");
     let result = run(&compiled, &mut store, Some(&mut nav));
-    assert_eq!(result.outcome, Outcome::Grounded);
+    assert_eq!(result.outcome, Outcome::Supported);
     assert_eq!(result.requires[0].value, autoground::eval::Value::True);
     assert!(
         !store.facts_for("component").is_empty(),
