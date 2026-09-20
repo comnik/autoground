@@ -61,8 +61,8 @@ base facts, and the logical deductions that were performed on top.
 ### Universes
 
 We are working with a fixed *context window* of size $C$ and are interacting with a finite
-*universe* of *databases* $\mathbf{U = \{\Gamma_1,...,\Gamma_n\}}$. While the overall
-universe can be large, each database is assumed to be serializable, and for that
+*universe* of *databases* $\mathbf{U} = \lbrace \Gamma_1,...,\Gamma_n \rbrace$. While the
+overall universe can be large, each database is assumed to be serializable, and for that
 serializable representation to fit into a single context window, i.e. $|\Gamma_i|<C$.
 
 Additionally, we assume that the databases are arranged in a tree. This hierarchy lets us
@@ -80,7 +80,8 @@ The most fundamental operation that we need to support is a user giving us a pro
 $p$, e.g. a fact they are asserting about their codebase. We need to determine whether the
 given universe supports ($\mathbf{U} \vdash p$) or contradicts ($\mathbf{U} \nvdash p$) the
 user's proposition, or whether no conclusion can be drawn. We refer to the process of
-computing $\mathbf{U}(p) = \{true, false, unknown\}$ as *evaluation*.
+computing $\mathbf{U}(p) = \lbrace \text{true} \mid \text{false} \mid \text{unknown}
+\rbrace$ as *evaluation*.
 
 Because user propositions can be imprecise, abstract, or qualitative, we cannot rely on
 traditional deterministic methods for evaluation. Instead, we use a [system one
@@ -88,9 +89,8 @@ model](https://docs.typesafe.ai/concepts/system-one), which will simply refer to
 *oracle* $\Omega$. We can translate the evaluation of any proposition into a classification
 problem for the oracle
 
-$$
-\mathbf{U}(p) := \Omega((\mathbf{U}, p), \{\text{entailed}, \text{contradicted}, \text{neutral}\})
-$$
+$$ \mathbf{U}(p) := \Omega((\mathbf{U}, p), \lbrace \text{entailed} \mid \text{contradicted}
+\mid \text{neutral} \rbrace) $$
 
 The oracle, however, is limited to a single context window worth of input for any single
 call. To work around this limitation, we effectively do a oracle-guided *search* to find
@@ -116,7 +116,7 @@ This suggests a divide and conquer approach where we...
 2. Reduce the level of detail until the candidate set fits in context.
 3. Fill up whatever space is left with samples from the next higher level.
 3. Ask the oracle to classify each candidate pair $(\Gamma, p)$ into
-   ${\{\text{prune}|\text{explore}|\text{candidate}\}}$. Remove the $\text{prune}$'s from
+   ${\lbrace \text{prune} \mid \text{explore} \mid \text{candidate} \rbrace}$. Remove the $\text{prune}$'s from
    the candidate set.
 4. Recursively start a new search with the $\text{explore}$'s as seed candidates. Add the
    results to the global candidate set.
@@ -142,11 +142,12 @@ built-in library, that the oracle can choose from.
 
 #### Map + Reduce
 
-With a set of candidate databases $\{\Gamma_1,...,\Gamma_n\}$ in hand, all we have to do is
-to map the original evaluation
+With a set of candidate databases $\lbrace \Gamma_1,...,\Gamma_n \rbrace$ in hand, all we
+have to do is to map the original evaluation
 
 $$
-\mathbf{\Gamma_i}(p) := \Omega((\mathbf{\Gamma_i}, p), \{true, false, unknown\})
+\mathbf{\Gamma_i}(p) := \Omega((\mathbf{\Gamma_i}, p), \lbrace \text{true} \mid \text{false}
+\mid \text{unknown} \rbrace)
 $$
 
 And then reduce the truth values as follows
