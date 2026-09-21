@@ -1,162 +1,33 @@
 use std::collections::{BTreeMap, HashSet};
-use std::time::SystemTime;
+use std::hash::{Hash, Hasher};
 
 use serde_json::{json, Value};
 
 use super::judge::{
     Child, ChildChoice, ConflictAnswer, ConflictState, Consistency, DocumentAnswer,
     DocumentJudgement, DocumentState, DocumentVerdict, Judge, JudgeError, JudgeExchange,
-    ListingState, MultiListingState, ResolveValue, Transition, LISTING_CHOICE_BUDGET,
+    ListingAtom, ListingState, MultiListingState, ResolveValue, Transition,
 };
 use super::walk::parent_dir;
+use crate::oracle::jev::{JevOracle, UreqTransport};
+use crate::oracle::{
+    Answer as OracleAnswer, Classification, Oracle, OracleError, OracleExchange, Ticket,
+};
 
-const DEFAULT_BASE: &str = "https://api.typesafe.ai";
-const DEFAULT_MODEL: &str = "jev-latest";
+pub use crate::oracle::jev::Transport;
 
-const MAX_RETRIES: u32 = 4;
-const DOCUMENT_PARALLELISM: usize = 8;
-/// Published Jev input price. Output tokens are unmetered.
-const INPUT_USD_PER_MILLION_TOKENS: f64 = 0.042;
-/// Hard cap on recorded Jev spend for one `autoground run`.
-const RUN_COST_LIMIT_USD: f64 = 1.0;
-
-/// One transport round-trip, with wall-clock bounds for the trace.
-#[derive(Debug, Clone)]
-pub struct Posted {
-    pub value: Value,
-    pub started_at: SystemTime,
-    pub ended_at: SystemTime,
-}
-
-impl Posted {
-    fn capture(f: impl FnOnce() -> Result<Value, JudgeError>) -> Result<Self, JudgeError> {
-        let started_at = SystemTime::now();
-        let value = f()?;
-        Ok(Self {
-            value,
-            started_at,
-            ended_at: SystemTime::now(),
-        })
-    }
-}
-
-/// POST body / response transport. Live HTTP in production; a mock in tests.
-pub trait Transport {
-    fn post_json(&mut self, url: &str, body: &Value) -> Result<Posted, JudgeError>;
-
-    /// Default posts one body at a time. Live HTTP overrides this to overlap
-    /// independent document requests.
-    fn post_json_all(&mut self, url: &str, bodies: &[Value]) -> Vec<Result<Posted, JudgeError>> {
-        bodies.iter().map(|b| self.post_json(url, b)).collect()
-    }
-}
-
-pub struct UreqTransport;
-
-impl Transport for UreqTransport {
-    fn post_json(&mut self, url: &str, body: &Value) -> Result<Posted, JudgeError> {
-        Posted::capture(|| post_json_with_retries(url, body))
-    }
-
-    fn post_json_all(&mut self, url: &str, bodies: &[Value]) -> Vec<Result<Posted, JudgeError>> {
-        parallel_map(bodies, DOCUMENT_PARALLELISM, |body| {
-            Posted::capture(|| post_json_with_retries(url, body))
-        })
-    }
-}
-
-fn post_json_with_retries(url: &str, body: &Value) -> Result<Value, JudgeError> {
-    let key = std::env::var("TYPESAFE_API_KEY")
-        .map_err(|_| JudgeError::Config("TYPESAFE_API_KEY is not set".into()))?;
-    let mut delay_ms = 200u64;
-    let mut last = String::new();
-    for attempt in 0..MAX_RETRIES {
-        let req = ureq::post(url)
-            .set("Authorization", &format!("Bearer {key}"))
-            .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(120));
-        match req.send_json(body.clone()) {
-            Ok(resp) => {
-                return resp
-                    .into_json()
-                    .map_err(|e| JudgeError::Parse(e.to_string()));
-            }
-            Err(ureq::Error::Status(code, resp)) => {
-                last = resp
-                    .into_string()
-                    .unwrap_or_else(|_| format!("HTTP {code}"));
-                if matches!(code, 429 | 529 | 500 | 502 | 503) && attempt + 1 < MAX_RETRIES {
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    delay_ms = delay_ms.saturating_mul(2);
-                    continue;
-                }
-                return Err(JudgeError::Http(format!("HTTP {code}: {last}")));
-            }
-            Err(e) => {
-                last = e.to_string();
-                if attempt + 1 < MAX_RETRIES {
-                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    delay_ms = delay_ms.saturating_mul(2);
-                    continue;
-                }
-                return Err(JudgeError::Http(last));
-            }
-        }
-    }
-    Err(JudgeError::Http(last))
-}
-
-fn parallel_map<T, R, F>(items: &[T], limit: usize, f: F) -> Vec<R>
-where
-    T: Sync,
-    R: Send,
-    F: Fn(&T) -> R + Sync,
-{
-    if items.is_empty() {
-        return Vec::new();
-    }
-    let limit = limit.max(1);
-    if items.len() == 1 || limit == 1 {
-        return items.iter().map(f).collect();
-    }
-    let mut out = Vec::with_capacity(items.len());
-    for chunk in items.chunks(limit) {
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = chunk.iter().map(|item| scope.spawn(|| f(item))).collect();
-            for handle in handles {
-                out.push(handle.join().expect("parallel document request panicked"));
-            }
-        });
-    }
-    out
-}
-
-/// Jev System One judge. One listing request = one Choice per child.
-/// Document requests are a single Noul and never share a listing state.
+/// Jev System One judge. Listing and document phrasing live here; HTTP
+/// batching and the spend cap live on [`JevOracle`].
 pub struct JevJudge<T: Transport = UreqTransport> {
-    transport: T,
-    endpoint: String,
-    model: String,
+    inner: JevOracle<T>,
     exchanges: Vec<JudgeExchange>,
-    spent_usd: f64,
 }
 
 impl JevJudge<UreqTransport> {
     pub fn from_env() -> Result<Self, JudgeError> {
-        if std::env::var("TYPESAFE_API_KEY").is_err() {
-            return Err(JudgeError::Config(
-                "TYPESAFE_API_KEY is not set; pass --judge heuristic or set the key".into(),
-            ));
-        }
-        let base = std::env::var("TYPESAFE_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE.into());
-        let model =
-            std::env::var("TYPESAFE_DEFAULT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
         Ok(Self {
-            transport: UreqTransport,
-            endpoint: format!("{}/v1/systemone", base.trim_end_matches('/')),
-            model,
+            inner: JevOracle::from_env()?,
             exchanges: Vec::new(),
-            spent_usd: 0.0,
         })
     }
 }
@@ -164,100 +35,111 @@ impl JevJudge<UreqTransport> {
 impl<T: Transport> JevJudge<T> {
     pub fn new(transport: T, endpoint: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
-            transport,
-            endpoint: endpoint.into(),
-            model: model.into(),
+            inner: JevOracle::new(transport, endpoint, model),
             exchanges: Vec::new(),
-            spent_usd: 0.0,
         }
     }
 
-    fn guard_budget(&self) -> Result<(), JudgeError> {
-        if self.spent_usd >= RUN_COST_LIMIT_USD {
-            Err(self.budget_error())
-        } else {
-            Ok(())
+    pub fn spent_usd(&self) -> f64 {
+        self.inner.spent_usd()
+    }
+
+    pub fn transport(&self) -> &T {
+        &self.inner.transport
+    }
+
+    pub fn set_spent_usd(&mut self, spent: f64) {
+        self.inner.set_spent_usd(spent);
+    }
+
+    fn capture_exchanges(&mut self) {
+        self.exchanges = self
+            .inner
+            .last_exchanges()
+            .iter()
+            .cloned()
+            .map(judge_exchange)
+            .collect();
+    }
+}
+
+impl From<OracleError> for JudgeError {
+    fn from(e: OracleError) -> Self {
+        match e {
+            OracleError::Config(s) => JudgeError::Config(s),
+            OracleError::Http(s) => JudgeError::Http(s),
+            OracleError::Parse(s) => JudgeError::Parse(s),
+            OracleError::Limit(s) => JudgeError::Limit(s),
         }
     }
+}
 
-    fn budget_error(&self) -> JudgeError {
-        JudgeError::Limit(format!(
-            "run cost limit of ${:.2} exceeded (spent ${:.4})",
-            RUN_COST_LIMIT_USD, self.spent_usd
-        ))
-    }
-
-    fn add_spend(&mut self, cost: Option<f64>) {
-        if let Some(c) = cost {
-            self.spent_usd += c;
-        }
-    }
-
-    fn evaluate(&mut self, body: &Value) -> Result<Value, JudgeError> {
-        self.guard_budget()?;
-        let posted = self.transport.post_json(&self.endpoint, body)?;
-        let value = posted.value.clone();
-        let ex = exchange_from_posted(body.clone(), posted);
-        self.add_spend(ex.cost_usd);
-        self.exchanges.push(ex);
-        Ok(value)
+fn judge_exchange(ex: OracleExchange) -> JudgeExchange {
+    JudgeExchange {
+        request: ex.request,
+        response: ex.response,
+        started_at: ex.started_at,
+        ended_at: ex.ended_at,
+        input_tokens: ex.input_tokens,
+        output_tokens: ex.output_tokens,
+        cost_usd: ex.cost_usd,
     }
 }
 
 impl<T: Transport> Judge for JevJudge<T> {
     fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
-        self.exchanges.clear();
-        let mut out = Vec::with_capacity(state.children.len());
-        for chunk in state.children.chunks(LISTING_CHOICE_BUDGET) {
-            let body = listing_request(&self.model, state, chunk, out.len());
-            let resp = self.evaluate(&body)?;
-            out.extend(parse_listing_answers(&resp, chunk, out.len())?);
-        }
-        Ok(out)
+        let atom = ListingAtom {
+            pred: state.pred.clone(),
+            args: state.args.clone(),
+            verbalization: state.verbalization.clone(),
+        };
+        let multi = MultiListingState {
+            atoms: vec![atom],
+            dir: state.dir.clone(),
+            children: state.children.clone(),
+        };
+        let mut rows = self.choose_many(&multi)?;
+        Ok(rows.pop().unwrap_or_default())
     }
 
     fn choose_many(
         &mut self,
         state: &MultiListingState,
     ) -> Result<Vec<Vec<ChildChoice>>, JudgeError> {
-        if state.atoms.len() <= 1 {
-            let choices = match state.atoms.first() {
-                Some(atom) => self.choose(&state.listing_state(atom))?,
-                None => Vec::new(),
-            };
-            return Ok(state.atoms.iter().map(|_| choices.clone()).collect());
-        }
         self.exchanges.clear();
-        let n_atoms = state.atoms.len();
-        let n_children = state.children.len();
-        let mut tables: Vec<Vec<Option<ChildChoice>>> = vec![vec![None; n_children]; n_atoms];
-        let pairs: Vec<(usize, usize)> = (0..n_atoms)
-            .flat_map(|a| (0..n_children).map(move |c| (a, c)))
-            .collect();
-        for chunk in pairs.chunks(LISTING_CHOICE_BUDGET) {
-            let body = listing_request_many(&self.model, state, chunk);
-            let resp = self.evaluate(&body)?;
-            for &(a, c) in chunk {
-                let key = listing_pair_key(a, c);
-                tables[a][c] = Some(parse_listing_choice(&resp, &key, &state.children[c])?);
-            }
+        if state.atoms.is_empty() {
+            return Ok(Vec::new());
         }
-        tables
-            .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .enumerate()
-                    .map(|(c, choice)| {
-                        choice.ok_or_else(|| {
-                            JudgeError::Parse(format!(
-                                "missing listing choice for {}",
-                                state.children[c].rel_path
-                            ))
-                        })
-                    })
-                    .collect()
-            })
-            .collect()
+        let shared = listing_shared_state(&state.dir, &state.children, &state.atoms);
+        let mut tickets: Vec<Vec<Ticket>> = Vec::with_capacity(state.atoms.len());
+        for atom in &state.atoms {
+            let statement = atom_text(&atom.pred, &atom.args, &atom.verbalization);
+            let mut row = Vec::with_capacity(state.children.len());
+            for child in &state.children {
+                row.push(self.inner.submit(Classification {
+                    state: shared.clone(),
+                    instructions: listing_instructions(&listing_path(child), &statement),
+                    criteria: listing_criteria(),
+                }));
+            }
+            tickets.push(row);
+        }
+        let flat: Vec<Ticket> = tickets.iter().flatten().copied().collect();
+        let answers = self.inner.wait_many(&flat);
+        self.capture_exchanges();
+        let mut iter = answers.into_iter();
+        let mut out = Vec::with_capacity(state.atoms.len());
+        for _ in &state.atoms {
+            let mut row = Vec::with_capacity(state.children.len());
+            for child in &state.children {
+                let ans = iter
+                    .next()
+                    .ok_or_else(|| JudgeError::Parse("missing listing answer".into()))?;
+                row.push(child_choice(child, ans)?);
+            }
+            out.push(row);
+        }
+        Ok(out)
     }
 
     fn document(&mut self, state: &DocumentState) -> Result<DocumentJudgement, JudgeError> {
@@ -272,75 +154,279 @@ impl<T: Transport> Judge for JevJudge<T> {
         if states.is_empty() {
             return Vec::new();
         }
-        if let Err(e) = self.guard_budget() {
-            return states.iter().map(|_| Err(e.clone())).collect();
-        }
-        let groups = group_documents_by_path(states);
-        let bodies: Vec<Value> = groups
+        let tickets: Vec<Ticket> = states
             .iter()
-            .map(|idxs| document_group_request(&self.model, states, idxs))
+            .map(|s| {
+                let statement = atom_text(&s.pred, &s.args, &s.verbalization);
+                self.inner.submit(Classification {
+                    state: document_shared_state(s),
+                    instructions: document_instructions(&statement),
+                    criteria: document_criteria(),
+                })
+            })
             .collect();
-        let responses = self.transport.post_json_all(&self.endpoint, &bodies);
-        let mut out: Vec<Option<Result<DocumentAnswer, JudgeError>>> =
-            (0..states.len()).map(|_| None).collect();
-        for ((idxs, request), resp) in groups.iter().zip(bodies).zip(responses) {
-            match resp {
-                Ok(posted) => {
-                    let response = posted.value.clone();
-                    let ex = exchange_from_posted(request, posted);
-                    self.add_spend(ex.cost_usd);
-                    self.exchanges.push(ex.clone());
-                    if idxs.len() == 1 {
-                        out[idxs[0]] = Some(parse_document_answer(&response).map(|judgement| {
-                            DocumentAnswer {
-                                judgement,
-                                exchanges: vec![ex],
-                            }
-                        }));
-                    } else {
-                        match parse_document_answers_many(&response, idxs.len()) {
-                            Ok(judgements) => {
-                                for (k, &i) in idxs.iter().enumerate() {
-                                    let exchanges =
-                                        if k == 0 { vec![ex.clone()] } else { Vec::new() };
-                                    out[i] = Some(Ok(DocumentAnswer {
-                                        judgement: judgements[k].clone(),
-                                        exchanges,
-                                    }));
-                                }
-                            }
-                            Err(e) => {
-                                for &i in idxs {
-                                    out[i] = Some(Err(e.clone()));
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    for &i in idxs {
-                        out[i] = Some(Err(e.clone()));
-                    }
-                }
-            }
-        }
-        out.into_iter()
-            .map(|o| o.expect("document group covered every state"))
+        let answers = self.inner.wait_many(&tickets);
+        self.capture_exchanges();
+        let mut seen = HashSet::new();
+        answers
+            .into_iter()
+            .map(|ans| document_answer(ans, &mut seen))
             .collect()
     }
 
     fn resolve_conflict(&mut self, state: &ConflictState) -> Result<ConflictAnswer, JudgeError> {
         self.exchanges.clear();
-        let body = conflict_request(&self.model, state);
-        let resp = self.evaluate(&body)?;
-        let mut answer = parse_conflict_answer(&resp)?;
-        answer.exchanges = self.exchanges.clone();
-        Ok(answer)
+        let shared = conflict_shared_state(state);
+        let statement = atom_text(&state.pred, &state.args, &state.verbalization);
+        let value_t = self.inner.submit(Classification {
+            state: shared.clone(),
+            instructions: format!(
+                "Given these document judgements of the following statement, what is the codebase's overall answer: {statement}"
+            ),
+            criteria: conflict_value_criteria(),
+        });
+        let cons_t = self.inner.submit(Classification {
+            state: shared,
+            instructions: format!(
+                "Do the polar judgements agree about the following statement, or do they conflict: {statement}"
+            ),
+            criteria: conflict_consistency_criteria(),
+        });
+        let answers = self.inner.wait_many(&[value_t, cons_t]);
+        self.capture_exchanges();
+        let value_ans = answers
+            .first()
+            .cloned()
+            .ok_or_else(|| JudgeError::Parse("missing answer value".into()))?;
+        let cons_ans = answers
+            .get(1)
+            .cloned()
+            .ok_or_else(|| JudgeError::Parse("missing answer consistency".into()))?;
+        conflict_answer(value_ans, cons_ans, self.exchanges.clone())
     }
 
     fn last_exchanges(&self) -> Vec<JudgeExchange> {
         self.exchanges.clone()
     }
+}
+
+fn listing_shared_state(dir: &str, children: &[Child], atoms: &[ListingAtom]) -> Value {
+    let atoms: Vec<Value> = atoms
+        .iter()
+        .map(|atom| {
+            json!({
+                "pred": atom.pred,
+                "args": atom.args,
+                "statement": atom_text(&atom.pred, &atom.args, &atom.verbalization),
+            })
+        })
+        .collect();
+    json!({
+        "directory": dir,
+        "tree": listing_tree(children),
+        "atoms": atoms,
+    })
+}
+
+fn listing_instructions(path: &str, statement: &str) -> String {
+    format!(
+        "Should we look in {path} for proof or disproof of the following statement: {statement}"
+    )
+}
+
+fn listing_criteria() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "skip".into(),
+            "Do not look here, or in anything nested under this path. The name, path, and listing tree show this is unrelated.".into(),
+        ),
+        (
+            "investigate".into(),
+            "Look here. Nested paths already in this listing are used when a directory is investigated; files are opened and judged.".into(),
+        ),
+    ])
+}
+
+fn document_shared_state(state: &DocumentState) -> Value {
+    json!({
+        "path": state.path,
+        "body": state.body,
+        "bindings": state.bindings.iter().map(|(c, e)| json!({
+            "constant": c,
+            "entity": e,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn document_instructions(statement: &str) -> String {
+    format!("How does `body` ground the following statement: {statement}")
+}
+
+fn document_criteria() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "entailed".into(),
+            "body supplies information that makes the statement true".into(),
+        ),
+        (
+            "contradicted".into(),
+            "body supplies information that makes the statement false".into(),
+        ),
+        (
+            "neutral".into(),
+            "body neither supports nor refutes the statement".into(),
+        ),
+    ])
+}
+
+fn conflict_shared_state(state: &ConflictState) -> Value {
+    let statement = atom_text(&state.pred, &state.args, &state.verbalization);
+    let evidence: Vec<Value> = state
+        .evidence
+        .iter()
+        .map(|e| {
+            json!({
+                "path": e.path,
+                "verdict": e.verdict.label(),
+                "confidence": e.confidence,
+                "excerpt": e.excerpt,
+            })
+        })
+        .collect();
+    json!({
+        "atom": {
+            "pred": state.pred,
+            "args": state.args,
+            "statement": statement,
+        },
+        "evidence": evidence,
+    })
+}
+
+fn conflict_value_criteria() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("true".into(), "the statement holds of the codebase".into()),
+        (
+            "false".into(),
+            "the statement does not hold of the codebase".into(),
+        ),
+        (
+            "unknown".into(),
+            "the evidence is insufficient to decide".into(),
+        ),
+    ])
+}
+
+fn conflict_consistency_criteria() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "consistent".into(),
+            "the entailed and contradicted files can be reconciled".into(),
+        ),
+        (
+            "conflicting".into(),
+            "the files genuinely disagree about the statement".into(),
+        ),
+    ])
+}
+
+fn child_choice(
+    child: &Child,
+    ans: Result<OracleAnswer, OracleError>,
+) -> Result<ChildChoice, JudgeError> {
+    let a = ans?;
+    let transition = match a.choice.as_str() {
+        "skip" => Transition::Skip,
+        "investigate" => Transition::Investigate,
+        other => {
+            return Err(JudgeError::Parse(format!(
+                "unknown listing choice `{other}` for {}",
+                child.rel_path
+            )));
+        }
+    };
+    Ok(ChildChoice {
+        rel_path: child.rel_path.clone(),
+        transition,
+        confidence: a.confidence,
+    })
+}
+
+fn document_answer(
+    ans: Result<OracleAnswer, OracleError>,
+    seen: &mut HashSet<u64>,
+) -> Result<DocumentAnswer, JudgeError> {
+    let a = ans?;
+    let verdict = match a.choice.as_str() {
+        "entailed" => DocumentVerdict::Entailed,
+        "contradicted" => DocumentVerdict::Contradicted,
+        "neutral" => DocumentVerdict::Neutral,
+        other => {
+            return Err(JudgeError::Parse(format!(
+                "unknown document verdict `{other}`"
+            )));
+        }
+    };
+    let exchanges = match &a.exchange {
+        Some(ex) => {
+            let id = request_digest(&ex.request);
+            if seen.insert(id) {
+                vec![judge_exchange(ex.clone())]
+            } else {
+                Vec::new()
+            }
+        }
+        None => Vec::new(),
+    };
+    Ok(DocumentAnswer {
+        judgement: DocumentJudgement {
+            verdict,
+            confidence: a.confidence,
+        },
+        exchanges,
+    })
+}
+
+fn request_digest(request: &Value) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match serde_json::to_vec(request) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(_) => 0.hash(&mut hasher),
+    }
+    hasher.finish()
+}
+
+fn conflict_answer(
+    value_ans: Result<OracleAnswer, OracleError>,
+    cons_ans: Result<OracleAnswer, OracleError>,
+    exchanges: Vec<JudgeExchange>,
+) -> Result<ConflictAnswer, JudgeError> {
+    let value = value_ans?;
+    let consistency = cons_ans?;
+    let value_choice = match value.choice.as_str() {
+        "true" => ResolveValue::True,
+        "false" => ResolveValue::False,
+        "unknown" => ResolveValue::Unknown,
+        other => {
+            return Err(JudgeError::Parse(format!(
+                "unknown resolve value `{other}`"
+            )));
+        }
+    };
+    let consistency_choice = match consistency.choice.as_str() {
+        "consistent" => Consistency::Consistent,
+        "conflicting" => Consistency::Conflicting,
+        other => {
+            return Err(JudgeError::Parse(format!("unknown consistency `{other}`")));
+        }
+    };
+    Ok(ConflictAnswer {
+        value: value_choice,
+        consistency: consistency_choice,
+        value_confidence: value.confidence,
+        consistency_confidence: consistency.confidence,
+        exchanges,
+    })
 }
 
 pub fn listing_request(
@@ -357,13 +443,8 @@ pub fn listing_request(
             format!("c{}", id_base + i),
             json!({
                 "type": "choice",
-                "instructions": format!(
-                    "Should we look in {path} for proof or disproof of the following statement: {statement}"
-                ),
-                "criteria": {
-                    "skip": "Do not look here, or in anything nested under this path. The name, path, and listing tree show this is unrelated.",
-                    "investigate": "Look here. Nested paths already in this listing are used when a directory is investigated; files are opened and judged.",
-                }
+                "instructions": listing_instructions(&path, &statement),
+                "criteria": listing_criteria(),
             }),
         );
     }
@@ -416,13 +497,8 @@ pub fn listing_request_many(
             listing_pair_key(a, c),
             json!({
                 "type": "choice",
-                "instructions": format!(
-                    "Should we look in {path} for proof or disproof of the following statement: {statement}"
-                ),
-                "criteria": {
-                    "skip": "Do not look here, or in anything nested under this path. The name, path, and listing tree show this is unrelated.",
-                    "investigate": "Look here. Nested paths already in this listing are used when a directory is investigated; files are opened and judged.",
-                }
+                "instructions": listing_instructions(&path, &statement),
+                "criteria": listing_criteria(),
             }),
         );
     }
@@ -572,25 +648,6 @@ pub fn parse_document_answer(resp: &Value) -> Result<DocumentJudgement, JudgeErr
     )
 }
 
-fn parse_document_answers_many(
-    resp: &Value,
-    n: usize,
-) -> Result<Vec<DocumentJudgement>, JudgeError> {
-    let answers = resp
-        .get("answers")
-        .and_then(|a| a.as_object())
-        .ok_or_else(|| JudgeError::Parse("response missing answers".into()))?;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let key = format!("q{i}");
-        let ans = answers
-            .get(&key)
-            .ok_or_else(|| JudgeError::Parse(format!("missing answer {key}")))?;
-        out.push(parse_document_choice(ans)?);
-    }
-    Ok(out)
-}
-
 fn parse_document_choice(ans: &Value) -> Result<DocumentJudgement, JudgeError> {
     let choice = ans
         .get("choice")
@@ -614,31 +671,6 @@ fn parse_document_choice(ans: &Value) -> Result<DocumentJudgement, JudgeError> {
         verdict,
         confidence,
     })
-}
-
-fn group_documents_by_path(states: &[DocumentState]) -> Vec<Vec<usize>> {
-    let mut order = Vec::new();
-    let mut by_path: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, s) in states.iter().enumerate() {
-        let entry = by_path.entry(s.path.clone()).or_insert_with(|| {
-            order.push(s.path.clone());
-            Vec::new()
-        });
-        entry.push(i);
-    }
-    order
-        .into_iter()
-        .map(|p| by_path.remove(&p).unwrap_or_default())
-        .collect()
-}
-
-fn document_group_request(model: &str, states: &[DocumentState], idxs: &[usize]) -> Value {
-    if idxs.len() == 1 {
-        investigation_request(model, &states[idxs[0]])
-    } else {
-        let group: Vec<DocumentState> = idxs.iter().map(|&i| states[i].clone()).collect();
-        investigation_request_many(model, &group)
-    }
 }
 
 pub fn investigation_request_many(model: &str, states: &[DocumentState]) -> Value {
@@ -723,6 +755,7 @@ pub fn conflict_request(model: &str, state: &ConflictState) -> Value {
     })
 }
 
+#[cfg(test)]
 fn parse_conflict_answer(resp: &Value) -> Result<ConflictAnswer, JudgeError> {
     let answers = resp
         .get("answers")
@@ -774,44 +807,6 @@ fn parse_conflict_answer(resp: &Value) -> Result<ConflictAnswer, JudgeError> {
     })
 }
 
-fn exchange_from_posted(request: Value, posted: Posted) -> JudgeExchange {
-    let (input_tokens, output_tokens, cost_usd) = usage_from(&posted.value);
-    JudgeExchange {
-        request,
-        response: posted.value,
-        started_at: Some(posted.started_at),
-        ended_at: Some(posted.ended_at),
-        input_tokens,
-        output_tokens,
-        cost_usd,
-    }
-}
-
-/// Token counts and USD cost from a System One response. Cost prefers an
-/// explicit `usage.cost` / `usage.cost_usd` field; otherwise it is input
-/// tokens at the published Jev input price.
-fn usage_from(response: &Value) -> (Option<u64>, Option<u64>, Option<f64>) {
-    let Some(usage) = response.get("usage") else {
-        return (None, None, None);
-    };
-    let input = int_field(usage, "input_tokens");
-    let output = int_field(usage, "output_tokens");
-    let cost = usage
-        .get("cost_usd")
-        .or_else(|| usage.get("cost"))
-        .and_then(|v| v.as_f64())
-        .or_else(|| input.map(|n| n as f64 * INPUT_USD_PER_MILLION_TOKENS / 1_000_000.0));
-    (input, output, cost)
-}
-
-fn int_field(obj: &Value, key: &str) -> Option<u64> {
-    obj.get(key).and_then(|v| {
-        v.as_u64()
-            .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
-            .or_else(|| v.as_f64().and_then(|n| (n >= 0.0).then_some(n as u64)))
-    })
-}
-
 fn format_atom(pred: &str, args: &[String]) -> String {
     let args = args
         .iter()
@@ -836,14 +831,8 @@ fn atom_text(pred: &str, args: &[String], verbalization: &str) -> String {
 fn document_question(statement: &str) -> Value {
     json!({
         "type": "choice",
-        "instructions": format!(
-            "How does document '`body`' at `path`  ground the following statement: {statement}"
-        ),
-        "criteria": {
-            "entailed": "body supplies information that makes the statement true",
-            "contradicted": "body supplies information that makes the statement false",
-            "neutral": "body neither supports nor refutes the statement",
-        }
+        "instructions": document_instructions(statement),
+        "criteria": document_criteria(),
     })
 }
 
@@ -1147,16 +1136,19 @@ mod tests {
         assert!(!u.is_entailed() && !u.is_contradicted());
     }
 
+    use crate::oracle::jev::Posted;
+    use crate::oracle::OracleError;
+
     struct SeqTransport {
         responses: Vec<Value>,
         pub bodies: Vec<Value>,
     }
 
     impl Transport for SeqTransport {
-        fn post_json(&mut self, _url: &str, body: &Value) -> Result<Posted, JudgeError> {
+        fn post_json(&mut self, _url: &str, body: &Value) -> Result<Posted, OracleError> {
             self.bodies.push(body.clone());
             if self.responses.is_empty() {
-                return Err(JudgeError::Http("no more responses".into()));
+                return Err(OracleError::Http("no more responses".into()));
             }
             Posted::capture(|| Ok(self.responses.remove(0)))
         }
@@ -1183,10 +1175,10 @@ mod tests {
         let transport = SeqTransport {
             responses: vec![json!({
                 "answers": {
-                    "a0c0": { "type": "choice", "choice": "investigate", "confidence": 0.9 },
-                    "a0c1": { "type": "choice", "choice": "skip", "confidence": 0.9 },
-                    "a1c0": { "type": "choice", "choice": "skip", "confidence": 0.9 },
-                    "a1c1": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
+                    "q0": { "type": "choice", "choice": "investigate", "confidence": 0.9 },
+                    "q1": { "type": "choice", "choice": "skip", "confidence": 0.9 },
+                    "q2": { "type": "choice", "choice": "skip", "confidence": 0.9 },
+                    "q3": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
                 }
             })],
             bodies: Vec::new(),
@@ -1198,9 +1190,13 @@ mod tests {
         assert_eq!(choices[0][1].transition, Transition::Skip);
         assert_eq!(choices[1][0].transition, Transition::Skip);
         assert_eq!(choices[1][1].transition, Transition::Investigate);
-        assert_eq!(judge.transport.bodies.len(), 1);
-        assert!(judge.transport.bodies[0]["questions"].get("a0c0").is_some());
-        assert!(judge.transport.bodies[0]["state"].get("atom").is_none());
+        assert_eq!(judge.transport().bodies.len(), 1);
+        let qs = judge.transport().bodies[0]["questions"]
+            .as_object()
+            .unwrap();
+        assert_eq!(qs.len(), 4);
+        assert!(judge.transport().bodies[0]["state"].get("atom").is_none());
+        assert!(judge.transport().bodies[0]["state"].get("atoms").is_some());
         assert_eq!(judge.last_exchanges().len(), 1);
     }
 
@@ -1216,7 +1212,7 @@ mod tests {
         let transport = SeqTransport {
             responses: vec![json!({
                 "answers": {
-                    "c0": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
+                    "q0": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
                 }
             })],
             bodies: Vec::new(),
@@ -1227,7 +1223,7 @@ mod tests {
         let ex = judge.last_exchanges();
         assert_eq!(ex.len(), 1);
         assert_eq!(ex[0].request["model"], "jev-latest");
-        assert_eq!(ex[0].response["answers"]["c0"]["choice"], "investigate");
+        assert_eq!(ex[0].response["answers"]["q0"]["choice"], "investigate");
         assert!(ex[0].started_at.is_some());
         assert!(ex[0].ended_at.is_some());
         assert!(ex[0].ended_at.unwrap() >= ex[0].started_at.unwrap());
@@ -1244,21 +1240,29 @@ mod tests {
         }
     }
 
-    fn true_doc_resp() -> Value {
-        json!({
-            "answers": {
-                "ground": { "type": "choice", "choice": "entailed", "confidence": 0.9 }
+    fn fill_answers(body: &Value, choice: &str, confidence: f64) -> Value {
+        let mut answers = serde_json::Map::new();
+        if let Some(qs) = body.get("questions").and_then(|q| q.as_object()) {
+            for key in qs.keys() {
+                answers.insert(
+                    key.clone(),
+                    json!({ "type": "choice", "choice": choice, "confidence": confidence }),
+                );
             }
-        })
+        }
+        json!({ "answers": answers })
     }
 
     struct BatchSpy {
         batches: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+        /// If set, used as the response for each body (question keys must match).
         responses: Vec<Value>,
+        /// When `responses` is empty, every question in the body gets this choice.
+        default_choice: Option<(&'static str, f64)>,
     }
 
     impl Transport for BatchSpy {
-        fn post_json(&mut self, _url: &str, _body: &Value) -> Result<Posted, JudgeError> {
+        fn post_json(&mut self, _url: &str, _body: &Value) -> Result<Posted, OracleError> {
             panic!("documents should post via post_json_all");
         }
 
@@ -1266,15 +1270,17 @@ mod tests {
             &mut self,
             _url: &str,
             bodies: &[Value],
-        ) -> Vec<Result<Posted, JudgeError>> {
+        ) -> Vec<Result<Posted, OracleError>> {
             self.batches.lock().unwrap().push(bodies.len());
             bodies
                 .iter()
-                .map(|_| {
-                    if self.responses.is_empty() {
-                        Err(JudgeError::Http("no more responses".into()))
-                    } else {
+                .map(|body| {
+                    if !self.responses.is_empty() {
                         Posted::capture(|| Ok(self.responses.remove(0)))
+                    } else if let Some((choice, conf)) = self.default_choice {
+                        Posted::capture(|| Ok(fill_answers(body, choice, conf)))
+                    } else {
+                        Err(OracleError::Http("no more responses".into()))
                     }
                 })
                 .collect()
@@ -1286,7 +1292,8 @@ mod tests {
         let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let transport = BatchSpy {
             batches: batches.clone(),
-            responses: vec![true_doc_resp(), true_doc_resp(), true_doc_resp()],
+            responses: Vec::new(),
+            default_choice: Some(("entailed", 0.9)),
         };
         let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
         let states = vec![doc_state("a.py"), doc_state("b.py"), doc_state("c.py")];
@@ -1321,6 +1328,7 @@ mod tests {
         let transport = BatchSpy {
             batches: batches.clone(),
             responses: vec![many_doc_resp()],
+            default_choice: None,
         };
         let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
         let a = DocumentState {
@@ -1366,30 +1374,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_from_tokens_computes_jev_input_price() {
-        let (input, output, cost) = usage_from(&json!({
-            "answers": {},
-            "usage": { "input_tokens": 1_000_000, "output_tokens": 12 }
-        }));
-        assert_eq!(input, Some(1_000_000));
-        assert_eq!(output, Some(12));
-        assert!((cost.unwrap() - 0.042).abs() < 1e-12);
-    }
-
-    #[test]
-    fn usage_from_prefers_explicit_cost() {
-        let (_, _, cost) = usage_from(&json!({
-            "usage": { "input_tokens": 10, "cost_usd": 1.25 }
-        }));
-        assert!((cost.unwrap() - 1.25).abs() < 1e-12);
-    }
-
-    #[test]
-    fn usage_from_missing_is_none() {
-        assert_eq!(usage_from(&json!({"answers": {}})), (None, None, None));
-    }
-
-    #[test]
     fn evaluate_records_usage_on_exchange() {
         let state = ListingState {
             pred: "component".into(),
@@ -1401,7 +1385,7 @@ mod tests {
         let transport = SeqTransport {
             responses: vec![json!({
                 "answers": {
-                    "c0": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
+                    "q0": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
                 },
                 "usage": { "input_tokens": 2000, "output_tokens": 8 }
             })],
@@ -1425,11 +1409,14 @@ mod tests {
         }
     }
 
-    fn listing_resp(cost_usd: f64) -> Value {
+    fn listing_resp(ticket: u64, cost_usd: f64) -> Value {
+        let mut answers = serde_json::Map::new();
+        answers.insert(
+            format!("q{ticket}"),
+            json!({ "type": "choice", "choice": "investigate", "confidence": 0.9 }),
+        );
         json!({
-            "answers": {
-                "c0": { "type": "choice", "choice": "investigate", "confidence": 0.9 }
-            },
+            "answers": answers,
             "usage": { "input_tokens": 10, "cost_usd": cost_usd }
         })
     }
@@ -1438,21 +1425,21 @@ mod tests {
     fn keeps_the_request_that_crosses_the_run_cost_limit() {
         let state = listing_state();
         let transport = SeqTransport {
-            responses: vec![listing_resp(1.25)],
+            responses: vec![listing_resp(0, 1.25)],
             bodies: Vec::new(),
         };
         let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
         let choices = judge.choose(&state).unwrap();
         assert_eq!(choices[0].transition, Transition::Investigate);
         assert!((judge.last_exchanges()[0].cost_usd.unwrap() - 1.25).abs() < 1e-12);
-        assert!((judge.spent_usd - 1.25).abs() < 1e-12);
+        assert!((judge.spent_usd() - 1.25).abs() < 1e-12);
     }
 
     #[test]
     fn refuses_further_jev_after_run_cost_limit() {
         let state = listing_state();
         let transport = SeqTransport {
-            responses: vec![listing_resp(1.0), listing_resp(0.01)],
+            responses: vec![listing_resp(0, 1.0), listing_resp(1, 0.01)],
             bodies: Vec::new(),
         };
         let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
@@ -1460,21 +1447,21 @@ mod tests {
         let err = judge.choose(&state).unwrap_err();
         assert!(matches!(err, JudgeError::Limit(_)), "{err}");
         assert!(err.to_string().contains("$1.00"));
-        assert_eq!(judge.transport.bodies.len(), 1);
+        assert_eq!(judge.transport().bodies.len(), 1);
     }
 
     #[test]
     fn requests_under_the_run_cost_limit_keep_going() {
         let state = listing_state();
         let transport = SeqTransport {
-            responses: vec![listing_resp(0.4), listing_resp(0.4)],
+            responses: vec![listing_resp(0, 0.4), listing_resp(1, 0.4)],
             bodies: Vec::new(),
         };
         let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
         judge.choose(&state).unwrap();
         judge.choose(&state).unwrap();
-        assert_eq!(judge.transport.bodies.len(), 2);
-        assert!((judge.spent_usd - 0.8).abs() < 1e-12);
+        assert_eq!(judge.transport().bodies.len(), 2);
+        assert!((judge.spent_usd() - 0.8).abs() < 1e-12);
     }
 
     #[test]
@@ -1482,32 +1469,13 @@ mod tests {
         let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let transport = BatchSpy {
             batches: batches.clone(),
-            responses: vec![true_doc_resp()],
+            responses: Vec::new(),
+            default_choice: Some(("entailed", 0.9)),
         };
         let mut judge = JevJudge::new(transport, "http://example/v1/systemone", "jev-latest");
-        judge.spent_usd = RUN_COST_LIMIT_USD;
+        judge.set_spent_usd(1.0);
         let answers = judge.documents(&[doc_state("a.py")]);
         assert!(matches!(answers[0], Err(JudgeError::Limit(_))));
         assert!(batches.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn parallel_map_overlaps_work() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let inflight = AtomicUsize::new(0);
-        let max = AtomicUsize::new(0);
-        let items: Vec<u8> = (0..6).collect();
-        let _ = parallel_map(&items, 6, |_| {
-            let n = inflight.fetch_add(1, Ordering::SeqCst) + 1;
-            max.fetch_max(n, Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(30));
-            inflight.fetch_sub(1, Ordering::SeqCst);
-            1u8
-        });
-        assert!(
-            max.load(Ordering::SeqCst) > 1,
-            "expected overlapping document work, max inflight {}",
-            max.load(Ordering::SeqCst)
-        );
     }
 }

@@ -2,6 +2,7 @@ pub mod core;
 pub mod edb;
 pub mod eval;
 pub mod navigator;
+pub mod oracle;
 pub mod proposers;
 pub mod report;
 pub mod syntax;

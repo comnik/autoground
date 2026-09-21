@@ -1,0 +1,645 @@
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::time::SystemTime;
+
+use serde_json::{json, Value};
+
+use super::{Answer, Classification, Oracle, OracleError, OracleExchange, Ticket};
+
+const DEFAULT_BASE: &str = "https://api.typesafe.ai";
+const DEFAULT_MODEL: &str = "jev-latest";
+
+const MAX_RETRIES: u32 = 4;
+const POST_PARALLELISM: usize = 8;
+/// Published Jev input price. Output tokens are unmetered.
+const INPUT_USD_PER_MILLION_TOKENS: f64 = 0.042;
+/// Hard cap on recorded Jev spend for one oracle instance.
+const RUN_COST_LIMIT_USD: f64 = 1.0;
+/// Max Choice questions in one System One POST.
+pub const QUESTION_BUDGET: usize = 100;
+
+/// One transport round-trip, with wall-clock bounds for the trace.
+#[derive(Debug, Clone)]
+pub struct Posted {
+    pub value: Value,
+    pub started_at: SystemTime,
+    pub ended_at: SystemTime,
+}
+
+impl Posted {
+    pub fn capture(f: impl FnOnce() -> Result<Value, OracleError>) -> Result<Self, OracleError> {
+        let started_at = SystemTime::now();
+        let value = f()?;
+        Ok(Self {
+            value,
+            started_at,
+            ended_at: SystemTime::now(),
+        })
+    }
+}
+
+/// POST body / response transport. Live HTTP in production; a mock in tests.
+pub trait Transport {
+    fn post_json(&mut self, url: &str, body: &Value) -> Result<Posted, OracleError>;
+
+    fn post_json_all(&mut self, url: &str, bodies: &[Value]) -> Vec<Result<Posted, OracleError>> {
+        bodies.iter().map(|b| self.post_json(url, b)).collect()
+    }
+}
+
+pub struct UreqTransport;
+
+impl Transport for UreqTransport {
+    fn post_json(&mut self, url: &str, body: &Value) -> Result<Posted, OracleError> {
+        Posted::capture(|| post_json_with_retries(url, body))
+    }
+
+    fn post_json_all(&mut self, url: &str, bodies: &[Value]) -> Vec<Result<Posted, OracleError>> {
+        parallel_map(bodies, POST_PARALLELISM, |body| {
+            Posted::capture(|| post_json_with_retries(url, body))
+        })
+    }
+}
+
+fn post_json_with_retries(url: &str, body: &Value) -> Result<Value, OracleError> {
+    let key = std::env::var("TYPESAFE_API_KEY")
+        .map_err(|_| OracleError::Config("TYPESAFE_API_KEY is not set".into()))?;
+    let mut delay_ms = 200u64;
+    let mut last = String::new();
+    for attempt in 0..MAX_RETRIES {
+        let req = ureq::post(url)
+            .set("Authorization", &format!("Bearer {key}"))
+            .set("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(120));
+        match req.send_json(body.clone()) {
+            Ok(resp) => {
+                return resp
+                    .into_json()
+                    .map_err(|e| OracleError::Parse(e.to_string()));
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                last = resp
+                    .into_string()
+                    .unwrap_or_else(|_| format!("HTTP {code}"));
+                if matches!(code, 429 | 529 | 500 | 502 | 503) && attempt + 1 < MAX_RETRIES {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    delay_ms = delay_ms.saturating_mul(2);
+                    continue;
+                }
+                return Err(OracleError::Http(format!("HTTP {code}: {last}")));
+            }
+            Err(e) => {
+                last = e.to_string();
+                if attempt + 1 < MAX_RETRIES {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    delay_ms = delay_ms.saturating_mul(2);
+                    continue;
+                }
+                return Err(OracleError::Http(last));
+            }
+        }
+    }
+    Err(OracleError::Http(last))
+}
+
+fn parallel_map<T, R, F>(items: &[T], limit: usize, f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> R + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let limit = limit.max(1);
+    if items.len() == 1 || limit == 1 {
+        return items.iter().map(f).collect();
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for chunk in items.chunks(limit) {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk.iter().map(|item| scope.spawn(|| f(item))).collect();
+            for handle in handles {
+                out.push(handle.join().expect("parallel oracle request panicked"));
+            }
+        });
+    }
+    out
+}
+
+#[derive(Clone)]
+struct Pending {
+    ticket: Ticket,
+    req: Classification,
+}
+
+/// Jev System One oracle. `submit` queues; `wait` groups by state digest,
+/// chunks at [`QUESTION_BUDGET`], and overlaps independent POSTs.
+pub struct JevOracle<T: Transport = UreqTransport> {
+    pub transport: T,
+    endpoint: String,
+    model: String,
+    next_ticket: u64,
+    pending: Vec<Pending>,
+    resolved: HashMap<Ticket, Result<Answer, OracleError>>,
+    spent_usd: f64,
+    last_exchanges: Vec<OracleExchange>,
+}
+
+impl JevOracle<UreqTransport> {
+    pub fn from_env() -> Result<Self, OracleError> {
+        if std::env::var("TYPESAFE_API_KEY").is_err() {
+            return Err(OracleError::Config(
+                "TYPESAFE_API_KEY is not set; pass --judge heuristic or set the key".into(),
+            ));
+        }
+        let base = std::env::var("TYPESAFE_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE.into());
+        let model =
+            std::env::var("TYPESAFE_DEFAULT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
+        Ok(Self::new(
+            UreqTransport,
+            format!("{}/v1/systemone", base.trim_end_matches('/')),
+            model,
+        ))
+    }
+}
+
+impl<T: Transport> JevOracle<T> {
+    pub fn new(transport: T, endpoint: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            transport,
+            endpoint: endpoint.into(),
+            model: model.into(),
+            next_ticket: 0,
+            pending: Vec::new(),
+            resolved: HashMap::new(),
+            spent_usd: 0.0,
+            last_exchanges: Vec::new(),
+        }
+    }
+
+    pub fn last_exchanges(&self) -> &[OracleExchange] {
+        &self.last_exchanges
+    }
+
+    pub fn set_spent_usd(&mut self, spent: f64) {
+        self.spent_usd = spent;
+    }
+
+    fn budget_error(&self) -> OracleError {
+        OracleError::Limit(format!(
+            "run cost limit of ${:.2} exceeded (spent ${:.4})",
+            RUN_COST_LIMIT_USD, self.spent_usd
+        ))
+    }
+
+    fn over_budget(&self) -> bool {
+        self.spent_usd >= RUN_COST_LIMIT_USD
+    }
+
+    fn add_spend(&mut self, cost: Option<f64>) {
+        if let Some(c) = cost {
+            self.spent_usd += c;
+        }
+    }
+
+    fn is_pending(&self, ticket: Ticket) -> bool {
+        self.pending.iter().any(|p| p.ticket == ticket)
+    }
+
+    fn flush(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        self.last_exchanges.clear();
+        if self.over_budget() {
+            let err = self.budget_error();
+            for p in self.pending.drain(..) {
+                self.resolved.insert(p.ticket, Err(err.clone()));
+            }
+            return;
+        }
+
+        let mut order: Vec<u64> = Vec::new();
+        let mut groups: HashMap<u64, Vec<Pending>> = HashMap::new();
+        for p in self.pending.drain(..) {
+            let digest = state_digest(&p.req.state);
+            groups.entry(digest).or_insert_with(|| {
+                order.push(digest);
+                Vec::new()
+            });
+            groups.get_mut(&digest).unwrap().push(p);
+        }
+
+        let mut chunks: Vec<(Value, Vec<Pending>)> = Vec::new();
+        for digest in order {
+            let items = groups.remove(&digest).unwrap_or_default();
+            for chunk in items.chunks(QUESTION_BUDGET) {
+                chunks.push((chunk[0].req.state.clone(), chunk.to_vec()));
+            }
+        }
+
+        let bodies: Vec<Value> = chunks
+            .iter()
+            .map(|(state, items)| request_body(&self.model, state, items))
+            .collect();
+        let responses = self.transport.post_json_all(&self.endpoint, &bodies);
+
+        for ((items, request), resp) in chunks
+            .into_iter()
+            .map(|(_, items)| items)
+            .zip(bodies)
+            .zip(responses)
+        {
+            match resp {
+                Ok(posted) => {
+                    let response = posted.value.clone();
+                    let ex = exchange_from_posted(request, posted);
+                    self.add_spend(ex.cost_usd);
+                    self.last_exchanges.push(ex.clone());
+                    for p in items {
+                        let key = question_key(p.ticket);
+                        let parsed =
+                            parse_choice(&response, &key).map(|(choice, confidence)| Answer {
+                                choice,
+                                confidence,
+                                exchange: Some(ex.clone()),
+                            });
+                        self.resolved.insert(p.ticket, parsed);
+                    }
+                }
+                Err(e) => {
+                    for p in items {
+                        self.resolved.insert(p.ticket, Err(e.clone()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T: Transport> Oracle for JevOracle<T> {
+    fn submit(&mut self, req: Classification) -> Ticket {
+        let ticket = Ticket(self.next_ticket);
+        self.next_ticket += 1;
+        self.pending.push(Pending { ticket, req });
+        ticket
+    }
+
+    fn wait(&mut self, ticket: Ticket) -> Result<Answer, OracleError> {
+        if let Some(done) = self.resolved.get(&ticket) {
+            return done.clone();
+        }
+        if !self.is_pending(ticket) {
+            return Err(OracleError::Parse(format!("unknown ticket {}", ticket.0)));
+        }
+        self.flush();
+        self.resolved
+            .get(&ticket)
+            .cloned()
+            .unwrap_or_else(|| Err(OracleError::Parse(format!("missing ticket {}", ticket.0))))
+    }
+
+    fn spent_usd(&self) -> f64 {
+        self.spent_usd
+    }
+}
+
+fn question_key(ticket: Ticket) -> String {
+    format!("q{}", ticket.0)
+}
+
+fn request_body(model: &str, state: &Value, items: &[Pending]) -> Value {
+    let mut questions = serde_json::Map::new();
+    for p in items {
+        questions.insert(
+            question_key(p.ticket),
+            json!({
+                "type": "choice",
+                "instructions": p.req.instructions,
+                "criteria": p.req.criteria,
+            }),
+        );
+    }
+    json!({
+        "model": model,
+        "state": state,
+        "questions": questions,
+    })
+}
+
+/// Digest of classification `state`. Callers (navigator, later search) pass a
+/// rendered view or other JSON; the oracle hashes it and does not ask Universe
+/// for a digest.
+fn state_digest(state: &Value) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match serde_json::to_vec(state) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(_) => 0.hash(&mut hasher),
+    }
+    hasher.finish()
+}
+
+fn parse_choice(resp: &Value, key: &str) -> Result<(String, f64), OracleError> {
+    let answers = resp
+        .get("answers")
+        .and_then(|a| a.as_object())
+        .ok_or_else(|| OracleError::Parse("response missing answers".into()))?;
+    let ans = answers
+        .get(key)
+        .ok_or_else(|| OracleError::Parse(format!("missing answer {key}")))?;
+    let choice = ans
+        .get("choice")
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| OracleError::Parse(format!("answer {key} missing choice")))?;
+    let confidence = ans
+        .get("confidence")
+        .and_then(|c| c.as_f64())
+        .unwrap_or(0.0);
+    Ok((choice.to_string(), confidence))
+}
+
+fn exchange_from_posted(request: Value, posted: Posted) -> OracleExchange {
+    let (input_tokens, output_tokens, cost_usd) = usage_from(&posted.value);
+    OracleExchange {
+        request,
+        response: posted.value,
+        started_at: Some(posted.started_at),
+        ended_at: Some(posted.ended_at),
+        input_tokens,
+        output_tokens,
+        cost_usd,
+    }
+}
+
+/// Token counts and USD cost from a System One response. Cost prefers an
+/// explicit `usage.cost` / `usage.cost_usd` field; otherwise it is input
+/// tokens at the published Jev input price.
+pub fn usage_from(response: &Value) -> (Option<u64>, Option<u64>, Option<f64>) {
+    let Some(usage) = response.get("usage") else {
+        return (None, None, None);
+    };
+    let input = int_field(usage, "input_tokens");
+    let output = int_field(usage, "output_tokens");
+    let cost = usage
+        .get("cost_usd")
+        .or_else(|| usage.get("cost"))
+        .and_then(|v| v.as_f64())
+        .or_else(|| input.map(|n| n as f64 * INPUT_USD_PER_MILLION_TOKENS / 1_000_000.0));
+    (input, output, cost)
+}
+
+fn int_field(obj: &Value, key: &str) -> Option<u64> {
+    obj.get(key).and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+            .or_else(|| v.as_f64().and_then(|n| (n >= 0.0).then_some(n as u64)))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn criteria(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    fn classify(state: Value, instructions: &str) -> Classification {
+        Classification {
+            state,
+            instructions: instructions.into(),
+            criteria: criteria(&[("yes", "yes"), ("no", "no")]),
+        }
+    }
+
+    fn choice_resp(keys: &[&str], choice: &str) -> Value {
+        let mut answers = serde_json::Map::new();
+        for k in keys {
+            answers.insert(
+                (*k).into(),
+                json!({ "type": "choice", "choice": choice, "confidence": 0.9 }),
+            );
+        }
+        json!({ "answers": answers })
+    }
+
+    struct SeqTransport {
+        responses: Vec<Value>,
+        pub bodies: Vec<Value>,
+    }
+
+    impl Transport for SeqTransport {
+        fn post_json(&mut self, _url: &str, body: &Value) -> Result<Posted, OracleError> {
+            self.bodies.push(body.clone());
+            if self.responses.is_empty() {
+                return Err(OracleError::Http("no more responses".into()));
+            }
+            Posted::capture(|| Ok(self.responses.remove(0)))
+        }
+    }
+
+    fn oracle(responses: Vec<Value>) -> JevOracle<SeqTransport> {
+        JevOracle::new(
+            SeqTransport {
+                responses,
+                bodies: Vec::new(),
+            },
+            "http://example/v1/systemone",
+            "jev-latest",
+        )
+    }
+
+    #[test]
+    fn submit_does_not_post() {
+        let mut o = oracle(vec![choice_resp(&["q0"], "yes")]);
+        let _t = o.submit(classify(json!({"n": 1}), "a"));
+        assert!(o.transport.bodies.is_empty());
+        assert_eq!(o.spent_usd(), 0.0);
+    }
+
+    #[test]
+    fn wait_one_flushes_same_state_siblings() {
+        let mut o = oracle(vec![choice_resp(&["q0", "q1", "q2"], "yes")]);
+        let state = json!({"path": "a.rs", "body": "fn main() {}"});
+        let t0 = o.submit(classify(state.clone(), "p0"));
+        let t1 = o.submit(classify(state.clone(), "p1"));
+        let t2 = o.submit(classify(state, "p2"));
+        let a0 = o.wait(t0).unwrap();
+        assert_eq!(a0.choice, "yes");
+        assert_eq!(o.transport.bodies.len(), 1);
+        let qs = o.transport.bodies[0]["questions"].as_object().unwrap();
+        assert_eq!(qs.len(), 3);
+        assert!(qs.contains_key("q0") && qs.contains_key("q1") && qs.contains_key("q2"));
+        assert_eq!(o.wait(t1).unwrap().choice, "yes");
+        assert_eq!(o.wait(t2).unwrap().choice, "yes");
+        assert_eq!(o.transport.bodies.len(), 1);
+        assert_eq!(o.last_exchanges().len(), 1);
+    }
+
+    #[test]
+    fn wait_flushes_pending_other_states() {
+        let mut o = oracle(vec![
+            choice_resp(&["q0"], "yes"),
+            choice_resp(&["q1"], "no"),
+        ]);
+        let t0 = o.submit(classify(json!({"path": "a.rs"}), "p0"));
+        let t1 = o.submit(classify(json!({"path": "b.rs"}), "p1"));
+        let a0 = o.wait(t0).unwrap();
+        assert_eq!(a0.choice, "yes");
+        assert_eq!(o.transport.bodies.len(), 2);
+        assert_eq!(o.wait(t1).unwrap().choice, "no");
+        assert_eq!(o.transport.bodies.len(), 2);
+    }
+
+    #[test]
+    fn chunks_same_state_at_question_budget() {
+        let n = QUESTION_BUDGET + 1;
+        let keys0: Vec<String> = (0..QUESTION_BUDGET).map(|i| format!("q{i}")).collect();
+        let keys0_ref: Vec<&str> = keys0.iter().map(|s| s.as_str()).collect();
+        let extra = format!("q{QUESTION_BUDGET}");
+        let mut o = oracle(vec![
+            choice_resp(&keys0_ref, "yes"),
+            choice_resp(&[extra.as_str()], "no"),
+        ]);
+        let state = json!({"tree": "/"});
+        let mut tickets = Vec::new();
+        for i in 0..n {
+            tickets.push(o.submit(classify(state.clone(), &format!("p{i}"))));
+        }
+        drop(keys0);
+        let a = o.wait(tickets[0]).unwrap();
+        assert_eq!(a.choice, "yes");
+        assert_eq!(o.transport.bodies.len(), 2);
+        assert_eq!(
+            o.transport.bodies[0]["questions"]
+                .as_object()
+                .unwrap()
+                .len(),
+            QUESTION_BUDGET
+        );
+        assert_eq!(
+            o.transport.bodies[1]["questions"]
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(o.wait(tickets[QUESTION_BUDGET]).unwrap().choice, "no");
+    }
+
+    #[test]
+    fn submit_then_submit_then_wait_posts_once() {
+        let mut o = oracle(vec![choice_resp(&["q0", "q1"], "yes")]);
+        let state = json!({"n": 1});
+        o.submit(classify(state.clone(), "a"));
+        let t1 = o.submit(classify(state, "b"));
+        assert!(o.transport.bodies.is_empty());
+        o.wait(t1).unwrap();
+        assert_eq!(o.transport.bodies.len(), 1);
+        assert_eq!(
+            o.transport.bodies[0]["questions"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn cost_cap_keeps_crossing_request_then_refuses() {
+        let mut o = oracle(vec![json!({
+            "answers": { "q0": { "type": "choice", "choice": "yes", "confidence": 0.9 } },
+            "usage": { "input_tokens": 10, "cost_usd": 1.25 }
+        })]);
+        let t0 = o.submit(classify(json!({"n": 1}), "a"));
+        o.wait(t0).unwrap();
+        assert!((o.spent_usd() - 1.25).abs() < 1e-12);
+        let t1 = o.submit(classify(json!({"n": 2}), "b"));
+        let err = o.wait(t1).unwrap_err();
+        assert!(matches!(err, OracleError::Limit(_)), "{err}");
+        assert!(err.to_string().contains("$1.00"));
+        assert_eq!(o.transport.bodies.len(), 1);
+    }
+
+    #[test]
+    fn already_at_limit_does_not_post_pending() {
+        let mut o = oracle(vec![choice_resp(&["q0"], "yes")]);
+        o.set_spent_usd(RUN_COST_LIMIT_USD);
+        let t = o.submit(classify(json!({"n": 1}), "a"));
+        assert!(matches!(o.wait(t), Err(OracleError::Limit(_))));
+        assert!(o.transport.bodies.is_empty());
+    }
+
+    #[test]
+    fn usage_from_tokens_computes_jev_input_price() {
+        let (input, output, cost) = usage_from(&json!({
+            "answers": {},
+            "usage": { "input_tokens": 1_000_000, "output_tokens": 12 }
+        }));
+        assert_eq!(input, Some(1_000_000));
+        assert_eq!(output, Some(12));
+        assert!((cost.unwrap() - 0.042).abs() < 1e-12);
+    }
+
+    #[test]
+    fn usage_from_prefers_explicit_cost() {
+        let (_, _, cost) = usage_from(&json!({
+            "usage": { "input_tokens": 10, "cost_usd": 1.25 }
+        }));
+        assert!((cost.unwrap() - 1.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn usage_from_missing_is_none() {
+        assert_eq!(usage_from(&json!({"answers": {}})), (None, None, None));
+    }
+
+    #[test]
+    fn records_usage_on_exchange() {
+        let mut o = oracle(vec![json!({
+            "answers": { "q0": { "type": "choice", "choice": "yes", "confidence": 0.9 } },
+            "usage": { "input_tokens": 2000, "output_tokens": 8 }
+        })]);
+        let t = o.submit(classify(json!({"n": 1}), "a"));
+        let a = o.wait(t).unwrap();
+        let ex = a.exchange.unwrap();
+        assert_eq!(ex.input_tokens, Some(2000));
+        assert_eq!(ex.output_tokens, Some(8));
+        assert!((ex.cost_usd.unwrap() - 2000.0 * 0.042 / 1_000_000.0).abs() < 1e-15);
+        assert!(ex.started_at.is_some() && ex.ended_at.is_some());
+    }
+
+    #[test]
+    fn wait_unknown_ticket_does_not_flush() {
+        let mut o = oracle(vec![choice_resp(&["q0"], "yes")]);
+        let _pending = o.submit(classify(json!({"n": 1}), "a"));
+        let err = o.wait(Ticket(99)).unwrap_err();
+        assert!(matches!(err, OracleError::Parse(_)));
+        assert!(o.transport.bodies.is_empty());
+    }
+
+    #[test]
+    fn parallel_map_overlaps_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let inflight = AtomicUsize::new(0);
+        let max = AtomicUsize::new(0);
+        let items: Vec<u8> = (0..6).collect();
+        let _ = parallel_map(&items, 6, |_| {
+            let n = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            max.fetch_max(n, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            inflight.fetch_sub(1, Ordering::SeqCst);
+            1u8
+        });
+        assert!(
+            max.load(Ordering::SeqCst) > 1,
+            "expected overlapping work, max inflight {}",
+            max.load(Ordering::SeqCst)
+        );
+    }
+}

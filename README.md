@@ -195,7 +195,12 @@ directories as the same thing — a "database". Files would be the leaf databas
 Rendering a file would render at least the full path + its contents. Rendering a directory
 would render its listing.
 
-**Oracle**: a classification oracle. Basically a tailored wrapper around the jev API.
+**Oracle**: a classification oracle. Jev is the first implementation.
+- submit a classification `(state, proposition, labels)` as soon as a need is known
+- wait for a ticket when the label is required; pending questions that share a `state` go in one request, independent states overlap
+- report spend incurred on this instance so far
+
+The oracle hashes the `state` it is given (a Universe render, a listing tree, a file body). Universe itself has no digest method. Search will use this same interface later; the 3VL engine does not hold an oracle.
 
 ### Notes
 
