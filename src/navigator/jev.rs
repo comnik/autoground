@@ -11,7 +11,7 @@ use super::judge::{
 use super::walk::parent_dir;
 use crate::oracle::jev::{JevOracle, UreqTransport};
 use crate::oracle::{
-    Answer as OracleAnswer, Classification, Oracle, OracleError, OracleExchange, Ticket,
+    Answer as OracleAnswer, Classification, Oracle, OracleError, OracleExchange, Ticket, Usage,
 };
 
 pub use crate::oracle::jev::Transport;
@@ -40,8 +40,8 @@ impl<T: Transport> JevJudge<T> {
         }
     }
 
-    pub fn spent_usd(&self) -> f64 {
-        self.inner.spent_usd()
+    pub fn usage(&self) -> Usage {
+        self.inner.usage()
     }
 
     pub fn transport(&self) -> &T {
@@ -1432,7 +1432,7 @@ mod tests {
         let choices = judge.choose(&state).unwrap();
         assert_eq!(choices[0].transition, Transition::Investigate);
         assert!((judge.last_exchanges()[0].cost_usd.unwrap() - 1.25).abs() < 1e-12);
-        assert!((judge.spent_usd() - 1.25).abs() < 1e-12);
+        assert!((judge.usage().spend_usd - 1.25).abs() < 1e-12);
     }
 
     #[test]
@@ -1461,7 +1461,7 @@ mod tests {
         judge.choose(&state).unwrap();
         judge.choose(&state).unwrap();
         assert_eq!(judge.transport().bodies.len(), 2);
-        assert!((judge.spent_usd() - 0.8).abs() < 1e-12);
+        assert!((judge.usage().spend_usd - 0.8).abs() < 1e-12);
     }
 
     #[test]

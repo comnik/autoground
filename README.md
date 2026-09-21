@@ -198,7 +198,7 @@ would render its listing.
 **Oracle**: a classification oracle. Jev is the first implementation.
 - submit a classification `(state, proposition, labels)` as soon as a need is known
 - wait for a ticket when the label is required; pending questions that share a `state` go in one request, independent states overlap
-- report spend incurred on this instance so far
+- report usage on this instance so far: spend, input tokens, request count, latency percentiles, mean batch size (questions per request / max questions per request), and mean fill factor (input tokens / the 32k state-side cap)
 
 The oracle hashes the `state` it is given (a Universe render, a listing tree, a file body). Universe itself has no digest method. Search will use this same interface later; the 3VL engine does not hold an oracle.
 

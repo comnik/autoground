@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 
-use super::{Answer, Classification, Oracle, OracleError, OracleExchange, Ticket};
+use super::{Answer, Classification, Oracle, OracleError, OracleExchange, Ticket, Usage};
 
 const DEFAULT_BASE: &str = "https://api.typesafe.ai";
 const DEFAULT_MODEL: &str = "jev-latest";
@@ -17,6 +17,9 @@ const INPUT_USD_PER_MILLION_TOKENS: f64 = 0.042;
 const RUN_COST_LIMIT_USD: f64 = 1.0;
 /// Max Choice questions in one System One POST.
 pub const QUESTION_BUDGET: usize = 100;
+/// Documented Jev cap on `state` plus the longest question. Fill uses billed
+/// `input_tokens` against this 32k budget, not the 64k total envelope.
+pub const CONTEXT_TOKEN_BUDGET: u64 = 32_000;
 
 /// One transport round-trip, with wall-clock bounds for the trace.
 #[derive(Debug, Clone)]
@@ -143,6 +146,11 @@ pub struct JevOracle<T: Transport = UreqTransport> {
     pending: Vec<Pending>,
     resolved: HashMap<Ticket, Result<Answer, OracleError>>,
     spent_usd: f64,
+    input_tokens: u64,
+    requests: u64,
+    token_requests: u64,
+    questions: u64,
+    latencies: Vec<Duration>,
     last_exchanges: Vec<OracleExchange>,
 }
 
@@ -174,6 +182,11 @@ impl<T: Transport> JevOracle<T> {
             pending: Vec::new(),
             resolved: HashMap::new(),
             spent_usd: 0.0,
+            input_tokens: 0,
+            requests: 0,
+            token_requests: 0,
+            questions: 0,
+            latencies: Vec::new(),
             last_exchanges: Vec::new(),
         }
     }
@@ -200,6 +213,21 @@ impl<T: Transport> JevOracle<T> {
     fn add_spend(&mut self, cost: Option<f64>) {
         if let Some(c) = cost {
             self.spent_usd += c;
+        }
+    }
+
+    fn record_request(&mut self, ex: &OracleExchange, questions: usize) {
+        self.add_spend(ex.cost_usd);
+        if let Some(n) = ex.input_tokens {
+            self.input_tokens += n;
+            self.token_requests += 1;
+        }
+        self.requests += 1;
+        self.questions += questions as u64;
+        if let (Some(start), Some(end)) = (ex.started_at, ex.ended_at) {
+            if let Ok(d) = end.duration_since(start) {
+                self.latencies.push(d);
+            }
         }
     }
 
@@ -254,8 +282,9 @@ impl<T: Transport> JevOracle<T> {
             match resp {
                 Ok(posted) => {
                     let response = posted.value.clone();
+                    let n = items.len();
                     let ex = exchange_from_posted(request, posted);
-                    self.add_spend(ex.cost_usd);
+                    self.record_request(&ex, n);
                     self.last_exchanges.push(ex.clone());
                     for p in items {
                         let key = question_key(p.ticket);
@@ -300,8 +329,19 @@ impl<T: Transport> Oracle for JevOracle<T> {
             .unwrap_or_else(|| Err(OracleError::Parse(format!("missing ticket {}", ticket.0))))
     }
 
-    fn spent_usd(&self) -> f64 {
-        self.spent_usd
+    fn usage(&self) -> Usage {
+        Usage {
+            spend_usd: self.spent_usd,
+            input_tokens: self.input_tokens,
+            requests: self.requests,
+            batch_size: (self.requests > 0)
+                .then_some(self.questions as f64 / (self.requests as f64 * QUESTION_BUDGET as f64)),
+            fill_factor: (self.token_requests > 0).then_some(
+                self.input_tokens as f64
+                    / (self.token_requests as f64 * CONTEXT_TOKEN_BUDGET as f64),
+            ),
+            latency: super::latency_percentiles(&self.latencies),
+        }
     }
 }
 
@@ -401,6 +441,7 @@ fn int_field(obj: &Value, key: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::time::UNIX_EPOCH;
 
     fn criteria(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -431,6 +472,7 @@ mod tests {
     struct SeqTransport {
         responses: Vec<Value>,
         pub bodies: Vec<Value>,
+        latencies: Vec<Duration>,
     }
 
     impl Transport for SeqTransport {
@@ -439,7 +481,17 @@ mod tests {
             if self.responses.is_empty() {
                 return Err(OracleError::Http("no more responses".into()));
             }
-            Posted::capture(|| Ok(self.responses.remove(0)))
+            let value = self.responses.remove(0);
+            if self.latencies.is_empty() {
+                Posted::capture(|| Ok(value))
+            } else {
+                let d = self.latencies.remove(0);
+                Ok(Posted {
+                    value,
+                    started_at: UNIX_EPOCH,
+                    ended_at: UNIX_EPOCH + d,
+                })
+            }
         }
     }
 
@@ -448,6 +500,22 @@ mod tests {
             SeqTransport {
                 responses,
                 bodies: Vec::new(),
+                latencies: Vec::new(),
+            },
+            "http://example/v1/systemone",
+            "jev-latest",
+        )
+    }
+
+    fn oracle_with_latencies(
+        responses: Vec<Value>,
+        latencies: Vec<Duration>,
+    ) -> JevOracle<SeqTransport> {
+        JevOracle::new(
+            SeqTransport {
+                responses,
+                bodies: Vec::new(),
+                latencies,
             },
             "http://example/v1/systemone",
             "jev-latest",
@@ -459,7 +527,7 @@ mod tests {
         let mut o = oracle(vec![choice_resp(&["q0"], "yes")]);
         let _t = o.submit(classify(json!({"n": 1}), "a"));
         assert!(o.transport.bodies.is_empty());
-        assert_eq!(o.spent_usd(), 0.0);
+        assert_eq!(o.usage(), Usage::default());
     }
 
     #[test]
@@ -558,7 +626,7 @@ mod tests {
         })]);
         let t0 = o.submit(classify(json!({"n": 1}), "a"));
         o.wait(t0).unwrap();
-        assert!((o.spent_usd() - 1.25).abs() < 1e-12);
+        assert!((o.usage().spend_usd - 1.25).abs() < 1e-12);
         let t1 = o.submit(classify(json!({"n": 2}), "b"));
         let err = o.wait(t1).unwrap_err();
         assert!(matches!(err, OracleError::Limit(_)), "{err}");
@@ -612,6 +680,113 @@ mod tests {
         assert_eq!(ex.output_tokens, Some(8));
         assert!((ex.cost_usd.unwrap() - 2000.0 * 0.042 / 1_000_000.0).abs() < 1e-15);
         assert!(ex.started_at.is_some() && ex.ended_at.is_some());
+    }
+
+    #[test]
+    fn usage_accumulates_across_flushes() {
+        let mut o = oracle(vec![
+            json!({
+                "answers": { "q0": { "type": "choice", "choice": "yes", "confidence": 0.9 } },
+                "usage": { "input_tokens": 1000, "cost_usd": 0.01 }
+            }),
+            json!({
+                "answers": { "q1": { "type": "choice", "choice": "no", "confidence": 0.9 } },
+                "usage": { "input_tokens": 3000, "cost_usd": 0.03 }
+            }),
+        ]);
+        let t0 = o.submit(classify(json!({"n": 1}), "a"));
+        o.wait(t0).unwrap();
+        let t1 = o.submit(classify(json!({"n": 2}), "b"));
+        o.wait(t1).unwrap();
+        let u = o.usage();
+        assert_eq!(u.requests, 2);
+        assert_eq!(u.input_tokens, 4000);
+        assert!((u.spend_usd - 0.04).abs() < 1e-12);
+        assert!((u.batch_size.unwrap() - 1.0 / QUESTION_BUDGET as f64).abs() < 1e-12);
+        assert!(
+            (u.fill_factor.unwrap() - 4000.0 / (2.0 * CONTEXT_TOKEN_BUDGET as f64)).abs() < 1e-12
+        );
+        assert!(u.latency.is_some());
+    }
+
+    #[test]
+    fn usage_batch_size_is_questions_over_budget() {
+        let mut o = oracle(vec![choice_resp(&["q0", "q1", "q2"], "yes")]);
+        let state = json!({"n": 1});
+        let t0 = o.submit(classify(state.clone(), "a"));
+        o.submit(classify(state.clone(), "b"));
+        o.submit(classify(state, "c"));
+        o.wait(t0).unwrap();
+        let u = o.usage();
+        assert_eq!(u.requests, 1);
+        assert!((u.batch_size.unwrap() - 3.0 / QUESTION_BUDGET as f64).abs() < 1e-12);
+        assert_eq!(u.fill_factor, None);
+    }
+
+    #[test]
+    fn usage_fill_factor_is_tokens_over_context_budget() {
+        let mut o = oracle(vec![json!({
+            "answers": { "q0": { "type": "choice", "choice": "yes", "confidence": 0.9 } },
+            "usage": { "input_tokens": 16_000 }
+        })]);
+        let t = o.submit(classify(json!({"n": 1}), "a"));
+        o.wait(t).unwrap();
+        let u = o.usage();
+        assert_eq!(u.requests, 1);
+        assert!((u.fill_factor.unwrap() - 16_000.0 / CONTEXT_TOKEN_BUDGET as f64).abs() < 1e-12);
+        assert!((u.batch_size.unwrap() - 1.0 / QUESTION_BUDGET as f64).abs() < 1e-12);
+    }
+
+    #[test]
+    fn usage_batch_size_averages_full_and_partial_chunks() {
+        let n = QUESTION_BUDGET + 1;
+        let keys0: Vec<String> = (0..QUESTION_BUDGET).map(|i| format!("q{i}")).collect();
+        let keys0_ref: Vec<&str> = keys0.iter().map(|s| s.as_str()).collect();
+        let extra = format!("q{QUESTION_BUDGET}");
+        let mut o = oracle(vec![
+            choice_resp(&keys0_ref, "yes"),
+            choice_resp(&[extra.as_str()], "no"),
+        ]);
+        let state = json!({"tree": "/"});
+        let mut tickets = Vec::new();
+        for i in 0..n {
+            tickets.push(o.submit(classify(state.clone(), &format!("p{i}"))));
+        }
+        drop(keys0);
+        o.wait(tickets[0]).unwrap();
+        let u = o.usage();
+        assert_eq!(u.requests, 2);
+        let expected = (QUESTION_BUDGET as f64 + 1.0) / (2.0 * QUESTION_BUDGET as f64);
+        assert!((u.batch_size.unwrap() - expected).abs() < 1e-12);
+        assert_eq!(u.fill_factor, None);
+    }
+
+    #[test]
+    fn usage_latency_percentiles_from_round_trips() {
+        let mut o = oracle_with_latencies(
+            vec![
+                choice_resp(&["q0"], "yes"),
+                choice_resp(&["q1"], "yes"),
+                choice_resp(&["q2"], "yes"),
+                choice_resp(&["q3"], "yes"),
+                choice_resp(&["q4"], "yes"),
+            ],
+            vec![
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+                Duration::from_millis(30),
+                Duration::from_millis(40),
+                Duration::from_millis(50),
+            ],
+        );
+        for i in 0..5 {
+            let t = o.submit(classify(json!({"n": i}), "a"));
+            o.wait(t).unwrap();
+        }
+        let lat = o.usage().latency.unwrap();
+        assert_eq!(lat.p50, Duration::from_millis(30));
+        assert_eq!(lat.p95, Duration::from_millis(48));
+        assert_eq!(lat.p99, Duration::from_nanos(49_600_000));
     }
 
     #[test]

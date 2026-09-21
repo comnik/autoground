@@ -10,7 +10,7 @@ pub mod jev;
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 pub use jev::{JevOracle, Transport, UreqTransport};
 
@@ -70,6 +70,70 @@ impl fmt::Display for OracleError {
 
 impl std::error::Error for OracleError {}
 
+/// Cumulative usage for one oracle instance. Local impls stay at zero.
+///
+/// [`Usage::batch_size`] is mean questions-per-request / the impl's max
+/// questions per request. [`Usage::fill_factor`] is mean billed input tokens /
+/// the impl's max context per request. Batching should raise batch size, raise
+/// fill, and cut [`Usage::requests`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Usage {
+    pub spend_usd: f64,
+    pub input_tokens: u64,
+    /// Completed transport round-trips.
+    pub requests: u64,
+    /// Mean occupancy of the per-request question budget. None if no requests.
+    pub batch_size: Option<f64>,
+    /// Mean billed input tokens / the impl's per-request context cap.
+    /// None if no token counts.
+    pub fill_factor: Option<f64>,
+    /// Client round-trip wall time, including retries. None if no timed requests.
+    pub latency: Option<LatencyPercentiles>,
+}
+
+/// Linear interpolations of recorded request durations at p50 / p95 / p99.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LatencyPercentiles {
+    pub p50: Duration,
+    pub p95: Duration,
+    pub p99: Duration,
+}
+
+fn latency_percentiles(samples: &[Duration]) -> Option<LatencyPercentiles> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut nanos: Vec<u128> = samples.iter().map(|d| d.as_nanos()).collect();
+    nanos.sort_unstable();
+    Some(LatencyPercentiles {
+        p50: duration_from_nanos(percentile_nanos(&nanos, 50.0)),
+        p95: duration_from_nanos(percentile_nanos(&nanos, 95.0)),
+        p99: duration_from_nanos(percentile_nanos(&nanos, 99.0)),
+    })
+}
+
+fn percentile_nanos(sorted: &[u128], p: f64) -> u128 {
+    let n = sorted.len();
+    if n == 1 {
+        return sorted[0];
+    }
+    let rank = (p / 100.0) * (n - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = (lo + 1).min(n - 1);
+    if lo == hi {
+        sorted[lo]
+    } else {
+        let w = rank - lo as f64;
+        let a = sorted[lo] as f64;
+        let b = sorted[hi] as f64;
+        (a + (b - a) * w).round() as u128
+    }
+}
+
+fn duration_from_nanos(nanos: u128) -> Duration {
+    Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
+}
+
 /// Classification oracle. Jev is the first implementation.
 ///
 /// `submit` only enqueues. `wait` flushes pending work: same-state questions
@@ -83,9 +147,9 @@ pub trait Oracle {
         tickets.iter().copied().map(|t| self.wait(t)).collect()
     }
 
-    /// USD recorded on this instance so far. Local impls stay at 0.
-    fn spent_usd(&self) -> f64 {
-        0.0
+    /// Usage recorded on this instance so far. Local impls stay at zero.
+    fn usage(&self) -> Usage {
+        Usage::default()
     }
 }
 
@@ -99,5 +163,34 @@ mod tests {
         let b = a;
         assert_eq!(a, b);
         assert_ne!(a, Ticket(1));
+    }
+
+    #[test]
+    fn latency_percentiles_none_when_empty() {
+        assert_eq!(latency_percentiles(&[]), None);
+    }
+
+    #[test]
+    fn latency_percentiles_single_sample() {
+        let p = latency_percentiles(&[Duration::from_millis(12)]).unwrap();
+        assert_eq!(p.p50, Duration::from_millis(12));
+        assert_eq!(p.p95, Duration::from_millis(12));
+        assert_eq!(p.p99, Duration::from_millis(12));
+    }
+
+    #[test]
+    fn latency_percentiles_interpolates() {
+        let samples = [
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            Duration::from_millis(30),
+            Duration::from_millis(40),
+            Duration::from_millis(50),
+        ];
+        let p = latency_percentiles(&samples).unwrap();
+        assert_eq!(p.p50, Duration::from_millis(30));
+        assert_eq!(p.p95, Duration::from_millis(48));
+        assert_eq!(p.p99, Duration::from_nanos(49_600_000));
+        assert!(p.p50 <= p.p95 && p.p95 <= p.p99);
     }
 }
