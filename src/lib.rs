@@ -5,6 +5,7 @@ pub mod navigator;
 pub mod oracle;
 pub mod proposers;
 pub mod report;
+pub mod search;
 pub mod syntax;
 pub mod universe;
 

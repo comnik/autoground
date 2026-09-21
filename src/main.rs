@@ -5,10 +5,15 @@ use autoground::edb::Store;
 use autoground::eval::run;
 use autoground::navigator::judge::epoch_ms;
 use autoground::navigator::{FixtureFile, FixtureJudge, JevJudge, RecordingJudge, TreeNavigator};
+use autoground::oracle::JevOracle;
 use autoground::report::{
     allocate_record_path, format_require_traces, format_run_body, format_run_header,
     jev_request_count, require_traces, run_exit_code, RunTiming,
 };
+use autoground::search::{
+    format_findings, format_trace, format_usage, search, HeuristicOracle, DEFAULT_BUDGET_BYTES,
+};
+use autoground::universe::Filesystem;
 use autoground::{compile, parse, verbalize_source};
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -67,6 +72,30 @@ enum Commands {
         /// Atom, model source, or path to a `.ag` file.
         input: String,
     },
+    /// Judge a proposition against a repository, coarse to fine.
+    ///
+    /// Starts at the children of the repo root. A directory listing can settle
+    /// the proposition (`true` / `false`); otherwise the walk refines. A file
+    /// is judged from its body in that same call.
+    ///
+    /// Examples:
+    ///   autoground search "the codebase has a frontend" --repo examples/toy-layered
+    ///   autoground search "frontend" --judge heuristic --repo examples/toy-layered
+    Search {
+        /// Natural-language proposition.
+        proposition: String,
+        /// Repository to search. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Render budget in bytes. Leftover room is filled with one level of samples.
+        #[arg(long, default_value_t = DEFAULT_BUDGET_BYTES)]
+        budget: usize,
+        #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
+        judge: JudgeKind,
+        /// Also print every prune and refine, with the raw choice.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -104,7 +133,65 @@ fn main() -> ExitCode {
                 ExitCode::from(3)
             }
         },
+        Commands::Search {
+            proposition,
+            repo,
+            budget,
+            judge,
+            full,
+        } => match search_cmd(&proposition, &repo, budget, judge, full) {
+            Ok(code) => ExitCode::from(code as u8),
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::from(3)
+            }
+        },
     }
+}
+
+fn search_cmd(
+    proposition: &str,
+    repo: &Path,
+    budget: usize,
+    judge: JudgeKind,
+    full: bool,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let mut universe = Filesystem::at_root(repo)?;
+    let searched = match judge {
+        JudgeKind::Heuristic => {
+            let mut oracle = HeuristicOracle::new(repo, proposition);
+            search(&mut universe, &mut oracle, proposition, budget)
+        }
+        JudgeKind::Jev => {
+            let mut oracle = JevOracle::from_env()?;
+            search(&mut universe, &mut oracle, proposition, budget)
+        }
+    };
+    match searched {
+        Ok(outcome) => {
+            present_search(&outcome, full);
+            Ok(0)
+        }
+        Err(err) => {
+            present_search(err.outcome(), full);
+            eprintln!("{err}");
+            Ok(3)
+        }
+    }
+}
+
+fn present_search(outcome: &autoground::search::SearchOutcome, full: bool) {
+    let findings = format_findings(&outcome.findings);
+    if !findings.is_empty() {
+        print!("{findings}");
+    }
+    if full {
+        let trace = format_trace(&outcome.trace);
+        if !trace.is_empty() {
+            print!("{trace}");
+        }
+    }
+    eprintln!("{}", format_usage(&outcome.usage));
 }
 
 fn verbalize_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {

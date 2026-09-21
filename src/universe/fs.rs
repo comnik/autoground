@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-use super::{collapse_ids, Universe, UniverseError};
+use super::{Universe, UniverseError};
 
 /// Gitignored paths, `.git` / `.gitignore`, plus the model file when it lives
 /// inside the repo.
@@ -188,6 +188,23 @@ impl Filesystem {
         })
     }
 
+    /// Children of the repo root. Search starts here; it does not list every leaf.
+    pub fn at_root(root: impl Into<PathBuf>) -> Result<Self, UniverseError> {
+        let root = root.into();
+        let filter = ListingFilter::from_repo(&root);
+        let mut objects: Vec<String> = list_entries(&root, "", &filter)?
+            .into_iter()
+            .map(|entry| entry.rel_path)
+            .collect();
+        objects.sort();
+        Ok(Self {
+            root,
+            filter,
+            objects,
+            samples: Vec::new(),
+        })
+    }
+
     pub fn samples(&self) -> &[String] {
         &self.samples
     }
@@ -350,6 +367,10 @@ impl Universe for Filesystem {
             .collect())
     }
 
+    fn is_leaf(&self, id: &str) -> Result<bool, UniverseError> {
+        Ok(!self.lookup(id)?.is_dir)
+    }
+
     fn estimate(&self) -> Result<usize, UniverseError> {
         self.estimate_blocks(&self.view_ids())
     }
@@ -370,9 +391,24 @@ impl Universe for Filesystem {
         Ok(blocks.join("\n\n"))
     }
 
-    fn collapse(&mut self) {
-        self.objects = collapse_ids(&self.objects, parent_id);
-        self.samples.clear();
+    fn render_capped(&self, id: &str, budget: usize) -> Result<String, UniverseError> {
+        let rendered = self.render_one(id)?;
+        if rendered.len() <= budget || !self.is_leaf(id)? {
+            return Ok(rendered);
+        }
+        let header = leaf_header(id);
+        let marker_len = "\n…\n".len();
+        let body_budget = budget
+            .saturating_sub(header.len())
+            .saturating_sub(marker_len);
+        match read_trimmed(&self.root, id, body_budget.max(1)) {
+            Ok((body, _)) => Ok(render_leaf(id, &LeafBody::Text(body))),
+            Err(_) => Ok(rendered),
+        }
+    }
+
+    fn samples(&self) -> &[String] {
+        &self.samples
     }
 
     fn sample(&mut self, extra_budget: usize) -> Result<(), UniverseError> {
@@ -557,10 +593,14 @@ mod tests {
         assert!(!text.contains("==="), "{text}");
     }
 
+    fn top_dirs(fs: &mut Filesystem) {
+        fs.set(vec!["backend".into(), "decoy".into(), "frontend".into()])
+            .unwrap();
+    }
+
     #[test]
-    fn collapse_then_root() {
-        let mut fs = Filesystem::open("examples/toy-layered").unwrap();
-        fs.collapse();
+    fn at_root_opens_on_children() {
+        let fs = Filesystem::at_root("examples/toy-layered").unwrap();
         assert_eq!(
             fs.objects(),
             &[
@@ -569,19 +609,15 @@ mod tests {
                 "frontend".to_string()
             ]
         );
-        fs.collapse();
-        assert_eq!(fs.objects(), &["".to_string()]);
-        fs.collapse();
-        assert_eq!(fs.objects(), &["".to_string()]);
     }
 
     #[test]
-    fn collapsed_view_is_smaller_than_leaves() {
+    fn directory_view_is_smaller_than_leaves() {
         let mut fs = Filesystem::open("examples/toy-layered").unwrap();
         let leaf_est = fs.estimate().unwrap();
         let leaf_size = fs.size().unwrap();
         assert_eq!(leaf_size, fs.render().unwrap().len());
-        fs.collapse();
+        top_dirs(&mut fs);
         let dir_est = fs.estimate().unwrap();
         let dir_size = fs.size().unwrap();
         assert_eq!(dir_size, fs.render().unwrap().len());
@@ -596,7 +632,7 @@ mod tests {
     #[test]
     fn sample_adds_context_not_candidates() {
         let mut fs = Filesystem::open("examples/toy-layered").unwrap();
-        fs.collapse();
+        top_dirs(&mut fs);
         let dirs = fs.objects().to_vec();
         fs.sample(4096).unwrap();
         assert_eq!(fs.objects(), dirs);
@@ -614,7 +650,7 @@ mod tests {
     #[test]
     fn sample_zero_budget_is_noop() {
         let mut fs = Filesystem::open("examples/toy-layered").unwrap();
-        fs.collapse();
+        top_dirs(&mut fs);
         fs.sample(0).unwrap();
         assert!(fs.samples().is_empty());
         assert!(!fs.render().unwrap().contains("==="));
@@ -623,7 +659,7 @@ mod tests {
     #[test]
     fn remove_and_insert_dir() {
         let mut fs = Filesystem::open("examples/toy-layered").unwrap();
-        fs.collapse();
+        top_dirs(&mut fs);
         fs.remove("decoy");
         assert_eq!(
             fs.objects(),
@@ -646,7 +682,7 @@ mod tests {
     #[test]
     fn set_replaces_view_and_drops_samples() {
         let mut fs = Filesystem::open("examples/toy-layered").unwrap();
-        fs.collapse();
+        top_dirs(&mut fs);
         fs.sample(4096).unwrap();
         assert!(!fs.samples().is_empty());
         fs.set(vec!["frontend/app.py".into()]).unwrap();

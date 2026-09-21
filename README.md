@@ -98,59 +98,42 @@ relevant context windows, followed by a map-reduce-like evaluation on all of tho
 
 #### Search
 
-To understand the motivation behind the search algorithm, it is instructive to consider an
-extreme case: if the full universe fits in a single context window, then evaluating a single
-proposition should require only a single call to the oracle. For a small codebase, that
-would mean handing the oracle all files concatenated together as context. Our overall cost
-and latency is determined by the number of oracle calls we make, so any algorithm we come up
-with should at least achieve this lower bound.
+Search walks the universe coarse to fine and judges each database in the call that selects
+it. The cost of a run is the number of oracle calls, so two bounds matter. If the children of
+the root fit in one window, that frontier is one call: a small repository is not walked
+directory by directory. If a directory listing fits and the bodies under it do not, the
+directory can be dropped before any body is opened.
 
-Another special case to consider is one where all non-leaf databases fit in context, but the
-leaves don't. In that case, the search procedure should be able to prune at the highest
-level of detail. For a codebase, this would mean pruning the set of all file paths,
-regardless of where in the directory they sit.
+1. The frontier starts as the children of the root. The root is not a target.
+2. Render the frontier at native grain: a directory as its listing, a file as its path and
+   body. Split the frontier into chunks that fit. Trim a single oversized file. Replace a
+   single oversized listing with its children.
+3. Spend leftover budget on samples of the next level. Samples are context, not targets.
+4. One Choice per target, sharing that rendered state.
+   - A directory is $\lbrace \text{prune} \mid \text{refine} \mid \text{true} \mid \text{false} \rbrace$.
+     `true` and `false` mean the current view settles the proposition — the presence of a
+     subdirectory is enough for "the codebase has a frontend". There is no `unknown` for a
+     directory. `refine` means the view is missing something required to decide.
+   - A file is $\lbrace \text{true} \mid \text{false} \mid \text{unknown} \rbrace$. The body is
+     the whole leaf, so this call is the evaluation. When those bodies fit in the frontier's
+     budget they are judged in that same call, and a later `refine` does not fetch them again.
+5. Record every directory judgement and every file judgement. Step into the children of each
+   `refine`.
 
-This suggests a divide and conquer approach where we...
+`prune` below the confidence bar is treated as `refine`. `true` or `false` below the bar is
+`refine` on a directory and `unknown` on a file.
 
-1. Start with all databases as candidates and the target proposition $p$.
-2. Reduce the level of detail until the candidate set fits in context.
-3. Fill up whatever space is left with samples from the next higher level.
-3. Ask the oracle to classify each candidate pair $(\Gamma, p)$ into
-   ${\lbrace \text{prune} \mid \text{explore} \mid \text{candidate} \rbrace}$. Remove the $\text{prune}$'s from
-   the candidate set.
-4. Recursively start a new search with the $\text{explore}$'s as seed candidates. Add the
-   results to the global candidate set.
+The universe has no collapse operation. Lifting every object to its parent mixes depths on an
+unbalanced tree, and the bounds above do not need it. Search refines by stepping to children.
 
-This leaves us with a final set of (leaf or non-leaf!) candidate databases. A non-leaf
-database directly identified by the oracle as a candidate is not unusual. In the codebase
-example, it could indicate that the mere presence of a sub-directory can already support or
-contradict the user's proposition.
-
-If the model is smart enough, then it should be a reasonable assumption that for two
-propositions
-
-$$
-\forall{p_1, p_2}: (p_1 \implies p_2) \implies  \text{Search}(\mathbf{U}, p_1) \subset
-\text{Search}(\mathbf{U}, p_2)
-$$
-
-Once we start evaluating more complex formulas, this could be exploited to eliminate
-redundant searches or fold multiple searches into a single one.
-
-Deterministic search strategies like CodeQL, (sem-)grep, and others can be integrated as a
-built-in library, that the oracle can choose from.
+Deterministic strategies (CodeQL, grep) can later propose a frontier. They are not part of
+this walk.
 
 #### Map + Reduce
 
-With a set of candidate databases $\lbrace \Gamma_1,...,\Gamma_n \rbrace$ in hand, all we
-have to do is to map the original evaluation
-
-$$
-\mathbf{\Gamma_i}(p) := \Omega((\mathbf{\Gamma_i}, p), \lbrace \text{true} \mid \text{false}
-\mid \text{unknown} \rbrace)
-$$
-
-And then reduce the truth values as follows
+Search already records a judgement for every database it accepts. A directory is `true` or
+`false` from its listing. A file is `true`, `false`, or `unknown` from its body. What remains
+is to reduce those judgements:
 
 $$
 \text{reduce}(v_1, v_2) = \begin{cases}
@@ -177,18 +160,18 @@ TBD verbalization is how we go from symbolic atoms to unstructured propositions.
 
 ### Milestones
 
-- [ ] `autoground search "<arbitrary verbalized proposition>"`
+- [x] `autoground search "<arbitrary verbalized proposition>"`
 - [ ] `autoground eval "<arbitrary verbalized proposition>"`
 - [ ] `autoground plan xyz.ag`: demonstrate the top-down demand transform + verbalization
 
 ### Interfaces
 
-**Universe**: a refinable view over the universe.
+**Universe**: a view over the universe.
 - estimate / compute the size of the current view of the universe (e.g. total size of all reachable files from the repo root)
 - rendering the current view (e.g. rendering the current set of paths as a tree, concatenating files with header information, things like that)
-- collapsing the current view to a lower level of detail (e.g. replace all objects in the current view with their immediate parent directory)
 - sampling from the next level of detail to provide additional context
 - methods to add and remove objects from the view explicitly, based on oracle classification
+- whether an object is a leaf (path plus contents) or a listing
 
 As the README hopefully makes clear, the universe abstraction would treat files and
 directories as the same thing — a "database". Files would be the leaf databases in the tree.
@@ -200,7 +183,7 @@ would render its listing.
 - wait for a ticket when the label is required; pending questions that share a `state` go in one request, independent states overlap
 - report usage on this instance so far: spend, input tokens, request count, latency percentiles, mean batch size (questions per request / max questions per request), and mean fill factor (input tokens / the 32k state-side cap)
 
-The oracle hashes the `state` it is given (a Universe render, a listing tree, a file body). Universe itself has no digest method. Search will use this same interface later; the 3VL engine does not hold an oracle.
+The oracle hashes the `state` it is given (a Universe render, a listing tree, a file body). Universe itself has no digest method. Search uses this interface. The 3VL engine does not hold an oracle.
 
 ### Notes
 
