@@ -5,6 +5,7 @@ pub mod navigator;
 pub mod proposers;
 pub mod report;
 pub mod syntax;
+pub mod universe;
 
 pub use core::{compile, CompileError, Compiled};
 pub use edb::Store;

@@ -66,7 +66,7 @@ overall universe can be large, each database is assumed to be serializable, and 
 serializable representation to fit into a single context window, i.e. $|\Gamma_i|<C$.
 
 Additionally, we assume that the databases are arranged in a tree. This hierarchy lets us
-consume the univser at different *levels of detail*. Databases higher up in the tree
+consume the universe at different *levels of detail*. Databases higher up in the tree
 abstract over their subtrees.
 
 Concretely, the particular kind of universe we care about for now is a codebase — a set of
@@ -162,7 +162,7 @@ $$
 $$
 
 Escalations result in a final call to the oracle, classifying the conflicting judgements
-into ${\{\text{true},\text{false},\text{contradiction}\}}$.
+into $\lbrace \text{true} \mid \text{false} \mid \text{contradiction} \rbrace$.
 
 ### Symbolic Evaluation
 
@@ -173,7 +173,31 @@ TBD
 TBD verbalization is how we go from symbolic atoms to unstructured propositions.
 
 
-## Implementation Notes
+## Implementation
+
+### Milestones
+
+- [ ] `autoground search "<arbitrary verbalized proposition>"`
+- [ ] `autoground eval "<arbitrary verbalized proposition>"`
+- [ ] `autoground plan xyz.ag`: demonstrate the top-down demand transform + verbalization
+
+### Interfaces
+
+**Universe**: a refinable view over the universe.
+- estimate / compute the size of the current view of the universe (e.g. total size of all reachable files from the repo root)
+- rendering the current view (e.g. rendering the current set of paths as a tree, concatenating files with header information, things like that)
+- collapsing the current view to a lower level of detail (e.g. replace all objects in the current view with their immediate parent directory)
+- sampling from the next level of detail to provide additional context
+- methods to add and remove objects from the view explicitly, based on oracle classification
+
+As the README hopefully makes clear, the universe abstraction would treat files and
+directories as the same thing — a "database". Files would be the leaf databases in the tree.
+Rendering a file would render at least the full path + its contents. Rendering a directory
+would render its listing.
+
+**Oracle**: a classification oracle. Basically a tailored wrapper around the jev API.
+
+### Notes
 
 No baked-in assumptions about schema.
 
