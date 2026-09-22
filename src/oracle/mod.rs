@@ -7,12 +7,14 @@
 //! JSON; Universe does not grow a digest method.
 
 pub mod jev;
+mod mock;
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
 pub use jev::{JevOracle, Transport, UreqTransport};
+pub use mock::HeuristicOracle;
 
 /// One Choice to evaluate against a shared System One `state`.
 #[derive(Debug, Clone, PartialEq)]

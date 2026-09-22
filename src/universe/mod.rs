@@ -36,6 +36,12 @@ pub trait Universe {
     /// Render one object. A leaf larger than `budget` is head-and-tail trimmed.
     fn render_capped(&self, id: &str, budget: usize) -> Result<String, UniverseError>;
 
+    /// Body of a leaf, or the listing of a directory.
+    ///
+    /// A leaf longer than `budget` bytes is head-and-tail trimmed so the
+    /// returned string fits. `usize::MAX` reads the whole body.
+    fn read(&self, id: &str, budget: usize) -> Result<String, UniverseError>;
+
     /// Fill leftover budget with children of current objects (one level).
     ///
     /// Samples are extra render context. A sampled leaf is already in the

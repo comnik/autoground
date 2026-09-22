@@ -281,7 +281,7 @@ fn paint_entry(
         Applied::True => Some(Color::Green),
         Applied::False => Some(Color::Red),
         Applied::Prune => Some(Color::DarkGrey),
-        Applied::Refine | Applied::Unknown => None,
+        Applied::Keep | Applied::Refine | Applied::Unknown => None,
     };
     if selected {
         queue!(out, SetAttribute(Attribute::Reverse))?;
@@ -326,14 +326,19 @@ fn right_row(lines: &[String], scroll: usize, row: usize) -> String {
 }
 
 fn context_text(step: &SearchStep) -> String {
-    if let Some(view) = step
+    if let Some(state) = step
         .exchange
         .as_ref()
         .and_then(|ex| ex.request.get("state"))
-        .and_then(|state| state.get("view"))
-        .and_then(|view| view.as_str())
     {
-        return view.to_string();
+        if let Some(view) = state.get("view").and_then(|view| view.as_str()) {
+            return view.to_string();
+        }
+        if state.as_object().is_some() {
+            if let Ok(pretty) = serde_json::to_string_pretty(state) {
+                return pretty;
+            }
+        }
     }
     let mut out = String::new();
     for obj in &step.view {
@@ -359,12 +364,10 @@ fn context_anchor(step: &SearchStep, sel: usize, lines: &[String]) -> usize {
     let Some(decision) = step.classifications.get(sel) else {
         return 0;
     };
-    let needle = if decision.leaf {
-        format!("=== {} ===", decision.id)
-    } else if decision.id.is_empty() {
+    let needle = if decision.id.is_empty() {
         "/".to_string()
     } else {
-        format!("{}/", decision.id)
+        decision.id.clone()
     };
     lines
         .iter()

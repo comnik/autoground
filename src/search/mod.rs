@@ -1,11 +1,15 @@
-//! Coarse-to-fine search over a [`Universe`], judged by an [`Oracle`].
+//! Filter, then batched map, then a deterministic reduce over a [`Universe`].
 //!
-//! The frontier starts at the children of the root. A directory is
-//! `prune`, `refine`, `true`, or `false` — a listing can settle the
-//! proposition on its own. A file is `true`, `false`, or `unknown`, and
-//! that choice is the judgement.
+//! The filter sends directory paths and child names, never file bodies.
+//! A directory pruned at [`SUPPORT`](crate::navigator::confidence::SUPPORT)
+//! or above drops its subtree. Every file that remains is a candidate,
+//! including files that sit directly at the root. The root itself is the
+//! search scope: it is listed and never asked.
+//!
+//! The map packs those bodies into one JSON object per batch,
+//! `{"<path>": "<content>"}`, and asks `true` / `false` / `unknown` per
+//! file. Reduce is [`trace::verdict_of`].
 
-mod heuristic;
 mod tui;
 
 pub mod trace;
@@ -16,16 +20,15 @@ use std::collections::HashSet;
 use std::fmt;
 
 use serde::Serialize;
-use serde_json::{json, Value as Json};
+use serde_json::{Map, Value as Json};
 
 use crate::eval::Value;
 use crate::navigator::confidence::SUPPORT;
+use crate::oracle::jev::QUESTION_BUDGET;
 use crate::oracle::{Classification, Oracle, OracleError, Ticket, Usage};
 use crate::universe::{Universe, UniverseError};
 
 use trace::{ExchangeRecord, SearchStep, ViewObject};
-
-pub use heuristic::HeuristicOracle;
 
 /// Default render budget. About 12k tokens at 4 bytes each, under Jev's
 /// 32k state-side cap so quoting and the question text still fit.
@@ -39,7 +42,7 @@ pub enum Finding {
         value: Value,
         confidence: f64,
     },
-    /// Leaf judged from its body in the same call that opened it.
+    /// Leaf judged from its body.
     File {
         id: String,
         value: Value,
@@ -51,6 +54,7 @@ pub enum Finding {
 #[serde(rename_all = "lowercase")]
 pub enum Applied {
     Prune,
+    Keep,
     Refine,
     True,
     False,
@@ -61,6 +65,7 @@ impl Applied {
     fn as_str(self) -> &'static str {
         match self {
             Applied::Prune => "prune",
+            Applied::Keep => "keep",
             Applied::Refine => "refine",
             Applied::True => "true",
             Applied::False => "false",
@@ -73,7 +78,7 @@ impl Applied {
             Applied::True => Some(Value::True),
             Applied::False => Some(Value::False),
             Applied::Unknown => Some(Value::Unknown),
-            Applied::Prune | Applied::Refine => None,
+            Applied::Prune | Applied::Keep | Applied::Refine => None,
         }
     }
 }
@@ -152,9 +157,9 @@ pub fn search<U: Universe, O: Oracle>(
     let mut findings = Vec::new();
     let mut trace = Vec::new();
     let mut steps = Vec::new();
-    let mut asked = HashSet::new();
-    let root_children = match universe.children("") {
-        Ok(children) => children,
+
+    let directories = match directories_under(universe, "") {
+        Ok(directories) => directories,
         Err(error) => {
             return Err(SearchError::Universe {
                 outcome: SearchOutcome::empty(oracle.usage()),
@@ -162,130 +167,100 @@ pub fn search<U: Universe, O: Oracle>(
             });
         }
     };
-    let mut frontier = vec![root_children];
-    while frontier.iter().any(|group| !group.is_empty()) {
-        let groups = std::mem::take(&mut frontier);
-        let mut batch = Vec::new();
-        for group in groups {
-            if group.is_empty() {
-                continue;
-            }
-            let chunks = match pack(universe, &group, budget) {
-                Ok(chunks) => chunks,
-                Err(error) => {
-                    return Err(SearchError::Universe {
-                        outcome: outcome_now(&findings, &trace, &steps, oracle),
-                        error,
-                    });
-                }
-            };
-            for chunk in chunks {
-                if let Err(error) = enqueue(
-                    universe,
-                    oracle,
-                    proposition,
-                    budget,
-                    chunk,
-                    &mut steps,
-                    &mut batch,
-                ) {
-                    return Err(SearchError::Universe {
-                        outcome: outcome_now(&findings, &trace, &steps, oracle),
-                        error,
-                    });
-                }
-            }
+    let filter_chunks = match pack_directories(universe, &directories, budget) {
+        Ok(chunks) => chunks,
+        Err(error) => {
+            return Err(SearchError::Universe {
+                outcome: outcome_now(&findings, &trace, &steps, oracle),
+                error,
+            });
         }
-        for pending in &batch {
-            asked.insert(pending.id.clone());
+    };
+    let mut filter_groups = Vec::new();
+    for chunk in filter_chunks {
+        let state = match directory_state(universe, &chunk) {
+            Ok(state) => state,
+            Err(error) => {
+                return Err(SearchError::Universe {
+                    outcome: outcome_now(&findings, &trace, &steps, oracle),
+                    error,
+                });
+            }
+        };
+        filter_groups.push(Group {
+            state,
+            ids: chunk,
+            leaf: false,
+        });
+    }
+    let filter = ask(
+        universe,
+        oracle,
+        proposition,
+        filter_groups,
+        &findings,
+        &mut trace,
+        &mut steps,
+    )?;
+    let pruned = pruned_directories(universe, &filter);
+
+    let files = match candidate_files(universe, &pruned) {
+        Ok(files) => files,
+        Err(error) => {
+            return Err(SearchError::Universe {
+                outcome: outcome_now(&findings, &trace, &steps, oracle),
+                error,
+            });
         }
-        let mut next = Vec::new();
-        let mut settled = HashSet::new();
-        let mut files = Vec::new();
-        for pending in batch {
-            let answer = match oracle.wait(pending.ticket) {
-                Ok(answer) => answer,
-                Err(error) => {
-                    return Err(SearchError::Oracle {
-                        outcome: outcome_now(&findings, &trace, &steps, oracle),
-                        error,
-                    });
-                }
-            };
-            let applied = apply(pending.leaf, &answer.choice, answer.confidence);
-            let decision = Decision {
-                id: pending.id.clone(),
-                leaf: pending.leaf,
-                raw: answer.choice.clone(),
-                applied,
-                confidence: answer.confidence,
-            };
-            trace.push(decision.clone());
-            let step = &mut steps[pending.step];
-            step.classifications.push(decision);
-            if step.exchange.is_none() {
-                if let Some(exchange) = &answer.exchange {
-                    step.exchange = Some(ExchangeRecord::from_oracle(exchange));
-                }
-            }
-            if pending.leaf {
-                files.push((pending.id, answer.confidence, applied));
-                continue;
-            }
-            match applied {
-                Applied::Prune => {
-                    settled.insert(pending.id);
-                }
-                Applied::True | Applied::False => {
-                    settled.insert(pending.id.clone());
-                    if let Some(value) = applied.value() {
-                        push_finding(&mut findings, false, pending.id, value, answer.confidence);
-                    }
-                }
-                Applied::Refine => {
-                    let kids = match universe.children(&pending.id) {
-                        Ok(kids) => kids,
-                        Err(error) => {
-                            return Err(SearchError::Universe {
-                                outcome: outcome_now(&findings, &trace, &steps, oracle),
-                                error,
-                            });
-                        }
-                    };
-                    let mut follow = Vec::new();
-                    for kid in kids {
-                        if asked.contains(&kid) {
-                            continue;
-                        }
-                        match unasked_leaf(universe, &kid, &asked) {
-                            Ok(true) => follow.push(kid),
-                            Ok(false) => {}
-                            Err(error) => {
-                                return Err(SearchError::Universe {
-                                    outcome: outcome_now(&findings, &trace, &steps, oracle),
-                                    error,
-                                });
-                            }
-                        }
-                    }
-                    if !follow.is_empty() {
-                        next.push(follow);
-                    }
-                }
-                Applied::Unknown => {}
-            }
+    };
+    let batches = match pack_files(universe, &files, budget) {
+        Ok(batches) => batches,
+        Err(error) => {
+            return Err(SearchError::Universe {
+                outcome: outcome_now(&findings, &trace, &steps, oracle),
+                error,
+            });
         }
-        for (id, confidence, applied) in files {
-            if under_settled(universe, &id, &settled) {
-                continue;
-            }
-            if let Some(value) = applied.value() {
-                push_finding(&mut findings, true, id, value, confidence);
-            }
+    };
+    let mut map_groups = Vec::new();
+    for batch in batches {
+        let mut ids = Vec::with_capacity(batch.len());
+        let mut map = Map::new();
+        for file in &batch {
+            ids.push(file.id.clone());
+            map.insert(file.id.clone(), Json::String(file.content.clone()));
         }
-        frontier = next;
+        map_groups.push(Group {
+            state: Json::Object(map),
+            ids,
+            leaf: true,
+        });
+    }
+    let judged = ask(
+        universe,
+        oracle,
+        proposition,
+        map_groups,
+        &findings,
+        &mut trace,
+        &mut steps,
+    )?;
+    for decision in judged {
+        if let Some(value) = decision.applied.value() {
+            findings.push(Finding::File {
+                id: decision.id,
+                value,
+                confidence: decision.confidence,
+            });
+        }
     }
     Ok(outcome_now(&findings, &trace, &steps, oracle))
+}
+
+struct Group {
+    state: Json,
+    ids: Vec<String>,
+    leaf: bool,
 }
 
 struct Pending {
@@ -295,9 +270,82 @@ struct Pending {
     step: usize,
 }
 
-enum Chunk {
-    Group(Vec<String>),
-    Trimmed(String),
+#[derive(Clone)]
+struct Body {
+    id: String,
+    content: String,
+}
+
+fn ask<U: Universe, O: Oracle>(
+    universe: &U,
+    oracle: &mut O,
+    proposition: &str,
+    groups: Vec<Group>,
+    findings: &[Finding],
+    trace: &mut Vec<Decision>,
+    steps: &mut Vec<SearchStep>,
+) -> Result<Vec<Decision>, SearchError> {
+    let mut batch = Vec::new();
+    for group in groups {
+        let view = match capture(universe, &group.ids, group.leaf) {
+            Ok(view) => view,
+            Err(error) => {
+                return Err(SearchError::Universe {
+                    outcome: outcome_now(findings, trace, steps, oracle),
+                    error,
+                });
+            }
+        };
+        let step = steps.len();
+        steps.push(SearchStep {
+            view,
+            classifications: Vec::new(),
+            exchange: None,
+        });
+        for id in group.ids {
+            let ticket = oracle.submit(question(&group.state, &id, group.leaf, proposition));
+            batch.push(Pending {
+                ticket,
+                id,
+                leaf: group.leaf,
+                step,
+            });
+        }
+    }
+    let mut decisions = Vec::new();
+    for pending in batch {
+        let answer = match oracle.wait(pending.ticket) {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Err(SearchError::Oracle {
+                    outcome: outcome_now(findings, trace, steps, oracle),
+                    error,
+                });
+            }
+        };
+        let applied = if pending.leaf {
+            apply_file(&answer.choice, answer.confidence)
+        } else {
+            apply_directory(&answer.choice, answer.confidence)
+        };
+        let decision = Decision {
+            id: pending.id,
+            leaf: pending.leaf,
+            raw: answer.choice,
+            applied,
+            confidence: answer.confidence,
+        };
+        trace.push(decision.clone());
+        let step = &mut steps[pending.step];
+        step.classifications.push(decision.clone());
+        if step.exchange.is_none() {
+            if let Some(exchange) = &answer.exchange {
+                step.exchange = Some(ExchangeRecord::from_oracle(exchange));
+            }
+        }
+        decisions.push(decision);
+    }
+    Ok(decisions)
 }
 
 fn outcome_now<O: Oracle>(
@@ -314,92 +362,242 @@ fn outcome_now<O: Oracle>(
     }
 }
 
-fn push_finding(
-    findings: &mut Vec<Finding>,
-    leaf: bool,
-    id: String,
-    value: Value,
-    confidence: f64,
-) {
-    if leaf {
-        findings.push(Finding::File {
-            id,
-            value,
-            confidence,
-        });
-    } else if value != Value::Unknown {
-        findings.push(Finding::Directory {
-            id,
-            value,
-            confidence,
-        });
+fn directories_under<U: Universe>(universe: &U, root: &str) -> Result<Vec<String>, UniverseError> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_string()];
+    while let Some(dir) = stack.pop() {
+        for child in universe.children(&dir)? {
+            if universe.is_leaf(&child)? {
+                continue;
+            }
+            out.push(child.clone());
+            stack.push(child);
+        }
     }
+    out.sort();
+    Ok(out)
 }
 
-fn enqueue<U: Universe, O: Oracle>(
-    universe: &mut U,
-    oracle: &mut O,
-    proposition: &str,
-    budget: usize,
-    chunk: Chunk,
-    steps: &mut Vec<SearchStep>,
-    batch: &mut Vec<Pending>,
-) -> Result<(), UniverseError> {
-    let (state, targets, trimmed) = match chunk {
-        Chunk::Group(ids) => {
-            widen(universe, &ids, budget)?;
-            let view = universe.render()?;
-            let mut question_ids = ids;
-            question_ids.extend(extra_leaves(universe, &question_ids)?);
-            (json!({ "view": view }), question_ids, false)
-        }
-        Chunk::Trimmed(id) => {
-            let view = universe.render_capped(&id, budget)?;
-            (json!({ "view": view }), vec![id], true)
-        }
-    };
-    let view = capture_view(universe, &targets, trimmed)?;
-    let step = steps.len();
-    steps.push(SearchStep {
-        view,
-        classifications: Vec::new(),
-        exchange: None,
-    });
-    for id in targets {
-        let leaf = trimmed || universe.is_leaf(&id)?;
-        let ticket = oracle.submit(question(&state, &id, leaf, proposition));
-        batch.push(Pending {
-            ticket,
-            id,
-            leaf,
-            step,
-        });
-    }
-    Ok(())
-}
-
-fn capture_view<U: Universe>(
+fn candidate_files<U: Universe>(
     universe: &U,
-    targets: &[String],
-    trimmed: bool,
-) -> Result<Vec<ViewObject>, UniverseError> {
-    let ids = if trimmed {
-        targets.to_vec()
-    } else {
-        let mut ids: Vec<String> = universe.objects().to_vec();
-        for sample in universe.samples() {
-            if !ids.iter().any(|id| id == sample) {
-                ids.push(sample.clone());
+    pruned: &HashSet<String>,
+) -> Result<Vec<String>, UniverseError> {
+    let mut out = Vec::new();
+    let mut stack = vec![String::new()];
+    while let Some(dir) = stack.pop() {
+        if pruned.contains(&dir) {
+            continue;
+        }
+        for child in universe.children(&dir)? {
+            if universe.is_leaf(&child)? {
+                out.push(child);
+            } else if !pruned.contains(&child) {
+                stack.push(child);
             }
         }
-        ids
-    };
-    let mut view = Vec::with_capacity(ids.len());
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn pruned_directories<U: Universe>(universe: &U, decisions: &[Decision]) -> HashSet<String> {
+    let mut ids: Vec<&str> = decisions
+        .iter()
+        .filter(|decision| !decision.leaf)
+        .map(|decision| decision.id.as_str())
+        .collect();
+    ids.sort_by_key(|id| id.matches('/').count());
+    let mut pruned = HashSet::new();
     for id in ids {
-        let summary = universe.summary(&id)?;
+        let dropped = ancestor_pruned(universe, id, &pruned);
+        let decision = decisions.iter().find(|decision| decision.id == id);
+        if dropped || decision.is_some_and(|decision| decision.applied == Applied::Prune) {
+            pruned.insert(id.to_string());
+        }
+    }
+    pruned
+}
+
+fn ancestor_pruned<U: Universe>(universe: &U, id: &str, pruned: &HashSet<String>) -> bool {
+    let mut current = universe.parent(id);
+    while let Some(parent) = current {
+        if pruned.contains(&parent) {
+            return true;
+        }
+        current = universe.parent(&parent);
+    }
+    false
+}
+
+fn pack_directories<U: Universe>(
+    universe: &U,
+    ids: &[String],
+    budget: usize,
+) -> Result<Vec<Vec<String>>, UniverseError> {
+    pack_by(ids, budget, |chunk| {
+        directory_state(universe, chunk).map(|state| json_len(&state))
+    })
+}
+
+fn directory_state<U: Universe>(universe: &U, ids: &[String]) -> Result<Json, UniverseError> {
+    let mut keys = vec![String::new()];
+    keys.extend(ids.iter().cloned());
+    keys.sort();
+    keys.dedup();
+    let mut map = Map::new();
+    for id in keys {
+        let mut names = Vec::new();
+        for child in universe.children(&id)? {
+            let name = child.rsplit('/').next().unwrap_or(&child);
+            if universe.is_leaf(&child)? {
+                names.push(Json::String(name.to_string()));
+            } else {
+                names.push(Json::String(format!("{name}/")));
+            }
+        }
+        map.insert(id, Json::Array(names));
+    }
+    Ok(Json::Object(map))
+}
+
+fn pack_files<U: Universe>(
+    universe: &U,
+    ids: &[String],
+    budget: usize,
+) -> Result<Vec<Vec<Body>>, UniverseError> {
+    let mut batches = Vec::new();
+    let mut current: Vec<Body> = Vec::new();
+    for id in ids {
+        let full = universe.read(id, usize::MAX)?;
+        if json_len(&body_state(id, &full)) > budget {
+            if !current.is_empty() {
+                batches.push(std::mem::take(&mut current));
+            }
+            batches.push(vec![Body {
+                id: id.clone(),
+                content: shrink_body(universe, id, budget)?,
+            }]);
+            continue;
+        }
+        let mut trial = current.clone();
+        trial.push(Body {
+            id: id.clone(),
+            content: full.clone(),
+        });
+        let too_wide = trial.len() > QUESTION_BUDGET || json_len(&bodies_state(&trial)) > budget;
+        if current.is_empty() || !too_wide {
+            current = trial;
+        } else {
+            batches.push(std::mem::take(&mut current));
+            current.push(Body {
+                id: id.clone(),
+                content: full,
+            });
+        }
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    Ok(batches)
+}
+
+fn shrink_body<U: Universe>(
+    universe: &U,
+    id: &str,
+    budget: usize,
+) -> Result<String, UniverseError> {
+    let full = universe.read(id, usize::MAX)?;
+    if json_len(&body_state(id, &full)) <= budget {
+        return Ok(full);
+    }
+    let mut best = String::new();
+    let mut lo = 0usize;
+    let mut hi = full.len();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let trimmed = universe.read(id, mid.max(1))?;
+        if json_len(&body_state(id, &trimmed)) <= budget {
+            best = trimmed;
+            lo = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(best)
+}
+
+fn body_state(id: &str, content: &str) -> Json {
+    bodies_state(&[Body {
+        id: id.to_string(),
+        content: content.to_string(),
+    }])
+}
+
+fn bodies_state(files: &[Body]) -> Json {
+    let mut map = Map::new();
+    for file in files {
+        map.insert(file.id.clone(), Json::String(file.content.clone()));
+    }
+    Json::Object(map)
+}
+
+fn json_len(value: &Json) -> usize {
+    value.to_string().len()
+}
+
+fn pack_by<F>(ids: &[String], budget: usize, mut cost: F) -> Result<Vec<Vec<String>>, UniverseError>
+where
+    F: FnMut(&[String]) -> Result<usize, UniverseError>,
+{
+    let mut chunks = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for id in ids {
+        if cost(std::slice::from_ref(id))? > budget {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            chunks.push(vec![id.clone()]);
+            continue;
+        }
+        let mut trial = current.clone();
+        trial.push(id.clone());
+        let too_wide = trial.len() > QUESTION_BUDGET || cost(&trial)? > budget;
+        if current.is_empty() || !too_wide {
+            current = trial;
+        } else {
+            chunks.push(std::mem::take(&mut current));
+            current.push(id.clone());
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    Ok(chunks)
+}
+
+fn capture<U: Universe>(
+    universe: &U,
+    ids: &[String],
+    leaf: bool,
+) -> Result<Vec<ViewObject>, UniverseError> {
+    let mut view = Vec::new();
+    if !leaf {
+        let summary = universe.summary("")?;
         view.push(ViewObject {
-            target: targets.iter().any(|target| target == &id),
-            id,
+            target: false,
+            id: String::new(),
+            leaf: false,
+            bytes: summary.bytes,
+            listing: summary.listing,
+        });
+    }
+    for id in ids {
+        let summary = universe.summary(id)?;
+        view.push(ViewObject {
+            target: true,
+            id: id.clone(),
             leaf: summary.leaf,
             bytes: summary.bytes,
             listing: summary.listing,
@@ -408,176 +606,44 @@ fn capture_view<U: Universe>(
     Ok(view)
 }
 
-fn pack<U: Universe>(
-    universe: &mut U,
-    ids: &[String],
-    budget: usize,
-) -> Result<Vec<Chunk>, UniverseError> {
-    let mut chunks = Vec::new();
-    let mut current = Vec::new();
-    for id in ids {
-        let alone = estimate_ids(universe, std::slice::from_ref(id))?;
-        if alone > budget {
-            if !current.is_empty() {
-                chunks.push(Chunk::Group(std::mem::take(&mut current)));
-            }
-            if universe.is_leaf(id)? {
-                chunks.push(Chunk::Trimmed(id.clone()));
-            } else {
-                let kids = universe.children(id)?;
-                if kids.is_empty() {
-                    chunks.push(Chunk::Group(vec![id.clone()]));
-                } else {
-                    chunks.extend(pack(universe, &kids, budget)?);
-                }
-            }
-            continue;
-        }
-        let mut trial = current.clone();
-        trial.push(id.clone());
-        if current.is_empty() || estimate_ids(universe, &trial)? <= budget {
-            current = trial;
-        } else {
-            chunks.push(Chunk::Group(std::mem::take(&mut current)));
-            current.push(id.clone());
-        }
-    }
-    if !current.is_empty() {
-        chunks.push(Chunk::Group(current));
-    }
-    Ok(chunks)
-}
-
-/// When every leaf under `targets` fits with them, put those leaves in the
-/// view so their judgements share this state. Otherwise keep the targets and
-/// fill the leftover with samples.
-fn widen<U: Universe>(
-    universe: &mut U,
-    targets: &[String],
-    budget: usize,
-) -> Result<(), UniverseError> {
-    let mut widened = targets.to_vec();
-    for leaf in descendant_leaves(universe, targets)? {
-        if !widened.iter().any(|id| id == &leaf) {
-            widened.push(leaf);
-        }
-    }
-    if estimate_ids(universe, &widened)? <= budget {
-        return Ok(());
-    }
-    universe.set(targets.to_vec())?;
-    let base = universe.estimate()?;
-    universe.sample(budget.saturating_sub(base))?;
-    Ok(())
-}
-
-fn descendant_leaves<U: Universe>(
-    universe: &U,
-    ids: &[String],
-) -> Result<Vec<String>, UniverseError> {
-    let mut out = Vec::new();
-    let mut stack = ids.to_vec();
-    while let Some(id) = stack.pop() {
-        if universe.is_leaf(&id)? {
-            out.push(id);
-        } else {
-            stack.extend(universe.children(&id)?);
-        }
-    }
-    out.sort();
-    out.dedup();
-    Ok(out)
-}
-
-fn extra_leaves<U: Universe>(
-    universe: &U,
-    targets: &[String],
-) -> Result<Vec<String>, UniverseError> {
-    let mut extras = Vec::new();
-    for id in universe.objects().iter().chain(universe.samples()) {
-        if targets.iter().any(|target| target == id) {
-            continue;
-        }
-        if universe.is_leaf(id)? {
-            extras.push(id.clone());
-        }
-    }
-    extras.sort();
-    extras.dedup();
-    Ok(extras)
-}
-
-fn unasked_leaf<U: Universe>(
-    universe: &U,
-    id: &str,
-    asked: &HashSet<String>,
-) -> Result<bool, UniverseError> {
-    if universe.is_leaf(id)? {
-        return Ok(!asked.contains(id));
-    }
-    for child in universe.children(id)? {
-        if unasked_leaf(universe, &child, asked)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn under_settled<U: Universe>(universe: &U, id: &str, settled: &HashSet<String>) -> bool {
-    let mut current = universe.parent(id);
-    while let Some(parent) = current {
-        if settled.contains(&parent) {
-            return true;
-        }
-        current = universe.parent(&parent);
-    }
-    false
-}
-
-fn estimate_ids<U: Universe>(universe: &mut U, ids: &[String]) -> Result<usize, UniverseError> {
-    universe.set(ids.to_vec())?;
-    universe.estimate()
-}
-
-fn apply(leaf: bool, raw: &str, confidence: f64) -> Applied {
-    if leaf {
-        return match raw {
-            "true" if confidence >= SUPPORT => Applied::True,
-            "false" if confidence >= SUPPORT => Applied::False,
-            _ => Applied::Unknown,
-        };
-    }
+fn apply_file(raw: &str, confidence: f64) -> Applied {
     match raw {
-        "prune" if confidence >= SUPPORT => Applied::Prune,
         "true" if confidence >= SUPPORT => Applied::True,
         "false" if confidence >= SUPPORT => Applied::False,
-        _ => Applied::Refine,
+        _ => Applied::Unknown,
+    }
+}
+
+fn apply_directory(raw: &str, confidence: f64) -> Applied {
+    match raw {
+        "prune" if confidence >= SUPPORT => Applied::Prune,
+        _ => Applied::Keep,
     }
 }
 
 fn question(state: &Json, id: &str, leaf: bool, proposition: &str) -> Classification {
-    let kind = if leaf { "file" } else { "directory" };
-    let ask = if leaf {
-        "Judge whether this file's body supports the proposition, contradicts it, or does neither."
+    let (kind, ask, pairs): (&str, &str, &[(&str, &str)]) = if leaf {
+        (
+            "file",
+            "State maps each file path to its body.\nJudge whether this file's body supports the proposition, contradicts it, or does neither.",
+            &[
+                ("true", "The body supports the proposition."),
+                ("false", "The body contradicts the proposition."),
+                ("unknown", "The body does neither, or it is unclear."),
+            ],
+        )
     } else {
-        "Judge this directory from the whole view. True or false when it settles the proposition. Prune when nothing here bears on it. Refine only when the view is missing something required to decide."
-    };
-    let pairs: &[(&str, &str)] = if leaf {
-        &[
-            ("true", "The body supports the proposition."),
-            ("false", "The body contradicts the proposition."),
-            ("unknown", "The body does neither, or it is unclear."),
-        ]
-    } else {
-        &[
-            ("prune", "Nothing in this subtree bears on the proposition."),
-            (
-                "refine",
-                "The view is missing something required to decide.",
-            ),
-            ("true", "The view supports the proposition."),
-            ("false", "The view contradicts the proposition."),
-        ]
+        (
+            "directory",
+            "State maps each directory path to its child names. File bodies are not included.\nPrune this directory when nothing in its subtree bears on the proposition. Keep it otherwise.",
+            &[
+                ("prune", "Nothing in this subtree bears on the proposition."),
+                (
+                    "keep",
+                    "Something here might bear on the proposition.",
+                ),
+            ],
+        )
     };
     Classification {
         state: state.clone(),
@@ -589,7 +655,8 @@ fn question(state: &Json, id: &str, leaf: bool, proposition: &str) -> Classifica
     }
 }
 
-pub(crate) fn target_of(instructions: &str) -> &str {
+#[cfg(test)]
+fn target_of(instructions: &str) -> &str {
     instructions
         .lines()
         .find_map(|line| line.strip_prefix("target: "))
@@ -701,7 +768,6 @@ mod tests {
     use super::*;
     use crate::oracle::{Answer, Oracle, Ticket};
     use crate::universe::fs::Filesystem;
-    use crate::universe::Universe;
 
     struct Script {
         labels: HashMap<String, (String, f64)>,
@@ -818,13 +884,20 @@ mod tests {
             .collect()
     }
 
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("autoground-search-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
     #[test]
-    fn directory_judgements_share_one_state_and_do_not_open_files() {
+    fn filter_is_one_path_state_and_map_sends_bodies_by_path() {
         let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
         let mut oracle = Script::new(toy(&[
-            ("frontend", "true", 0.95),
-            ("backend", "false", 0.95),
-            ("decoy", "prune", 0.95),
+            ("frontend", "keep", 0.95),
+            ("frontend/app.py", "true", 0.95),
         ]));
         let outcome = search(
             &mut universe,
@@ -833,53 +906,43 @@ mod tests {
             DEFAULT_BUDGET_BYTES,
         )
         .unwrap();
-        assert_eq!(oracle.state_count(), 1);
-        assert_eq!(oracle.of_kind("file").len(), 5);
-        assert!(oracle.targets().contains(&"frontend/app.py"));
+        assert_eq!(oracle.state_count(), 2, "targets {:?}", oracle.targets());
+        assert_eq!(oracle.of_kind("directory").len(), 3);
+        assert_eq!(keys(oracle.of_kind("directory")[0]), vec!["keep", "prune"]);
+        let files = oracle.of_kind("file");
+        assert_eq!(files.len(), 2, "{:?}", oracle.targets());
+        assert_eq!(keys(files[0]), vec!["false", "true", "unknown"]);
+        assert!(!oracle.targets().contains(&""));
+        assert!(!oracle.targets().contains(&"backend/api.py"));
+        assert!(!oracle.targets().contains(&"decoy/noise.py"));
+
+        let filter = &oracle.of_kind("directory")[0].state;
+        assert!(filter.get("view").is_none());
         assert_eq!(
-            keys(oracle.of_kind("directory")[0]),
-            vec!["false", "prune", "refine", "true"]
-        );
-        assert_eq!(
-            outcome.findings,
-            vec![
-                Finding::Directory {
-                    id: "backend".into(),
-                    value: Value::False,
-                    confidence: 0.95,
-                },
-                Finding::Directory {
-                    id: "frontend".into(),
-                    value: Value::True,
-                    confidence: 0.95,
-                },
+            filter[""].as_array().unwrap(),
+            &vec![
+                serde_json::json!("backend/"),
+                serde_json::json!("decoy/"),
+                serde_json::json!("frontend/")
             ]
         );
-    }
-
-    #[test]
-    fn refine_judges_files_once_with_eval_criteria() {
-        let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let mut oracle = Script::new(toy(&[
-            ("frontend", "refine", 0.95),
-            ("backend", "prune", 0.95),
-            ("decoy", "prune", 0.95),
-            ("frontend/app.py", "true", 0.95),
-        ]));
-        let outcome = search(&mut universe, &mut oracle, "frontend", DEFAULT_BUDGET_BYTES).unwrap();
-        assert_eq!(oracle.state_count(), 1);
-        let files = oracle.of_kind("file");
-        assert_eq!(files.len(), 5);
-        assert_eq!(keys(files[0]), vec!["false", "true", "unknown"]);
-        assert!(!keys(files[0]).contains(&"prune"));
         assert_eq!(
-            oracle
-                .targets()
-                .iter()
-                .filter(|id| **id == "frontend/app.py")
-                .count(),
-            1
+            filter["frontend"].as_array().unwrap(),
+            &vec![
+                serde_json::json!("__init__.py"),
+                serde_json::json!("app.py")
+            ]
         );
+        assert!(filter["frontend"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|value| value.is_string()));
+
+        let body = files[0].state["frontend/app.py"].as_str().unwrap();
+        assert!(body.contains("def main"), "{body}");
+        assert!(!body.contains("=== frontend/app.py ==="), "{body}");
+        assert!(files[0].state.get("backend/api.py").is_none());
         assert_eq!(
             outcome.findings,
             vec![
@@ -898,23 +961,22 @@ mod tests {
     }
 
     #[test]
-    fn weak_directory_prune_refines() {
+    fn weak_prune_keeps_the_directory_and_still_judges_its_files() {
         let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
         let mut oracle = Script::new(toy(&[
             ("frontend", "prune", 0.5),
             ("frontend/app.py", "false", 0.95),
         ]));
         let outcome = search(&mut universe, &mut oracle, "frontend", DEFAULT_BUDGET_BYTES).unwrap();
-        assert_eq!(oracle.state_count(), 1);
+        let frontend = outcome
+            .trace
+            .iter()
+            .find(|decision| decision.id == "frontend")
+            .unwrap();
+        assert_eq!(frontend.raw, "prune");
+        assert_eq!(frontend.applied, Applied::Keep);
         assert!(oracle.targets().contains(&"frontend/app.py"));
-        assert!(oracle.targets().contains(&"backend/api.py"));
-        assert!(!outcome.findings.iter().any(|finding| matches!(
-            finding,
-            Finding::File { id, .. } if id == "backend/api.py"
-        )));
-        assert_eq!(outcome.trace[2].id, "frontend");
-        assert_eq!(outcome.trace[2].raw, "prune");
-        assert_eq!(outcome.trace[2].applied, Applied::Refine);
+        assert!(!oracle.targets().contains(&"backend/api.py"));
         assert!(outcome.findings.iter().any(|finding| matches!(
             finding,
             Finding::File { id, value: Value::False, .. } if id == "frontend/app.py"
@@ -922,20 +984,10 @@ mod tests {
     }
 
     #[test]
-    fn weak_directory_true_refines() {
-        let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let mut oracle = Script::new(toy(&[("frontend", "true", 0.5)]));
-        search(&mut universe, &mut oracle, "frontend", DEFAULT_BUDGET_BYTES).unwrap();
-        assert_eq!(oracle.state_count(), 1);
-        assert!(oracle.targets().contains(&"frontend/app.py"));
-        assert!(oracle.targets().iter().any(|id| id.starts_with("backend/")));
-    }
-
-    #[test]
     fn weak_file_true_is_stored_as_unknown() {
         let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
         let mut oracle = Script::new(toy(&[
-            ("frontend", "refine", 0.95),
+            ("frontend", "keep", 0.95),
             ("frontend/app.py", "true", 0.5),
         ]));
         let outcome = search(&mut universe, &mut oracle, "frontend", DEFAULT_BUDGET_BYTES).unwrap();
@@ -964,76 +1016,94 @@ mod tests {
     }
 
     #[test]
-    fn tight_budget_splits_one_sibling_group() {
-        let mut probe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let ids = probe.objects().to_vec();
-        let mut largest = 0;
-        for id in &ids {
-            probe.set(vec![id.clone()]).unwrap();
-            largest = largest.max(probe.estimate().unwrap());
-        }
-        probe.set(ids).unwrap();
-        let together = probe.estimate().unwrap();
-        assert!(together > largest);
-
-        let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let mut oracle = Script::new(toy(&[
-            ("frontend", "prune", 0.95),
-            ("backend", "prune", 0.95),
-            ("decoy", "prune", 0.95),
-        ]));
-        search(&mut universe, &mut oracle, "frontend", largest).unwrap();
-        assert!(oracle.state_count() >= 2, "states {}", oracle.state_count());
-        for id in ["backend", "decoy", "frontend"] {
-            assert!(oracle.targets().contains(&id), "{id}");
-        }
+    fn parent_prune_drops_a_nested_directory_the_model_kept() {
+        let root = scratch("nested");
+        std::fs::create_dir_all(root.join("nested/deep")).unwrap();
+        std::fs::write(root.join("nested/keepme.txt"), "keep\n").unwrap();
+        std::fs::write(root.join("nested/deep/file.txt"), "deep\n").unwrap();
+        let mut universe = Filesystem::at_root(&root).unwrap();
+        let mut oracle = Script::new(vec![
+            ("nested".into(), "prune".into(), 0.99),
+            ("nested/deep".into(), "keep".into(), 0.99),
+        ]);
+        let outcome = search(&mut universe, &mut oracle, "anything", DEFAULT_BUDGET_BYTES).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(oracle.targets(), vec!["nested", "nested/deep"]);
+        assert!(outcome.findings.is_empty());
     }
 
     #[test]
-    fn fitting_repo_is_one_state_even_when_every_directory_refines() {
-        let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let mut oracle = Script::new(toy(&[
-            ("frontend", "refine", 0.99),
-            ("backend", "refine", 0.99),
-            ("decoy", "refine", 0.99),
-        ]));
-        let outcome = search(
-            &mut universe,
-            &mut oracle,
-            "the codebase has a frontend",
-            DEFAULT_BUDGET_BYTES,
-        )
-        .unwrap();
-        assert_eq!(oracle.state_count(), 1, "targets {:?}", oracle.targets());
-        assert_eq!(oracle.targets().len(), 8);
-        assert_eq!(outcome.findings.len(), 5);
-        assert_eq!(outcome.steps.len(), 1);
-        let app = outcome.steps[0]
-            .view
-            .iter()
-            .find(|obj| obj.id == "frontend/app.py")
-            .unwrap();
-        assert!(app.leaf);
-        assert!(app.listing.is_empty());
-        assert!(app.bytes > 0);
-        let shown = crate::search::trace::format_step(&outcome.steps[0], 0, 1);
-        assert!(!shown.contains("from backend import api"), "{shown}");
-        assert!(shown.contains("frontend/app.py"));
+    fn root_file_is_judged_when_a_sibling_directory_is_pruned() {
+        let root = scratch("root-file");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("README.md"), "read me\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn lib() {}\n").unwrap();
+        let mut universe = Filesystem::at_root(&root).unwrap();
+        let mut oracle = Script::new(vec![
+            ("src".into(), "prune".into(), 0.95),
+            ("README.md".into(), "unknown".into(), 0.9),
+        ]);
+        let outcome = search(&mut universe, &mut oracle, "anything", DEFAULT_BUDGET_BYTES).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(oracle.targets().contains(&"README.md"));
+        assert!(oracle.targets().contains(&"src"));
+        assert!(!oracle.targets().contains(&"src/lib.rs"));
+        assert_eq!(
+            outcome.findings,
+            vec![Finding::File {
+                id: "README.md".into(),
+                value: Value::Unknown,
+                confidence: 0.9,
+            }]
+        );
     }
 
     #[test]
-    fn oversized_leaf_is_trimmed_once() {
-        let root =
-            std::env::temp_dir().join(format!("autoground-search-trim-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+    fn tiny_budget_puts_each_directory_in_its_own_state() {
+        let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
+        let mut oracle = Script::new(toy(&[]));
+        search(&mut universe, &mut oracle, "frontend", 1).unwrap();
+        assert_eq!(oracle.of_kind("directory").len(), 3);
+        assert_eq!(oracle.state_count(), 3, "targets {:?}", oracle.targets());
+        assert!(oracle.of_kind("file").is_empty());
+    }
+
+    #[test]
+    fn tight_budget_splits_file_bodies_across_states() {
+        let root = scratch("split-bodies");
+        std::fs::create_dir_all(root.join("keep")).unwrap();
+        std::fs::write(root.join("keep/a.txt"), "a".repeat(80)).unwrap();
+        std::fs::write(root.join("keep/b.txt"), "b".repeat(80)).unwrap();
+        let mut universe = Filesystem::at_root(&root).unwrap();
+        let mut oracle = Script::new(vec![
+            ("keep".into(), "keep".into(), 0.95),
+            ("keep/a.txt".into(), "unknown".into(), 0.9),
+            ("keep/b.txt".into(), "unknown".into(), 0.9),
+        ]);
+        search(&mut universe, &mut oracle, "anything", 120).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let files = oracle.of_kind("file");
+        assert_eq!(files.len(), 2, "{:?}", oracle.targets());
+        assert_ne!(
+            files[0].state.to_string(),
+            files[1].state.to_string(),
+            "bodies shared a state"
+        );
+    }
+
+    #[test]
+    fn oversized_leaf_is_trimmed_in_the_path_state() {
+        let root = scratch("trim");
         std::fs::write(root.join("big.txt"), "x".repeat(8_000)).unwrap();
         let mut universe = Filesystem::at_root(&root).unwrap();
         let mut oracle = Script::new(vec![("big.txt".into(), "unknown".into(), 0.95)]);
         let outcome = search(&mut universe, &mut oracle, "anything", 64).unwrap();
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(oracle.targets(), vec!["big.txt"]);
-        let view = oracle.log[0].state["view"].as_str().unwrap();
-        assert!(view.contains('…'), "{view}");
+        let body = oracle.log[0].state["big.txt"].as_str().unwrap();
+        assert!(body.contains('…'), "{body}");
+        assert!(body.len() < 8_000, "{}", body.len());
+        assert!(oracle.log[0].state.get("view").is_none());
         assert_eq!(
             outcome.findings,
             vec![Finding::File {

@@ -5,7 +5,7 @@ fn bin() -> Command {
 }
 
 #[test]
-fn heuristic_search_keeps_the_named_directory() {
+fn heuristic_search_judges_files_under_the_named_directory() {
     let out = bin()
         .args([
             "search",
@@ -23,7 +23,8 @@ fn heuristic_search_keeps_the_named_directory() {
     assert_eq!(code, 0, "stderr={stderr} stdout={stdout}");
     assert!(stdout.contains("[TRUE]"), "{stdout}");
     assert!(stdout.contains("requests=0"), "{stdout}");
-    assert!(stdout.contains("true    frontend/"), "{stdout}");
+    assert!(stdout.contains("frontend/app.py"), "{stdout}");
+    assert!(stdout.contains("frontend/__init__.py"), "{stdout}");
     assert!(!stdout.contains("decoy"), "{stdout}");
     assert!(!stdout.contains("backend"), "{stdout}");
     let path = stdout

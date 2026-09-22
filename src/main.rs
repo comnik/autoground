@@ -5,14 +5,13 @@ use autoground::edb::Store;
 use autoground::eval::run;
 use autoground::navigator::judge::epoch_ms;
 use autoground::navigator::{FixtureFile, FixtureJudge, JevJudge, RecordingJudge, TreeNavigator};
-use autoground::oracle::JevOracle;
+use autoground::oracle::{HeuristicOracle, JevOracle};
 use autoground::report::{
     allocate_record_path, format_require_traces, format_run_body, format_run_header,
     jev_request_count, require_traces, run_exit_code, RunTiming,
 };
 use autoground::search::{
-    present_search, search, HeuristicOracle, SearchError, SearchTraceFile, UsageRecord,
-    DEFAULT_BUDGET_BYTES,
+    present_search, search, SearchError, SearchTraceFile, UsageRecord, DEFAULT_BUDGET_BYTES,
 };
 use autoground::universe::Filesystem;
 use autoground::{compile, parse, verbalize_source};
@@ -184,7 +183,7 @@ fn search_cmd(
     let mut universe = Filesystem::at_root(repo)?;
     let searched = match judge {
         JudgeKind::Heuristic => {
-            let mut oracle = HeuristicOracle::new(repo, proposition);
+            let mut oracle = HeuristicOracle::new(universe.clone(), proposition);
             search(&mut universe, &mut oracle, proposition, budget)
         }
         JudgeKind::Jev => {

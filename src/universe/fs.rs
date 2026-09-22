@@ -347,6 +347,56 @@ fn read_leaf(path: &Path) -> io::Result<LeafBody> {
     }
 }
 
+/// Head and tail of `text`, at most `budget` bytes, with a marker in the middle.
+fn trim_text(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let marker = "\n…\n";
+    if budget <= marker.len() {
+        return prefix_bytes(text, budget);
+    }
+    let body = budget - marker.len();
+    let head_end = floor_boundary(text, body / 2);
+    let tail_start = ceil_boundary(text, text.len().saturating_sub(body - body / 2));
+    if tail_start <= head_end {
+        return prefix_bytes(text, budget);
+    }
+    let mut out = String::new();
+    out.push_str(&text[..head_end]);
+    out.push_str(marker);
+    out.push_str(&text[tail_start..]);
+    if out.len() > budget {
+        return prefix_bytes(text, budget);
+    }
+    out
+}
+
+fn prefix_bytes(text: &str, budget: usize) -> String {
+    let end = floor_boundary(text, budget.min(text.len()));
+    text[..end].to_string()
+}
+
+fn floor_boundary(text: &str, mut index: usize) -> usize {
+    if index > text.len() {
+        index = text.len();
+    }
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_boundary(text: &str, mut index: usize) -> usize {
+    if index > text.len() {
+        index = text.len();
+    }
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
 impl Universe for Filesystem {
     fn objects(&self) -> &[String] {
         &self.objects
@@ -408,6 +458,18 @@ impl Universe for Filesystem {
             blocks.push(self.render_one(id)?);
         }
         Ok(blocks.join("\n\n"))
+    }
+
+    fn read(&self, id: &str, budget: usize) -> Result<String, UniverseError> {
+        let text = if self.is_leaf(id)? {
+            match read_leaf(&repo_join(&self.root, id))? {
+                LeafBody::Text(text) => text,
+                LeafBody::Binary(n) => format!("<binary {n} bytes>"),
+            }
+        } else {
+            render_listing(id, &list_entries(&self.root, id, &self.filter)?)
+        };
+        Ok(trim_text(&text, budget))
     }
 
     fn render_capped(&self, id: &str, budget: usize) -> Result<String, UniverseError> {
