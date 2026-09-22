@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::core::Compiled;
 use crate::eval::{EdbAtom, Outcome, RunResult, Value};
-use crate::navigator::{FixtureFile, GroundStep, RequireTrace};
+use crate::navigator::{GroundStep, RequireTrace};
 use crate::syntax::{print_ground_atom, print_require};
 
 pub use crate::log::{allocate_unique_file, DEFAULT_TRACE_DIR};
@@ -211,15 +211,13 @@ pub struct RunLog {
     pub ended_at_ms: Option<u64>,
 }
 
-/// Read a run log. A [`FixtureFile`] document still loads.
+/// Read a run log.
 pub fn load_run_log(path: &Path) -> Result<RunLog, String> {
     let src = std::fs::read_to_string(path)
         .map_err(|err| format!("could not read trace {}: {err}", path.display()))?;
-    match crate::log::parse_jsonl(&src) {
-        Ok(Some(events)) => assemble_run(events, path),
-        Ok(None) => run_from_fixture(path),
-        Err(err) => Err(format!("could not read trace {}: {err}", path.display())),
-    }
+    let events = crate::log::parse_jsonl(&src)
+        .map_err(|err| format!("could not read trace {}: {err}", path.display()))?;
+    assemble_run(events, path)
 }
 
 #[derive(serde::Deserialize)]
@@ -265,25 +263,6 @@ fn assemble_run(events: Vec<serde_json::Value>, path: &Path) -> Result<RunLog, S
         steps,
         started_at_ms: summary.started_at_ms,
         ended_at_ms: summary.ended_at_ms,
-    })
-}
-
-fn run_from_fixture(path: &Path) -> Result<RunLog, String> {
-    let file = FixtureFile::load(path)
-        .map_err(|err| format!("could not read trace {}: {err}", path.display()))?;
-    let outcome = file.outcome.clone().ok_or_else(|| {
-        format!(
-            "{} is a judge fixture, not a full run trace; re-run to record one",
-            path.display()
-        )
-    })?;
-    Ok(RunLog {
-        outcome,
-        repo_name: file.repo_name,
-        requires: file.requires,
-        steps: file.steps,
-        started_at_ms: file.started_at_ms,
-        ended_at_ms: file.ended_at_ms,
     })
 }
 

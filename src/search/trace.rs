@@ -166,11 +166,8 @@ impl SearchTraceFile {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        match crate::log::parse_jsonl(&src) {
-            Ok(Some(events)) => assemble(events, path),
-            Ok(None) => load_document(&src, path),
-            Err(err) => Err(err),
-        }
+        let events = crate::log::parse_jsonl(&src)?;
+        assemble(events, path)
     }
 
     /// Append the session summary. Steps are appended as they are decided.
@@ -191,14 +188,6 @@ impl SearchTraceFile {
     }
 }
 
-fn load_document(src: &str, path: &Path) -> Result<SearchTraceFile, String> {
-    let file: SearchTraceFile = serde_json::from_str(src).map_err(|e| e.to_string())?;
-    if file.kind != TRACE_KIND {
-        return Err(format!("{} is not a search trace", path.display()));
-    }
-    Ok(file)
-}
-
 fn assemble(events: Vec<Json>, path: &Path) -> Result<SearchTraceFile, String> {
     let mut steps = Vec::new();
     let mut summary: Option<SearchSummary> = None;
@@ -206,11 +195,6 @@ fn assemble(events: Vec<Json>, path: &Path) -> Result<SearchTraceFile, String> {
         match event.get("kind").and_then(|kind| kind.as_str()) {
             Some("search_step") => {
                 steps.push(serde_json::from_value(event).map_err(|err| err.to_string())?);
-            }
-            Some(TRACE_KIND)
-                if event.get("steps").is_some() && steps.is_empty() && summary.is_none() =>
-            {
-                return serde_json::from_value(event).map_err(|err| err.to_string());
             }
             Some(TRACE_KIND) => {
                 summary = Some(serde_json::from_value(event).map_err(|err| err.to_string())?);

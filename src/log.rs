@@ -100,38 +100,26 @@ fn json_io(err: impl ToString) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
 }
 
-/// Parse JSONL. `Ok(None)` when the text is not line-delimited JSON, so a
-/// pretty-printed document is left for the caller to read as one value.
-pub fn parse_jsonl(text: &str) -> Result<Option<Vec<Value>>, String> {
+/// Parse a JSONL log. Each non-empty line is one JSON value.
+pub fn parse_jsonl(text: &str) -> Result<Vec<Value>, String> {
     let mut events = Vec::new();
-    let mut saw = false;
     for (i, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        match serde_json::from_str::<Value>(line) {
-            Ok(value) => {
-                saw = true;
-                events.push(value);
-            }
-            Err(err) if saw => return Err(format!("line {}: {err}", i + 1)),
-            Err(_) => return Ok(None),
-        }
+        let value = serde_json::from_str(line).map_err(|err| format!("line {}: {err}", i + 1))?;
+        events.push(value);
     }
     if events.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(events))
+        return Err("empty log".into());
     }
+    Ok(events)
 }
 
 pub fn read_events(path: &Path) -> Result<Vec<Value>, String> {
     let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
-    match parse_jsonl(&text)? {
-        Some(events) => Ok(events),
-        None => Err("not a jsonl log".into()),
-    }
+    parse_jsonl(&text)
 }
 
 #[cfg(test)]

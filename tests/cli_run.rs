@@ -182,10 +182,7 @@ fn inspect_fixture_without_run_result_errors() {
     let (out, err, code) = stdout(&["run", "--inspect", "tests/fixtures/toy-layered.json"]);
     assert_eq!(code, 3);
     assert!(out.is_empty(), "{out}");
-    assert!(
-        err.contains("not a full run trace") || err.contains("judge fixture"),
-        "{err}"
-    );
+    assert!(err.contains("could not read trace"), "{err}");
 }
 
 #[test]
