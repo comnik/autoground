@@ -1,0 +1,26 @@
+{
+  "id": "uses-three-valued-logic",
+  "proposition": "The codebase uses three-valued logic.",
+  "model": "grok-4.7-build",
+  "session_id": "01a0cb0e-5169-7f41-8cf8-b542c57b0745",
+  "evidence": [
+    "src/eval/mod.rs"
+  ],
+  "dropped": [],
+  "navigation": [
+    "."
+  ],
+  "usage": {
+    "input_tokens": 49906,
+    "cache_read_input_tokens": 6528,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 2063,
+    "reasoning_tokens": 1448
+  },
+  "estimated_usd": 0.115454,
+  "estimate_partial": false,
+  "server_cost_usd": 0.039254,
+  "priced_at": "2026-09-22",
+  "rate_band": "under_200k",
+  "price_source": "https://docs.x.ai/docs/models"
+}

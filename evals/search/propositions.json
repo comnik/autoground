@@ -1,0 +1,67 @@
+[
+  {
+    "id": "has-search",
+    "proposition": "The codebase has a search component.",
+    "note": "the codebase has a component"
+  },
+  {
+    "id": "has-oracle",
+    "proposition": "The codebase has an oracle component.",
+    "note": "the codebase has a component"
+  },
+  {
+    "id": "uses-three-valued-logic",
+    "proposition": "The codebase uses three-valued logic.",
+    "note": "the codebase uses a concept"
+  },
+  {
+    "id": "no-gpu-compiler",
+    "proposition": "The codebase does not have a GPU compiler.",
+    "note": "the codebase does not have a component"
+  },
+  {
+    "id": "no-sat-solver",
+    "proposition": "The codebase does not have a SAT solver.",
+    "note": "the codebase does not have a concept"
+  },
+  {
+    "id": "search-oracle-interface",
+    "proposition": "An interface exists between the search component and the oracle.",
+    "note": "an interface exists between two components"
+  },
+  {
+    "id": "evaluator-navigator-interface",
+    "proposition": "An interface exists between the evaluator and the navigator.",
+    "note": "an interface exists between two components"
+  },
+  {
+    "id": "evaluator-implements-three-valued-logic",
+    "proposition": "The evaluator implements three-valued logic.",
+    "note": "a component implements a concept"
+  },
+  {
+    "id": "navigator-uses-bfs",
+    "proposition": "The navigator uses a breadth-first search over directories.",
+    "note": "a component uses a search algorithm"
+  },
+  {
+    "id": "navigator-uses-queue",
+    "proposition": "The navigator uses a queue.",
+    "note": "a component uses a queue"
+  },
+  {
+    "id": "search-no-superlinear",
+    "proposition": "The search component uses no super-linear algorithms.",
+    "note": "a component uses no super-linear algorithms"
+  },
+  {
+    "id": "universe-no-dynamic-structures",
+    "proposition": "The universe component uses no dynamically growing data structures.",
+    "note": "a component uses no dynamically growing data structures"
+  },
+  {
+    "id": "search-throughput-over-latency",
+    "proposition": "Search is optimized for throughput over latency.",
+    "note": "a component is optimized for throughput over latency"
+  }
+]

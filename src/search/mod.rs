@@ -585,10 +585,36 @@ fn capture<U: Universe>(universe: &U, ids: &[String]) -> Result<Vec<ViewObject>,
 }
 
 fn apply_directory(raw: &str, confidence: f64) -> Applied {
+    apply_prune(raw, confidence, SUPPORT)
+}
+
+/// A directory `prune` at or above `min_confidence` drops its subtree. A live
+/// search passes [`SUPPORT`].
+fn apply_prune(raw: &str, confidence: f64, min_confidence: f64) -> Applied {
     match raw {
-        "prune" if confidence >= SUPPORT => Applied::Prune,
+        "prune" if confidence >= min_confidence => Applied::Prune,
         _ => Applied::Keep,
     }
+}
+
+/// Object ids kept when directory decisions are applied at `min_confidence`.
+///
+/// `universe` is the full tree. `children` is read from disk, so a universe
+/// whose window is already narrowed still yields the same ids.
+pub fn retained_ids<U: Universe>(
+    universe: &U,
+    decisions: &[Decision],
+    min_confidence: f64,
+) -> Result<Vec<String>, UniverseError> {
+    let adjusted = decisions
+        .iter()
+        .cloned()
+        .map(|mut decision| {
+            decision.applied = apply_prune(&decision.raw, decision.confidence, min_confidence);
+            decision
+        })
+        .collect::<Vec<_>>();
+    candidate_ids(universe, &adjusted)
 }
 
 fn question(state: &Json, id: &str, proposition: &str) -> Classification {
@@ -1042,5 +1068,38 @@ mod tests {
                 "backend/api.py".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn retained_ids_follows_the_prune_floor() {
+        let root = scratch("replay");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        std::fs::write(root.join("src/a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("other/b.txt"), "b\n").unwrap();
+        std::fs::write(root.join("README.md"), "root\n").unwrap();
+        let universe = Filesystem::at_root(&root).unwrap();
+        let (view, _) = search_one(
+            universe.clone(),
+            Script::new(vec![
+                ("src".into(), "prune".into(), 0.90),
+                ("other".into(), "prune".into(), 0.60),
+            ]),
+            "anything",
+            DEFAULT_BUDGET_BYTES,
+        );
+        let at_support = retained_ids(&universe, &view.trace, SUPPORT).unwrap();
+        assert_eq!(at_support, ids(&view));
+        assert_eq!(
+            at_support,
+            vec![
+                "README.md".to_string(),
+                "other".to_string(),
+                "other/b.txt".to_string(),
+            ]
+        );
+        let at_half = retained_ids(&universe, &view.trace, 0.50).unwrap();
+        assert_eq!(at_half, vec!["README.md".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

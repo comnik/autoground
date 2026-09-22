@@ -1,0 +1,34 @@
+{
+  "id": "no-sat-solver",
+  "proposition": "The codebase does not have a SAT solver.",
+  "model": "grok-4.7-build",
+  "session_id": "01a0cb0f-dd17-76b3-bc6b-16b9bb5b9417",
+  "evidence": [
+    "Cargo.toml",
+    "README.md",
+    "evals/madeup-concepts.ag",
+    "plans/overview.md",
+    "src/eval/mod.rs",
+    "src/lib.rs",
+    "src/navigator/tree.rs"
+  ],
+  "dropped": [],
+  "navigation": [
+    ".",
+    "Cargo.lock",
+    "src/eval/mod.rs"
+  ],
+  "usage": {
+    "input_tokens": 60294,
+    "cache_read_input_tokens": 22528,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 6527,
+    "reasoning_tokens": 5566
+  },
+  "estimated_usd": 0.171014,
+  "estimate_partial": false,
+  "server_cost_usd": 0.058145,
+  "priced_at": "2026-09-22",
+  "rate_band": "under_200k",
+  "price_source": "https://docs.x.ai/docs/models"
+}

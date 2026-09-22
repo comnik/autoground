@@ -1,0 +1,28 @@
+{
+  "id": "navigator-uses-queue",
+  "proposition": "The navigator uses a queue.",
+  "model": "grok-4.7-build",
+  "session_id": "01a0cb14-78fb-7fa3-87d4-c0fe070bca68",
+  "evidence": [
+    "src/navigator/mod.rs",
+    "src/navigator/tree.rs",
+    "src/navigator/walk.rs"
+  ],
+  "dropped": [],
+  "navigation": [
+    "."
+  ],
+  "usage": {
+    "input_tokens": 49304,
+    "cache_read_input_tokens": 34176,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 3364,
+    "reasoning_tokens": 2952
+  },
+  "estimated_usd": 0.13588,
+  "estimate_partial": false,
+  "server_cost_usd": 0.046199,
+  "priced_at": "2026-09-22",
+  "rate_band": "under_200k",
+  "price_source": "https://docs.x.ai/docs/models"
+}

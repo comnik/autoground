@@ -1,0 +1,33 @@
+{
+  "id": "search-throughput-over-latency",
+  "proposition": "Search is optimized for throughput over latency.",
+  "model": "grok-4.7-build",
+  "session_id": "01a0cb17-96b0-79f0-abda-dcbbe2b2f6fd",
+  "evidence": [
+    "README.md",
+    "plans/grounding-blocks.md",
+    "plans/overview.md",
+    "src/main.rs",
+    "src/oracle/jev.rs",
+    "src/oracle/mod.rs",
+    "src/search/mod.rs"
+  ],
+  "dropped": [],
+  "navigation": [
+    ".",
+    "src/search"
+  ],
+  "usage": {
+    "input_tokens": 135812,
+    "cache_read_input_tokens": 124288,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 17135,
+    "reasoning_tokens": 15906
+  },
+  "estimated_usd": 0.436578,
+  "estimate_partial": false,
+  "server_cost_usd": 0.148437,
+  "priced_at": "2026-09-22",
+  "rate_band": "under_200k",
+  "price_source": "https://docs.x.ai/docs/models"
+}

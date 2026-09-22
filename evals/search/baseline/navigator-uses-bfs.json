@@ -1,0 +1,31 @@
+{
+  "id": "navigator-uses-bfs",
+  "proposition": "The navigator uses a breadth-first search over directories.",
+  "model": "grok-4.7-build",
+  "session_id": "01a0cb13-5756-7c22-9bc4-5828a78601d5",
+  "evidence": [
+    "src/navigator/mod.rs",
+    "src/navigator/tree.rs",
+    "src/navigator/walk.rs",
+    "src/universe/fs.rs"
+  ],
+  "dropped": [],
+  "navigation": [
+    ".",
+    "src/navigator",
+    "src/universe"
+  ],
+  "usage": {
+    "input_tokens": 60120,
+    "cache_read_input_tokens": 23168,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 3306,
+    "reasoning_tokens": 2704
+  },
+  "estimated_usd": 0.15166,
+  "estimate_partial": false,
+  "server_cost_usd": 0.051564,
+  "priced_at": "2026-09-22",
+  "rate_band": "under_200k",
+  "price_source": "https://docs.x.ai/docs/models"
+}
