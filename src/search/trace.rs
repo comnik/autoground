@@ -148,20 +148,91 @@ pub struct SearchTraceFile {
     pub steps: Vec<SearchStep>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct SearchSummary {
+    proposition: String,
+    repo_name: String,
+    objects: Vec<String>,
+    #[serde(default)]
+    bytes_before: u64,
+    #[serde(default)]
+    bytes_after: u64,
+    usage: UsageRecord,
+    started_at_ms: u64,
+    ended_at_ms: u64,
+}
+
 impl SearchTraceFile {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
-        let src = std::fs::read_to_string(path.as_ref()).map_err(|e| e.to_string())?;
-        let file: Self = serde_json::from_str(&src).map_err(|e| e.to_string())?;
-        if file.kind != TRACE_KIND {
-            return Err(format!("{} is not a search trace", path.as_ref().display()));
+        let path = path.as_ref();
+        let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        match crate::log::parse_jsonl(&src) {
+            Ok(Some(events)) => assemble(events, path),
+            Ok(None) => load_document(&src, path),
+            Err(err) => Err(err),
         }
-        Ok(file)
     }
 
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path.as_ref(), text).map_err(|e| e.to_string())
+    /// Append the session summary. Steps are appended as they are decided.
+    pub fn write_summary(&self, log: &crate::log::Log) -> std::io::Result<()> {
+        log.append_event(
+            TRACE_KIND,
+            &SearchSummary {
+                proposition: self.proposition.clone(),
+                repo_name: self.repo_name.clone(),
+                objects: self.objects.clone(),
+                bytes_before: self.bytes_before,
+                bytes_after: self.bytes_after,
+                usage: self.usage.clone(),
+                started_at_ms: self.started_at_ms,
+                ended_at_ms: self.ended_at_ms,
+            },
+        )
     }
+}
+
+fn load_document(src: &str, path: &Path) -> Result<SearchTraceFile, String> {
+    let file: SearchTraceFile = serde_json::from_str(src).map_err(|e| e.to_string())?;
+    if file.kind != TRACE_KIND {
+        return Err(format!("{} is not a search trace", path.display()));
+    }
+    Ok(file)
+}
+
+fn assemble(events: Vec<Json>, path: &Path) -> Result<SearchTraceFile, String> {
+    let mut steps = Vec::new();
+    let mut summary: Option<SearchSummary> = None;
+    for event in events {
+        match event.get("kind").and_then(|kind| kind.as_str()) {
+            Some("search_step") => {
+                steps.push(serde_json::from_value(event).map_err(|err| err.to_string())?);
+            }
+            Some(TRACE_KIND)
+                if event.get("steps").is_some() && steps.is_empty() && summary.is_none() =>
+            {
+                return serde_json::from_value(event).map_err(|err| err.to_string());
+            }
+            Some(TRACE_KIND) => {
+                summary = Some(serde_json::from_value(event).map_err(|err| err.to_string())?);
+            }
+            _ => {}
+        }
+    }
+    let Some(summary) = summary else {
+        return Err(format!("{} is not a search trace", path.display()));
+    };
+    Ok(SearchTraceFile {
+        kind: TRACE_KIND.to_string(),
+        proposition: summary.proposition,
+        repo_name: summary.repo_name,
+        objects: summary.objects,
+        bytes_before: summary.bytes_before,
+        bytes_after: summary.bytes_after,
+        usage: summary.usage,
+        started_at_ms: summary.started_at_ms,
+        ended_at_ms: summary.ended_at_ms,
+        steps,
+    })
 }
 
 /// One line of the search summary.
@@ -532,5 +603,32 @@ mod tests {
             format_reduction(1000, 250).as_deref(),
             Some("75.0% smaller   1000 B → 250 B")
         );
+    }
+
+    #[test]
+    fn jsonl_log_reloads_steps_and_summary() {
+        let path = std::env::temp_dir().join(format!(
+            "autoground-search-log-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let log = crate::log::Log::open(&path).unwrap();
+        let mut traced = file(vec!["frontend/"], vec![decision("frontend", Applied::Keep)]);
+        traced.bytes_before = 10;
+        traced.bytes_after = 4;
+        traced.started_at_ms = 5;
+        traced.ended_at_ms = 9;
+        log.append_event("search_step", &traced.steps[0]).unwrap();
+        traced.write_summary(&log).unwrap();
+        let loaded = SearchTraceFile::load(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.objects, traced.objects);
+        assert_eq!(loaded.steps, traced.steps);
+        assert_eq!(loaded.bytes_before, 10);
+        assert_eq!(loaded.bytes_after, 4);
+        assert_eq!(loaded.proposition, "p");
     }
 }

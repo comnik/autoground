@@ -1,43 +1,15 @@
 pub mod step;
 pub mod tui;
 
-use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use crate::core::Compiled;
 use crate::eval::{EdbAtom, Outcome, RunResult, Value};
-use crate::navigator::{GroundStep, RequireTrace};
+use crate::navigator::{FixtureFile, GroundStep, RequireTrace};
 use crate::syntax::{print_ground_atom, print_require};
 
-pub const DEFAULT_TRACE_DIR: &str = "/tmp/autoground";
-
-/// Create a new uniquely named file under `dir` and return its path.
-pub fn allocate_unique_file(dir: &Path, ext: &str) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let pid = std::process::id();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let ext = ext.trim_start_matches('.');
-    for n in 0u32..10_000 {
-        let path = dir.join(format!("trace-{nanos}-{pid}-{n}.{ext}"));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => return Ok(path),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "could not allocate a unique trace filename",
-    ))
-}
-
-pub fn allocate_record_path() -> std::io::Result<PathBuf> {
-    allocate_unique_file(Path::new(DEFAULT_TRACE_DIR), "json")
-}
+pub use crate::log::{allocate_unique_file, DEFAULT_TRACE_DIR};
 
 pub fn jev_request_count(steps: &[GroundStep]) -> usize {
     steps.iter().map(|s| s.exchanges().len()).sum()
@@ -228,12 +200,137 @@ pub fn run_exit_code(outcome: &Outcome) -> i32 {
     }
 }
 
+/// A `run` session read back from its log.
+#[derive(Debug, Clone)]
+pub struct RunLog {
+    pub outcome: Outcome,
+    pub repo_name: String,
+    pub requires: Vec<RequireTrace>,
+    pub steps: Vec<GroundStep>,
+    pub started_at_ms: Option<u64>,
+    pub ended_at_ms: Option<u64>,
+}
+
+/// Read a run log. A [`FixtureFile`] document still loads.
+pub fn load_run_log(path: &Path) -> Result<RunLog, String> {
+    let src = std::fs::read_to_string(path)
+        .map_err(|err| format!("could not read trace {}: {err}", path.display()))?;
+    match crate::log::parse_jsonl(&src) {
+        Ok(Some(events)) => assemble_run(events, path),
+        Ok(None) => run_from_fixture(path),
+        Err(err) => Err(format!("could not read trace {}: {err}", path.display())),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RunSummary {
+    outcome: Outcome,
+    #[serde(default)]
+    repo_name: String,
+    #[serde(default)]
+    requires: Vec<RequireTrace>,
+    #[serde(default)]
+    started_at_ms: Option<u64>,
+    #[serde(default)]
+    ended_at_ms: Option<u64>,
+}
+
+fn assemble_run(events: Vec<serde_json::Value>, path: &Path) -> Result<RunLog, String> {
+    let mut steps = Vec::new();
+    let mut summary = None;
+    for event in events {
+        match event.get("kind").and_then(|kind| kind.as_str()) {
+            Some("step") => {
+                steps
+                    .push(serde_json::from_value(event).map_err(|err| {
+                        format!("could not read trace {}: {err}", path.display())
+                    })?);
+            }
+            Some("run") => {
+                summary =
+                    Some(serde_json::from_value::<RunSummary>(event).map_err(|err| {
+                        format!("could not read trace {}: {err}", path.display())
+                    })?);
+            }
+            _ => {}
+        }
+    }
+    let Some(summary) = summary else {
+        return Err(format!("{} is not a full run trace", path.display()));
+    };
+    Ok(RunLog {
+        outcome: summary.outcome,
+        repo_name: summary.repo_name,
+        requires: summary.requires,
+        steps,
+        started_at_ms: summary.started_at_ms,
+        ended_at_ms: summary.ended_at_ms,
+    })
+}
+
+fn run_from_fixture(path: &Path) -> Result<RunLog, String> {
+    let file = FixtureFile::load(path)
+        .map_err(|err| format!("could not read trace {}: {err}", path.display()))?;
+    let outcome = file.outcome.clone().ok_or_else(|| {
+        format!(
+            "{} is a judge fixture, not a full run trace; re-run to record one",
+            path.display()
+        )
+    })?;
+    Ok(RunLog {
+        outcome,
+        repo_name: file.repo_name,
+        requires: file.requires,
+        steps: file.steps,
+        started_at_ms: file.started_at_ms,
+        ended_at_ms: file.ended_at_ms,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::compile;
     use crate::eval::run;
     use crate::syntax::parse;
+
+    #[test]
+    fn run_log_reloads_steps_and_outcome() {
+        let path = std::env::temp_dir().join(format!(
+            "autoground-run-log-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let log = crate::log::Log::open(&path).unwrap();
+        let step = GroundStep::Result {
+            pred: "component".into(),
+            args: vec!["Frontend".into()],
+            status: "found".into(),
+            bindings: vec![],
+        };
+        log.append_event("step", &step).unwrap();
+        log.append_event(
+            "run",
+            &serde_json::json!({
+                "outcome": "supported",
+                "repo_name": "toy",
+                "requires": [],
+                "started_at_ms": 10,
+                "ended_at_ms": 20,
+            }),
+        )
+        .unwrap();
+        let loaded = load_run_log(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.outcome, Outcome::Supported);
+        assert_eq!(loaded.repo_name, "toy");
+        assert_eq!(loaded.steps, vec![step]);
+        assert_eq!(loaded.started_at_ms, Some(10));
+        assert_eq!(loaded.ended_at_ms, Some(20));
+    }
 
     #[test]
     fn allocate_unique_file_uses_distinct_names() {

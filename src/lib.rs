@@ -1,6 +1,7 @@
 pub mod core;
 pub mod edb;
 pub mod eval;
+pub mod log;
 pub mod navigator;
 pub mod oracle;
 pub mod proposers;
@@ -12,6 +13,7 @@ pub mod universe;
 pub use core::{compile, CompileError, Compiled};
 pub use edb::Store;
 pub use eval::{run, Outcome, RunResult, Value};
+pub use log::Log;
 pub use navigator::{
     FixtureFile, FixtureJudge, GroundStep, HeuristicJudge, JevJudge, RecordingJudge, RequireTrace,
     TreeNavigator,

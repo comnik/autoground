@@ -168,7 +168,7 @@ TBD verbalization is how we go from symbolic atoms to unstructured propositions.
 
 **Log**: a unified log / session trace available to all components. Any `autoground` run
 keeps a log in `/tmp/autoground`. The log interface allows all other components to append
-their own structured events in a thread-safe way.
+their own structured events, as JSON lines, in a thread-safe way.
 
 **Universe**: a view over the universe.
 - estimate / compute the size of the current view of the universe (e.g. total size of all reachable files from the repo root)

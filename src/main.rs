@@ -3,12 +3,13 @@ use std::process::ExitCode;
 
 use autoground::edb::Store;
 use autoground::eval::run;
+use autoground::log::Log;
 use autoground::navigator::judge::epoch_ms;
-use autoground::navigator::{FixtureFile, FixtureJudge, JevJudge, RecordingJudge, TreeNavigator};
+use autoground::navigator::{FixtureJudge, JevJudge, RecordingJudge, RequireTrace, TreeNavigator};
 use autoground::oracle::{HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::report::{
-    allocate_record_path, format_require_traces, format_run_body, format_run_header,
-    jev_request_count, require_traces, run_exit_code, RunTiming,
+    format_require_traces, format_run_body, format_run_header, jev_request_count, load_run_log,
+    require_traces, run_exit_code, RunTiming,
 };
 use autoground::search::trace::SearchStep;
 use autoground::search::{
@@ -42,13 +43,13 @@ enum Commands {
     /// repository via the navigator (default: the current directory).
     ///
     /// Prints the evaluation result and grounding. On a TTY, left/right opens
-    /// the step-by-step debug view. A judge recording is always written under
+    /// the step-by-step debug view. A session log is written under
     /// `/tmp/autoground/`.
     ///
     /// Examples:
     ///   autoground run examples/layered.ag --repo examples/toy-layered
     ///   autoground run --repo examples/toy-split '(require (component "Frontend"))'
-    ///   autoground run --inspect /tmp/autoground/trace-….json
+    ///   autoground run --inspect /tmp/autoground/trace-….jsonl
     Run {
         /// Path to a `.ag` model, or a model source string.
         #[arg(required_unless_present = "inspect")]
@@ -77,13 +78,13 @@ enum Commands {
     ///
     /// Starts at the children of the repo root. A directory can settle the
     /// proposition (`true` / `false`); otherwise the walk refines. A file is
-    /// judged from its body in that same call. A trace is written under
+    /// judged from its body in that same call. A session log is written under
     /// `/tmp/autoground/`. On a TTY, left/right opens each oracle call.
     ///
     /// Examples:
     ///   autoground search "the codebase has a frontend" --repo examples/toy-layered
     ///   autoground search "frontend" --judge heuristic --repo examples/toy-layered
-    ///   autoground search --inspect /tmp/autoground/trace-….json
+    ///   autoground search --inspect /tmp/autoground/trace-….jsonl
     Search {
         /// Natural-language proposition.
         #[arg(required_unless_present = "inspect")]
@@ -180,14 +181,14 @@ fn search_cmd(
     }
     let proposition = proposition.expect("proposition required");
     let started_at = std::time::SystemTime::now();
-    let record_path = allocate_record_path()?;
+    let log = Log::create()?;
     let universe = Filesystem::at_root(repo)?;
     let searched = match judge {
         JudgeKind::Heuristic => {
             let oracle = HeuristicOracle::new(universe.clone());
-            run_search(universe, oracle, proposition, budget)?
+            run_search(universe, oracle, proposition, budget, &log)?
         }
-        JudgeKind::Jev => run_search(universe, JevOracle::from_env()?, proposition, budget)?,
+        JudgeKind::Jev => run_search(universe, JevOracle::from_env()?, proposition, budget, &log)?,
     };
     let ended_at = std::time::SystemTime::now();
     let repo_name = repo.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
@@ -203,8 +204,8 @@ fn search_cmd(
         ended_at_ms: epoch_ms(ended_at),
         steps: searched.steps,
     };
-    file.save(&record_path)?;
-    present_search(&record_path, &file, full)?;
+    file.write_summary(&log)?;
+    present_search(log.path(), &file, full)?;
     if let Some(err) = searched.failure {
         eprintln!("{err}");
         Ok(3)
@@ -227,8 +228,10 @@ fn run_search<O: Oracle>(
     oracle: O,
     proposition: &str,
     budget: usize,
+    log: &Log,
 ) -> Result<Searched, Box<dyn std::error::Error>> {
     let mut session = Search::new(universe, oracle, budget);
+    session.set_log(log.clone());
     let ticket = session.submit(proposition);
     match session.wait(ticket) {
         Ok(view) => Ok(Searched {
@@ -273,9 +276,9 @@ fn run_model(
     let compiled = compile(&program)?;
     let mut store = Store::new();
     let repo_name = repo.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
-    let record_path = allocate_record_path()?;
+    let log = Log::create()?;
 
-    let mut nav = make_nav(repo, judge, fixtures, &record_path, model)?;
+    let mut nav = make_nav(repo, judge, fixtures, &log, model)?;
     let result = run(&compiled, &mut store, Some(&mut nav));
     let ended_at = std::time::SystemTime::now();
     let judge_failed = !nav.errors.is_empty();
@@ -285,19 +288,20 @@ fn run_model(
         }
     }
     let steps = std::mem::take(&mut nav.trace);
+    let requires = require_traces(&compiled, &result);
+    log.append_event(
+        "run",
+        &RunSummary {
+            outcome: &result.outcome,
+            repo_name,
+            requires: &requires,
+            started_at_ms: epoch_ms(started_at),
+            ended_at_ms: epoch_ms(ended_at),
+        },
+    )?;
     drop(nav);
 
-    write_run_trace(
-        &record_path,
-        &result.outcome,
-        repo_name,
-        require_traces(&compiled, &result),
-        &steps,
-        started_at,
-        ended_at,
-    )?;
-
-    let header = format_run_header(&result.outcome, &record_path, jev_request_count(&steps));
+    let header = format_run_header(&result.outcome, log.path(), jev_request_count(&steps));
     let body = format_run_body(&compiled, &result);
     autoground::report::tui::present_run(
         &header,
@@ -317,14 +321,7 @@ fn run_model(
 }
 
 fn inspect_trace(path: &Path) -> Result<i32, Box<dyn std::error::Error>> {
-    let file = FixtureFile::load(path)
-        .map_err(|e| format!("could not read trace {}: {e}", path.display()))?;
-    let outcome = file.outcome.clone().ok_or_else(|| {
-        format!(
-            "{} is a judge fixture, not a full run trace; re-run to record one",
-            path.display()
-        )
-    })?;
+    let file = load_run_log(path)?;
     let timing = match (file.started_at_ms, file.ended_at_ms) {
         (Some(s), Some(e)) => RunTiming::from_millis(s, e),
         _ => {
@@ -335,30 +332,19 @@ fn inspect_trace(path: &Path) -> Result<i32, Box<dyn std::error::Error>> {
             }
         }
     };
-    let header = format_run_header(&outcome, path, jev_request_count(&file.steps));
+    let header = format_run_header(&file.outcome, path, jev_request_count(&file.steps));
     let body = format_require_traces(&file.requires);
     autoground::report::tui::present_run(&header, &body, &file.steps, &file.repo_name, timing)?;
-    Ok(run_exit_code(&outcome))
+    Ok(run_exit_code(&file.outcome))
 }
 
-fn write_run_trace(
-    path: &Path,
-    outcome: &autoground::Outcome,
-    repo_name: &str,
-    requires: Vec<autoground::RequireTrace>,
-    steps: &[autoground::GroundStep],
-    started_at: std::time::SystemTime,
-    ended_at: std::time::SystemTime,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = FixtureFile::load(path).unwrap_or_default();
-    file.outcome = Some(outcome.clone());
-    file.repo_name = repo_name.to_string();
-    file.requires = requires;
-    file.steps = steps.to_vec();
-    file.started_at_ms = Some(epoch_ms(started_at));
-    file.ended_at_ms = Some(epoch_ms(ended_at));
-    file.save(path)?;
-    Ok(())
+#[derive(serde::Serialize)]
+struct RunSummary<'a> {
+    outcome: &'a autoground::Outcome,
+    repo_name: &'a str,
+    requires: &'a [RequireTrace],
+    started_at_ms: u64,
+    ended_at_ms: u64,
 }
 
 /// Read `input` as a `.ag` file when it names one, otherwise treat it as source.
@@ -381,7 +367,7 @@ fn make_nav(
     repo: &Path,
     judge: JudgeKind,
     fixtures: Option<&PathBuf>,
-    record: &Path,
+    log: &Log,
     model: &str,
 ) -> Result<TreeNavigator, Box<dyn std::error::Error>> {
     let inner: Box<dyn autoground::navigator::Judge> = if let Some(path) = fixtures {
@@ -392,7 +378,8 @@ fn make_nav(
             JudgeKind::Jev => Box::new(JevJudge::from_env()?),
         }
     };
-    let mut nav = TreeNavigator::new(repo, Box::new(RecordingJudge::new(inner, record)));
+    let mut nav = TreeNavigator::new(repo, Box::new(RecordingJudge::new(inner, log.clone())));
+    nav.set_log(log.clone());
     let model_path = Path::new(model);
     if model_path.is_file() {
         nav.hide_model(model_path);

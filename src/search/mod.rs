@@ -20,6 +20,7 @@ use std::fmt;
 use serde::Serialize;
 use serde_json::{Map, Value as Json};
 
+use crate::log::Log;
 use crate::navigator::confidence::SUPPORT;
 use crate::oracle::jev::QUESTION_BUDGET;
 use crate::oracle::{Classification, Oracle, Ticket as OracleTicket, Usage};
@@ -117,6 +118,7 @@ pub struct Search<U, O> {
     next: u64,
     pending: Vec<Pending>,
     resolved: HashMap<Ticket, Result<View<U>, SearchError>>,
+    log: Option<Log>,
 }
 
 impl<U, O> Search<U, O> {
@@ -128,7 +130,12 @@ impl<U, O> Search<U, O> {
             next: 0,
             pending: Vec::new(),
             resolved: HashMap::new(),
+            log: None,
         }
+    }
+
+    pub fn set_log(&mut self, log: Log) {
+        self.log = Some(log);
     }
 
     pub fn usage(&self) -> Usage
@@ -202,6 +209,15 @@ where
                     message: message.clone(),
                 }),
             );
+        }
+    }
+
+    fn log_steps(&self, steps: &[SearchStep]) {
+        let Some(log) = &self.log else {
+            return;
+        };
+        for step in steps {
+            let _ = log.append_event("search_step", step);
         }
     }
 
@@ -310,6 +326,7 @@ where
         let bytes_before = reachable_estimate(&self.universe).unwrap_or(0);
         for item in pending {
             let prop_steps = steps.remove(&item.ticket).unwrap_or_default();
+            self.log_steps(&prop_steps);
             let trace: Vec<Decision> = prop_steps
                 .iter()
                 .flat_map(|step| step.classifications.clone())

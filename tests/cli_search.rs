@@ -44,7 +44,7 @@ fn heuristic_search_keeps_the_named_directory() {
         .expect("trace path");
     assert!(path.starts_with("/tmp/autoground/trace-"), "{path}");
     let body = std::fs::read_to_string(path).unwrap();
-    assert!(body.contains("\"kind\": \"search\""), "{body}");
+    assert!(body.contains("\"kind\":\"search\""), "{body}");
     assert!(!body.contains("from backend import api"), "{body}");
     assert!(body.contains("frontend/app.py"), "{body}");
 

@@ -57,33 +57,32 @@ fn run_prints_header_requires_and_trace_path() {
         path.starts_with("/tmp/autoground/trace-"),
         "unexpected trace path {path}"
     );
-    assert!(path.ends_with(".json"), "{path}");
+    assert!(path.ends_with(".jsonl"), "{path}");
     assert!(
         out.contains(&format!("trace: {path}\njev requests: ")),
         "{out}"
     );
     let body = std::fs::read_to_string(path).unwrap();
-    assert!(body.contains("\"listings\""), "{body}");
-    assert!(body.contains("\"documents\""), "{body}");
+    assert!(body.contains("\"kind\":\"listing\""), "{body}");
+    assert!(body.contains("\"kind\":\"document\""), "{body}");
+    assert!(body.contains("\"kind\":\"step\""), "{body}");
+    assert!(body.contains("\"kind\":\"run\""), "{body}");
     let started = json_u64(&body, "started_at_ms");
     let ended = json_u64(&body, "ended_at_ms");
     assert!(ended >= started, "{body}");
-    assert!(body.contains("\"outcome\": \"supported\""), "{body}");
-    assert!(body.contains("\"steps\""), "{body}");
+    assert!(body.contains("\"outcome\":\"supported\""), "{body}");
     assert!(body.contains("\"requires\""), "{body}");
     assert!(body.contains("\"repo_name\""), "{body}");
 }
 
 fn json_u64(body: &str, key: &str) -> u64 {
-    let prefix = format!("\"{key}\": ");
+    let prefix = format!("\"{key}\":");
     let start = body
         .find(&prefix)
         .unwrap_or_else(|| panic!("missing {key} in {body}"))
         + prefix.len();
-    let digits: String = body[start..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+    let rest = body[start..].trim_start();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits
         .parse()
         .unwrap_or_else(|_| panic!("bad {key} in {body}"))

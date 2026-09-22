@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::edb::Store;
+use crate::log::Log;
 use crate::navigator::confidence::{self, confident_look, confident_skip};
 use crate::navigator::judge::{
     ChildChoice, ConflictAnswer, ConflictEvidence, ConflictState, Consistency, DocumentState,
@@ -28,6 +29,7 @@ pub struct TreeNavigator {
     pub documents: Vec<String>,
     pub errors: Vec<String>,
     pub trace: Vec<GroundStep>,
+    log: Option<Log>,
     declarations: HashMap<String, Declare>,
     answered: HashMap<(String, Vec<Option<String>>, Need), Answer>,
 }
@@ -44,9 +46,21 @@ impl TreeNavigator {
             documents: Vec::new(),
             errors: Vec::new(),
             trace: Vec::new(),
+            log: None,
             declarations: HashMap::new(),
             answered: HashMap::new(),
         }
+    }
+
+    pub fn set_log(&mut self, log: Log) {
+        self.log = Some(log);
+    }
+
+    fn push_step(&mut self, step: GroundStep) {
+        if let Some(log) = &self.log {
+            let _ = log.append_event("step", &step);
+        }
+        self.trace.push(step);
     }
 
     pub fn hide_model(&mut self, model: &Path) {
@@ -183,7 +197,7 @@ impl TreeNavigator {
         } else {
             "unknown"
         };
-        self.trace.push(GroundStep::Result {
+        self.push_step(GroundStep::Result {
             pred: pred.to_string(),
             args: bound,
             status: status.into(),
@@ -248,7 +262,7 @@ impl TreeNavigator {
                 };
             }
         };
-        self.trace.push(GroundStep::Document {
+        self.push_step(GroundStep::Document {
             pred: pred.to_string(),
             args: args.to_vec(),
             path: file.to_string(),
@@ -465,7 +479,7 @@ impl TreeNavigator {
                 } else {
                     Vec::new()
                 };
-                self.trace.push(GroundStep::Listing {
+                self.push_step(GroundStep::Listing {
                     pred: demands[atom_i].pred.clone(),
                     args: atoms[atom_i].args.clone(),
                     dir: packed.origin.clone(),
@@ -571,7 +585,7 @@ impl TreeNavigator {
                 ConflictAnswer::sure(ResolveValue::Unknown, Consistency::Conflicting)
             }
         };
-        self.trace.push(GroundStep::Conflict {
+        self.push_step(GroundStep::Conflict {
             pred: demand.pred.clone(),
             args: bound_values(demand),
             evidence: atom.polar.clone(),
@@ -679,7 +693,7 @@ impl TreeNavigator {
                     excerpt: excerpt_body(&prep.body),
                 });
             }
-            self.trace.push(GroundStep::Document {
+            self.push_step(GroundStep::Document {
                 pred: prep.state.pred,
                 args: prep.state.args,
                 path: prep.rel,

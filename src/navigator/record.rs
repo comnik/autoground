@@ -1,34 +1,25 @@
-use super::fixture::{DocumentFixture, FixtureFile, JevRequestEvent, ListingFixture};
+use super::fixture::{DocumentFixture, JevRequestEvent, ListingFixture};
 use super::judge::{
     epoch_ms, ChildChoice, ConflictAnswer, ConflictState, DocumentAnswer, DocumentJudgement,
     DocumentState, Judge, JudgeError, JudgeExchange, ListingState, MultiListingState,
 };
-use std::path::PathBuf;
-use std::time::SystemTime;
+use crate::log::Log;
 
-/// Wraps a judge and writes listing/document Choice answers as a fixture file on drop.
+/// Wraps a judge and appends each listing and document answer to the session log.
 pub struct RecordingJudge {
     inner: Box<dyn Judge>,
-    file: FixtureFile,
-    path: PathBuf,
+    log: Log,
 }
 
 impl RecordingJudge {
-    pub fn new(inner: Box<dyn Judge>, path: impl Into<PathBuf>) -> Self {
-        Self {
-            inner,
-            file: FixtureFile {
-                started_at_ms: Some(epoch_ms(SystemTime::now())),
-                ..FixtureFile::default()
-            },
-            path: path.into(),
-        }
+    pub fn new(inner: Box<dyn Judge>, log: Log) -> Self {
+        Self { inner, log }
     }
 
     fn record_exchanges(&mut self) {
         for ex in self.inner.last_exchanges() {
             if let Some(event) = jev_event(&ex) {
-                self.file.jev_requests.push(event);
+                let _ = self.log.append_event("jev_request", &event);
             }
         }
     }
@@ -49,15 +40,6 @@ fn jev_event(ex: &JudgeExchange) -> Option<JevRequestEvent> {
     })
 }
 
-impl Drop for RecordingJudge {
-    fn drop(&mut self) {
-        self.file.ended_at_ms = Some(epoch_ms(SystemTime::now()));
-        if let Ok(text) = serde_json::to_string_pretty(&self.file) {
-            let _ = std::fs::write(&self.path, text);
-        }
-    }
-}
-
 impl Judge for RecordingJudge {
     fn choose(&mut self, state: &ListingState) -> Result<Vec<ChildChoice>, JudgeError> {
         let choices = self.inner.choose(state)?;
@@ -65,12 +47,15 @@ impl Judge for RecordingJudge {
         for c in &choices {
             map.insert(c.rel_path.clone(), c.transition);
         }
-        self.file.listings.push(ListingFixture {
-            pred: state.pred.clone(),
-            args: state.args.clone(),
-            dir: state.dir.clone(),
-            choices: map,
-        });
+        let _ = self.log.append_event(
+            "listing",
+            &ListingFixture {
+                pred: state.pred.clone(),
+                args: state.args.clone(),
+                dir: state.dir.clone(),
+                choices: map,
+            },
+        );
         self.record_exchanges();
         Ok(choices)
     }
@@ -85,12 +70,15 @@ impl Judge for RecordingJudge {
             for c in choices {
                 map.insert(c.rel_path.clone(), c.transition);
             }
-            self.file.listings.push(ListingFixture {
-                pred: atom.pred.clone(),
-                args: atom.args.clone(),
-                dir: state.dir.clone(),
-                choices: map,
-            });
+            let _ = self.log.append_event(
+                "listing",
+                &ListingFixture {
+                    pred: atom.pred.clone(),
+                    args: atom.args.clone(),
+                    dir: state.dir.clone(),
+                    choices: map,
+                },
+            );
         }
         self.record_exchanges();
         Ok(all)
@@ -107,13 +95,16 @@ impl Judge for RecordingJudge {
         let out = self.inner.documents(states);
         for (state, ans) in states.iter().zip(&out) {
             if let Ok(a) = ans {
-                self.file.documents.push(DocumentFixture {
-                    pred: state.pred.clone(),
-                    args: state.args.clone(),
-                    path: state.path.clone(),
-                    verdict: a.judgement.verdict,
-                    confidence: a.judgement.confidence,
-                });
+                let _ = self.log.append_event(
+                    "document",
+                    &DocumentFixture {
+                        pred: state.pred.clone(),
+                        args: state.args.clone(),
+                        path: state.path.clone(),
+                        verdict: a.judgement.verdict,
+                        confidence: a.judgement.confidence,
+                    },
+                );
             }
         }
         self.record_exchanges();
@@ -137,10 +128,16 @@ mod tests {
     use crate::navigator::heuristic::HeuristicJudge;
     use crate::navigator::judge::DocumentState;
 
+    fn events(path: &std::path::Path) -> Vec<serde_json::Value> {
+        let found = crate::log::read_events(path).unwrap();
+        let _ = std::fs::remove_file(path);
+        found
+    }
+
     #[test]
     fn records_a_document_batch() {
         let path = std::env::temp_dir().join(format!(
-            "autoground-record-batch-{}-{}.json",
+            "autoground-record-batch-{}-{}.jsonl",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -166,21 +163,21 @@ mod tests {
             },
         ];
         {
-            let mut rec = RecordingJudge::new(Box::new(HeuristicJudge), &path);
+            let log = Log::open(&path).unwrap();
+            let mut rec = RecordingJudge::new(Box::new(HeuristicJudge), log);
             let out = rec.documents(&states);
             assert_eq!(out.len(), 2);
             assert!(out.iter().all(|r| r.is_ok()));
         }
-        let text = std::fs::read_to_string(&path).unwrap();
-        let file: FixtureFile = serde_json::from_str(&text).unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(file.documents.len(), 2);
-        assert_eq!(file.documents[0].path, "a.py");
-        assert_eq!(file.documents[1].path, "b.py");
-        assert!(file.started_at_ms.is_some());
-        assert!(file.ended_at_ms.is_some());
-        assert!(file.ended_at_ms.unwrap() >= file.started_at_ms.unwrap());
-        assert!(file.jev_requests.is_empty());
+        let events = events(&path);
+        let docs: Vec<_> = events
+            .iter()
+            .filter(|event| event["kind"] == "document")
+            .collect();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0]["path"], "a.py");
+        assert_eq!(docs[1]["path"], "b.py");
+        assert!(events.iter().all(|event| event["kind"] != "jev_request"));
     }
 
     struct TimedStub {
@@ -224,7 +221,7 @@ mod tests {
     fn records_jev_request_timing_and_cost() {
         use std::time::{Duration, UNIX_EPOCH};
         let path = std::env::temp_dir().join(format!(
-            "autoground-record-timing-{}-{}.json",
+            "autoground-record-timing-{}-{}.jsonl",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -255,21 +252,20 @@ mod tests {
                     cost_usd: Some(0.000042),
                 }],
             };
-            let mut rec = RecordingJudge::new(Box::new(stub), &path);
+            let log = Log::open(&path).unwrap();
+            let mut rec = RecordingJudge::new(Box::new(stub), log);
             let _ = rec.documents(&states);
         }
-        let text = std::fs::read_to_string(&path).unwrap();
-        let file: FixtureFile = serde_json::from_str(&text).unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(file.jev_requests.len(), 1);
-        let ev = &file.jev_requests[0];
-        assert_eq!(ev.started_at_ms, 1_700_000_000_000);
-        assert_eq!(ev.ended_at_ms, 1_700_000_000_340);
-        assert_eq!(ev.duration_ms, 340);
-        assert_eq!(ev.input_tokens, Some(1000));
-        assert_eq!(ev.output_tokens, Some(4));
-        assert!((ev.cost_usd.unwrap() - 0.000042).abs() < 1e-12);
-        assert!(file.started_at_ms.is_some());
-        assert!(file.ended_at_ms.is_some());
+        let events = events(&path);
+        let ev = events
+            .iter()
+            .find(|event| event["kind"] == "jev_request")
+            .expect("jev request");
+        assert_eq!(ev["started_at_ms"], 1_700_000_000_000u64);
+        assert_eq!(ev["ended_at_ms"], 1_700_000_000_340u64);
+        assert_eq!(ev["duration_ms"], 340);
+        assert_eq!(ev["input_tokens"], 1000);
+        assert_eq!(ev["output_tokens"], 4);
+        assert!((ev["cost_usd"].as_f64().unwrap() - 0.000042).abs() < 1e-12);
     }
 }
