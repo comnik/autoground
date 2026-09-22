@@ -11,7 +11,8 @@ use autoground::report::{
     jev_request_count, require_traces, run_exit_code, RunTiming,
 };
 use autoground::search::{
-    format_findings, format_trace, format_usage, search, HeuristicOracle, DEFAULT_BUDGET_BYTES,
+    present_search, search, HeuristicOracle, SearchError, SearchTraceFile, UsageRecord,
+    DEFAULT_BUDGET_BYTES,
 };
 use autoground::universe::Filesystem;
 use autoground::{compile, parse, verbalize_source};
@@ -74,16 +75,19 @@ enum Commands {
     },
     /// Judge a proposition against a repository, coarse to fine.
     ///
-    /// Starts at the children of the repo root. A directory listing can settle
-    /// the proposition (`true` / `false`); otherwise the walk refines. A file
-    /// is judged from its body in that same call.
+    /// Starts at the children of the repo root. A directory can settle the
+    /// proposition (`true` / `false`); otherwise the walk refines. A file is
+    /// judged from its body in that same call. A trace is written under
+    /// `/tmp/autoground/`. On a TTY, left/right opens each oracle call.
     ///
     /// Examples:
     ///   autoground search "the codebase has a frontend" --repo examples/toy-layered
     ///   autoground search "frontend" --judge heuristic --repo examples/toy-layered
+    ///   autoground search --inspect /tmp/autoground/trace-….json
     Search {
         /// Natural-language proposition.
-        proposition: String,
+        #[arg(required_unless_present = "inspect")]
+        proposition: Option<String>,
         /// Repository to search. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -92,9 +96,12 @@ enum Commands {
         budget: usize,
         #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
         judge: JudgeKind,
-        /// Also print every prune and refine, with the raw choice.
+        /// Also print every step (view and classifications) as text.
         #[arg(long)]
         full: bool,
+        /// Reopen a recorded search trace.
+        #[arg(long, value_name = "TRACE")]
+        inspect: Option<PathBuf>,
     },
 }
 
@@ -139,7 +146,15 @@ fn main() -> ExitCode {
             budget,
             judge,
             full,
-        } => match search_cmd(&proposition, &repo, budget, judge, full) {
+            inspect,
+        } => match search_cmd(
+            proposition.as_deref(),
+            &repo,
+            budget,
+            judge,
+            full,
+            inspect.as_ref(),
+        ) {
             Ok(code) => ExitCode::from(code as u8),
             Err(err) => {
                 eprintln!("{err}");
@@ -150,12 +165,22 @@ fn main() -> ExitCode {
 }
 
 fn search_cmd(
-    proposition: &str,
+    proposition: Option<&str>,
     repo: &Path,
     budget: usize,
     judge: JudgeKind,
     full: bool,
+    inspect: Option<&PathBuf>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
+    if let Some(path) = inspect {
+        let file = SearchTraceFile::load(path)
+            .map_err(|e| format!("could not read trace {}: {e}", path.display()))?;
+        present_search(path, &file, full)?;
+        return Ok(0);
+    }
+    let proposition = proposition.expect("proposition required");
+    let started_at = std::time::SystemTime::now();
+    let record_path = allocate_record_path()?;
     let mut universe = Filesystem::at_root(repo)?;
     let searched = match judge {
         JudgeKind::Heuristic => {
@@ -167,31 +192,31 @@ fn search_cmd(
             search(&mut universe, &mut oracle, proposition, budget)
         }
     };
-    match searched {
-        Ok(outcome) => {
-            present_search(&outcome, full);
-            Ok(0)
-        }
-        Err(err) => {
-            present_search(err.outcome(), full);
-            eprintln!("{err}");
-            Ok(3)
-        }
+    let (outcome, failure) = match searched {
+        Ok(outcome) => (outcome, None),
+        Err(SearchError::Universe { outcome, error }) => (outcome, Some(error.to_string())),
+        Err(SearchError::Oracle { outcome, error }) => (outcome, Some(error.to_string())),
+    };
+    let ended_at = std::time::SystemTime::now();
+    let repo_name = repo.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
+    let file = SearchTraceFile {
+        kind: autoground::search::trace::TRACE_KIND.to_string(),
+        proposition: proposition.to_string(),
+        repo_name: repo_name.to_string(),
+        findings: outcome.findings.clone(),
+        usage: UsageRecord::from_usage(&outcome.usage),
+        started_at_ms: epoch_ms(started_at),
+        ended_at_ms: epoch_ms(ended_at),
+        steps: outcome.steps.clone(),
+    };
+    file.save(&record_path)?;
+    present_search(&record_path, &file, full)?;
+    if let Some(err) = failure {
+        eprintln!("{err}");
+        Ok(3)
+    } else {
+        Ok(0)
     }
-}
-
-fn present_search(outcome: &autoground::search::SearchOutcome, full: bool) {
-    let findings = format_findings(&outcome.findings);
-    if !findings.is_empty() {
-        print!("{findings}");
-    }
-    if full {
-        let trace = format_trace(&outcome.trace);
-        if !trace.is_empty() {
-            print!("{trace}");
-        }
-    }
-    eprintln!("{}", format_usage(&outcome.usage));
 }
 
 fn verbalize_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {

@@ -24,6 +24,9 @@ pub trait Universe {
     /// A leaf renders as path plus contents. A non-leaf renders as a listing.
     fn is_leaf(&self, id: &str) -> Result<bool, UniverseError>;
 
+    /// Leaf byte length, or a directory listing. No file body.
+    fn summary(&self, id: &str) -> Result<ObjectSummary, UniverseError>;
+
     /// Cheap size of the current view (objects plus samples). File bodies are
     /// not read: files use metadata length plus header overhead.
     fn estimate(&self) -> Result<usize, UniverseError>;
@@ -44,6 +47,16 @@ pub trait Universe {
     fn insert(&mut self, id: String) -> Result<(), UniverseError>;
     fn remove(&mut self, id: &str);
     fn set(&mut self, ids: Vec<String>) -> Result<(), UniverseError>;
+}
+
+/// What a trace can show for one database without its body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectSummary {
+    pub leaf: bool,
+    /// File length, or the listing's byte length.
+    pub bytes: u64,
+    /// Directory listing. Empty for a leaf.
+    pub listing: String,
 }
 
 #[derive(Debug)]

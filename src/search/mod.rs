@@ -6,10 +6,16 @@
 //! that choice is the judgement.
 
 mod heuristic;
+mod tui;
+
+pub mod trace;
+pub use trace::{format_steps, SearchTraceFile, UsageRecord};
+pub use tui::present_search;
 
 use std::collections::HashSet;
 use std::fmt;
 
+use serde::Serialize;
 use serde_json::{json, Value as Json};
 
 use crate::eval::Value;
@@ -17,13 +23,15 @@ use crate::navigator::confidence::SUPPORT;
 use crate::oracle::{Classification, Oracle, OracleError, Ticket, Usage};
 use crate::universe::{Universe, UniverseError};
 
+use trace::{ExchangeRecord, SearchStep, ViewObject};
+
 pub use heuristic::HeuristicOracle;
 
 /// Default render budget. About 12k tokens at 4 bytes each, under Jev's
 /// 32k state-side cap so quoting and the question text still fit.
 pub const DEFAULT_BUDGET_BYTES: usize = 48 * 1024;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub enum Finding {
     /// Non-leaf judged from its own listing. `value` is true or false.
     Directory {
@@ -39,7 +47,8 @@ pub enum Finding {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Applied {
     Prune,
     Refine,
@@ -75,7 +84,7 @@ impl fmt::Display for Applied {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct Decision {
     pub id: String,
     pub leaf: bool,
@@ -88,6 +97,7 @@ pub struct Decision {
 pub struct SearchOutcome {
     pub findings: Vec<Finding>,
     pub trace: Vec<Decision>,
+    pub steps: Vec<SearchStep>,
     pub usage: Usage,
 }
 
@@ -96,6 +106,7 @@ impl SearchOutcome {
         Self {
             findings: Vec::new(),
             trace: Vec::new(),
+            steps: Vec::new(),
             usage,
         }
     }
@@ -140,6 +151,7 @@ pub fn search<U: Universe, O: Oracle>(
 ) -> Result<SearchOutcome, SearchError> {
     let mut findings = Vec::new();
     let mut trace = Vec::new();
+    let mut steps = Vec::new();
     let mut asked = HashSet::new();
     let root_children = match universe.children("") {
         Ok(children) => children,
@@ -162,17 +174,23 @@ pub fn search<U: Universe, O: Oracle>(
                 Ok(chunks) => chunks,
                 Err(error) => {
                     return Err(SearchError::Universe {
-                        outcome: outcome_now(&findings, &trace, oracle),
+                        outcome: outcome_now(&findings, &trace, &steps, oracle),
                         error,
                     });
                 }
             };
             for chunk in chunks {
-                if let Err(error) =
-                    enqueue(universe, oracle, proposition, budget, chunk, &mut batch)
-                {
+                if let Err(error) = enqueue(
+                    universe,
+                    oracle,
+                    proposition,
+                    budget,
+                    chunk,
+                    &mut steps,
+                    &mut batch,
+                ) {
                     return Err(SearchError::Universe {
-                        outcome: outcome_now(&findings, &trace, oracle),
+                        outcome: outcome_now(&findings, &trace, &steps, oracle),
                         error,
                     });
                 }
@@ -189,19 +207,27 @@ pub fn search<U: Universe, O: Oracle>(
                 Ok(answer) => answer,
                 Err(error) => {
                     return Err(SearchError::Oracle {
-                        outcome: outcome_now(&findings, &trace, oracle),
+                        outcome: outcome_now(&findings, &trace, &steps, oracle),
                         error,
                     });
                 }
             };
             let applied = apply(pending.leaf, &answer.choice, answer.confidence);
-            trace.push(Decision {
+            let decision = Decision {
                 id: pending.id.clone(),
                 leaf: pending.leaf,
                 raw: answer.choice.clone(),
                 applied,
                 confidence: answer.confidence,
-            });
+            };
+            trace.push(decision.clone());
+            let step = &mut steps[pending.step];
+            step.classifications.push(decision);
+            if step.exchange.is_none() {
+                if let Some(exchange) = &answer.exchange {
+                    step.exchange = Some(ExchangeRecord::from_oracle(exchange));
+                }
+            }
             if pending.leaf {
                 files.push((pending.id, answer.confidence, applied));
                 continue;
@@ -221,7 +247,7 @@ pub fn search<U: Universe, O: Oracle>(
                         Ok(kids) => kids,
                         Err(error) => {
                             return Err(SearchError::Universe {
-                                outcome: outcome_now(&findings, &trace, oracle),
+                                outcome: outcome_now(&findings, &trace, &steps, oracle),
                                 error,
                             });
                         }
@@ -236,7 +262,7 @@ pub fn search<U: Universe, O: Oracle>(
                             Ok(false) => {}
                             Err(error) => {
                                 return Err(SearchError::Universe {
-                                    outcome: outcome_now(&findings, &trace, oracle),
+                                    outcome: outcome_now(&findings, &trace, &steps, oracle),
                                     error,
                                 });
                             }
@@ -259,13 +285,14 @@ pub fn search<U: Universe, O: Oracle>(
         }
         frontier = next;
     }
-    Ok(outcome_now(&findings, &trace, oracle))
+    Ok(outcome_now(&findings, &trace, &steps, oracle))
 }
 
 struct Pending {
     ticket: Ticket,
     id: String,
     leaf: bool,
+    step: usize,
 }
 
 enum Chunk {
@@ -273,10 +300,16 @@ enum Chunk {
     Trimmed(String),
 }
 
-fn outcome_now<O: Oracle>(findings: &[Finding], trace: &[Decision], oracle: &O) -> SearchOutcome {
+fn outcome_now<O: Oracle>(
+    findings: &[Finding],
+    trace: &[Decision],
+    steps: &[SearchStep],
+    oracle: &O,
+) -> SearchOutcome {
     SearchOutcome {
         findings: findings.to_vec(),
         trace: trace.to_vec(),
+        steps: steps.to_vec(),
         usage: oracle.usage(),
     }
 }
@@ -309,6 +342,7 @@ fn enqueue<U: Universe, O: Oracle>(
     proposition: &str,
     budget: usize,
     chunk: Chunk,
+    steps: &mut Vec<SearchStep>,
     batch: &mut Vec<Pending>,
 ) -> Result<(), UniverseError> {
     let (state, targets, trimmed) = match chunk {
@@ -324,12 +358,54 @@ fn enqueue<U: Universe, O: Oracle>(
             (json!({ "view": view }), vec![id], true)
         }
     };
+    let view = capture_view(universe, &targets, trimmed)?;
+    let step = steps.len();
+    steps.push(SearchStep {
+        view,
+        classifications: Vec::new(),
+        exchange: None,
+    });
     for id in targets {
         let leaf = trimmed || universe.is_leaf(&id)?;
         let ticket = oracle.submit(question(&state, &id, leaf, proposition));
-        batch.push(Pending { ticket, id, leaf });
+        batch.push(Pending {
+            ticket,
+            id,
+            leaf,
+            step,
+        });
     }
     Ok(())
+}
+
+fn capture_view<U: Universe>(
+    universe: &U,
+    targets: &[String],
+    trimmed: bool,
+) -> Result<Vec<ViewObject>, UniverseError> {
+    let ids = if trimmed {
+        targets.to_vec()
+    } else {
+        let mut ids: Vec<String> = universe.objects().to_vec();
+        for sample in universe.samples() {
+            if !ids.iter().any(|id| id == sample) {
+                ids.push(sample.clone());
+            }
+        }
+        ids
+    };
+    let mut view = Vec::with_capacity(ids.len());
+    for id in ids {
+        let summary = universe.summary(&id)?;
+        view.push(ViewObject {
+            target: targets.iter().any(|target| target == &id),
+            id,
+            leaf: summary.leaf,
+            bytes: summary.bytes,
+            listing: summary.listing,
+        });
+    }
+    Ok(view)
 }
 
 fn pack<U: Universe>(
@@ -540,7 +616,8 @@ pub fn format_findings(findings: &[Finding]) -> String {
                 confidence,
             } => {
                 out.push_str(&format!(
-                    "{value:<8}{}  {confidence:.2}\n",
+                    "{:<8}{}  {confidence:.2}\n",
+                    value.to_string(),
                     display_path(id, false)
                 ));
             }
@@ -550,7 +627,8 @@ pub fn format_findings(findings: &[Finding]) -> String {
                 confidence,
             } => {
                 out.push_str(&format!(
-                    "{value:<8}{}  {confidence:.2}\n",
+                    "{:<8}{}  {confidence:.2}\n",
+                    value.to_string(),
                     display_path(id, true)
                 ));
             }
@@ -574,18 +652,50 @@ pub fn format_trace(trace: &[Decision]) -> String {
 }
 
 pub fn format_usage(usage: &Usage) -> String {
-    let fill = match usage.fill_factor {
-        Some(factor) => format!("{factor:.3}"),
+    let batch = match usage.batch_size {
+        Some(factor) => format!("{:.1}%", factor * 100.0),
         None => "none".to_string(),
     };
-    format!(
-        "requests={} tokens={} spend=${:.4} fill={fill}",
-        usage.requests, usage.input_tokens, usage.spend_usd
-    )
+    let fill = match usage.fill_factor {
+        Some(factor) => format!("{:.1}%", factor * 100.0),
+        None => "none".to_string(),
+    };
+    let mut line = format!(
+        "requests={} tokens={} spend={} batch={batch} fill={fill}",
+        usage.requests,
+        usage.input_tokens,
+        crate::report::format_usd(usage.spend_usd),
+    );
+    if let Some(latency) = usage.latency {
+        line.push_str(&format!(
+            " p50={} p95={} p99={}",
+            crate::report::format_duration(latency.p50),
+            crate::report::format_duration(latency.p95),
+            crate::report::format_duration(latency.p99),
+        ));
+    }
+    line
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::oracle::Usage;
+
+    #[test]
+    fn usage_prints_batch_and_fill_as_percent() {
+        let line = format_usage(&Usage {
+            spend_usd: 0.0018,
+            input_tokens: 42_050,
+            requests: 5,
+            batch_size: Some(0.104),
+            fill_factor: Some(0.263),
+            latency: None,
+        });
+        assert!(line.contains("batch=10.4%"), "{line}");
+        assert!(line.contains("fill=26.3%"), "{line}");
+        assert!(!line.contains("batch=0.104"), "{line}");
+    }
+
     use std::collections::{HashMap, HashSet};
 
     use super::*;
@@ -897,6 +1007,18 @@ mod tests {
         assert_eq!(oracle.state_count(), 1, "targets {:?}", oracle.targets());
         assert_eq!(oracle.targets().len(), 8);
         assert_eq!(outcome.findings.len(), 5);
+        assert_eq!(outcome.steps.len(), 1);
+        let app = outcome.steps[0]
+            .view
+            .iter()
+            .find(|obj| obj.id == "frontend/app.py")
+            .unwrap();
+        assert!(app.leaf);
+        assert!(app.listing.is_empty());
+        assert!(app.bytes > 0);
+        let shown = crate::search::trace::format_step(&outcome.steps[0], 0, 1);
+        assert!(!shown.contains("from backend import api"), "{shown}");
+        assert!(shown.contains("frontend/app.py"));
     }
 
     #[test]

@@ -371,6 +371,25 @@ impl Universe for Filesystem {
         Ok(!self.lookup(id)?.is_dir)
     }
 
+    fn summary(&self, id: &str) -> Result<super::ObjectSummary, UniverseError> {
+        let entry = self.lookup(id)?;
+        if entry.is_dir {
+            let listing = render_listing(id, &list_entries(&self.root, id, &self.filter)?);
+            Ok(super::ObjectSummary {
+                leaf: false,
+                bytes: listing.len() as u64,
+                listing,
+            })
+        } else {
+            let bytes = fs::metadata(repo_join(&self.root, id))?.len();
+            Ok(super::ObjectSummary {
+                leaf: true,
+                bytes,
+                listing: String::new(),
+            })
+        }
+    }
+
     fn estimate(&self) -> Result<usize, UniverseError> {
         self.estimate_blocks(&self.view_ids())
     }
