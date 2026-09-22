@@ -1,14 +1,12 @@
-//! Filter, then batched map, then a deterministic reduce over a [`Universe`].
+//! Prune a [`Universe`] down to the objects that bear on a proposition.
 //!
-//! The filter sends directory paths and child names, never file bodies.
-//! A directory pruned at [`SUPPORT`](crate::navigator::confidence::SUPPORT)
-//! or above drops its subtree. Every file that remains is a candidate,
-//! including files that sit directly at the root. The root itself is the
-//! search scope: it is listed and never asked.
-//!
-//! The map packs those bodies into one JSON object per batch,
-//! `{"<path>": "<content>"}`, and asks `true` / `false` / `unknown` per
-//! file. Reduce is [`trace::verdict_of`].
+//! [`Search::submit`] enqueues a proposition. [`Search::wait`] flushes every
+//! pending proposition together: directory listings are built once, and each
+//! proposition adds a prune/keep question on that shared state. The oracle
+//! then batches questions that share a state. A directory pruned at
+//! [`SUPPORT`](crate::navigator::confidence::SUPPORT) or above drops its
+//! subtree. What remains is a clone of the universe whose window is the kept
+//! directories and the files under them. File bodies are not judged.
 
 mod tui;
 
@@ -16,49 +14,32 @@ pub mod trace;
 pub use trace::{format_steps, SearchTraceFile, UsageRecord};
 pub use tui::present_search;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use serde::Serialize;
 use serde_json::{Map, Value as Json};
 
-use crate::eval::Value;
 use crate::navigator::confidence::SUPPORT;
 use crate::oracle::jev::QUESTION_BUDGET;
-use crate::oracle::{Classification, Oracle, OracleError, Ticket, Usage};
+use crate::oracle::{Classification, Oracle, Ticket as OracleTicket, Usage};
 use crate::universe::{Universe, UniverseError};
 
 use trace::{ExchangeRecord, SearchStep, ViewObject};
 
-/// Default render budget. About 12k tokens at 4 bytes each, under Jev's
-/// 32k state-side cap so quoting and the question text still fit.
+/// Default render budget for one directory-listing state. About 12k tokens at
+/// 4 bytes each, under Jev's 32k state-side cap.
 pub const DEFAULT_BUDGET_BYTES: usize = 48 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
-pub enum Finding {
-    /// Non-leaf judged from its own listing. `value` is true or false.
-    Directory {
-        id: String,
-        value: Value,
-        confidence: f64,
-    },
-    /// Leaf judged from its body.
-    File {
-        id: String,
-        value: Value,
-        confidence: f64,
-    },
-}
+/// Handle for a proposition enqueued with [`Search::submit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ticket(u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Applied {
     Prune,
     Keep,
-    Refine,
-    True,
-    False,
-    Unknown,
 }
 
 impl Applied {
@@ -66,19 +47,6 @@ impl Applied {
         match self {
             Applied::Prune => "prune",
             Applied::Keep => "keep",
-            Applied::Refine => "refine",
-            Applied::True => "true",
-            Applied::False => "false",
-            Applied::Unknown => "unknown",
-        }
-    }
-
-    fn value(self) -> Option<Value> {
-        match self {
-            Applied::True => Some(Value::True),
-            Applied::False => Some(Value::False),
-            Applied::Unknown => Some(Value::Unknown),
-            Applied::Prune | Applied::Keep | Applied::Refine => None,
         }
     }
 }
@@ -98,268 +66,335 @@ pub struct Decision {
     pub confidence: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SearchOutcome {
-    pub findings: Vec<Finding>,
+/// Pruned universe for one proposition, plus the directory decisions that
+/// produced the window.
+#[derive(Debug, Clone)]
+pub struct View<U> {
+    pub proposition: String,
+    pub universe: U,
     pub trace: Vec<Decision>,
     pub steps: Vec<SearchStep>,
     pub usage: Usage,
+    /// [`Universe::estimate`] of every reachable object, before pruning.
+    pub bytes_before: usize,
+    /// [`Universe::estimate`] of the pruned window.
+    pub bytes_after: usize,
 }
 
-impl SearchOutcome {
-    fn empty(usage: Usage) -> Self {
-        Self {
-            findings: Vec::new(),
-            trace: Vec::new(),
-            steps: Vec::new(),
-            usage,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum SearchError {
-    Universe {
-        outcome: SearchOutcome,
-        error: UniverseError,
-    },
-    Oracle {
-        outcome: SearchOutcome,
-        error: OracleError,
-    },
-}
-
-impl SearchError {
-    pub fn outcome(&self) -> &SearchOutcome {
-        match self {
-            SearchError::Universe { outcome, .. } | SearchError::Oracle { outcome, .. } => outcome,
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct SearchError {
+    pub steps: Vec<SearchStep>,
+    pub trace: Vec<Decision>,
+    pub usage: Usage,
+    message: String,
 }
 
 impl fmt::Display for SearchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SearchError::Universe { error, .. } => write!(f, "{error}"),
-            SearchError::Oracle { error, .. } => write!(f, "{error}"),
-        }
+        f.write_str(&self.message)
     }
 }
 
 impl std::error::Error for SearchError {}
 
-pub fn search<U: Universe, O: Oracle>(
-    universe: &mut U,
-    oracle: &mut O,
-    proposition: &str,
-    budget: usize,
-) -> Result<SearchOutcome, SearchError> {
-    let mut findings = Vec::new();
-    let mut trace = Vec::new();
-    let mut steps = Vec::new();
-
-    let directories = match directories_under(universe, "") {
-        Ok(directories) => directories,
-        Err(error) => {
-            return Err(SearchError::Universe {
-                outcome: SearchOutcome::empty(oracle.usage()),
-                error,
-            });
-        }
-    };
-    let filter_chunks = match pack_directories(universe, &directories, budget) {
-        Ok(chunks) => chunks,
-        Err(error) => {
-            return Err(SearchError::Universe {
-                outcome: outcome_now(&findings, &trace, &steps, oracle),
-                error,
-            });
-        }
-    };
-    let mut filter_groups = Vec::new();
-    for chunk in filter_chunks {
-        let state = match directory_state(universe, &chunk) {
-            Ok(state) => state,
-            Err(error) => {
-                return Err(SearchError::Universe {
-                    outcome: outcome_now(&findings, &trace, &steps, oracle),
-                    error,
-                });
-            }
-        };
-        filter_groups.push(Group {
-            state,
-            ids: chunk,
-            leaf: false,
-        });
-    }
-    let filter = ask(
-        universe,
-        oracle,
-        proposition,
-        filter_groups,
-        &findings,
-        &mut trace,
-        &mut steps,
-    )?;
-    let pruned = pruned_directories(universe, &filter);
-
-    let files = match candidate_files(universe, &pruned) {
-        Ok(files) => files,
-        Err(error) => {
-            return Err(SearchError::Universe {
-                outcome: outcome_now(&findings, &trace, &steps, oracle),
-                error,
-            });
-        }
-    };
-    let batches = match pack_files(universe, &files, budget) {
-        Ok(batches) => batches,
-        Err(error) => {
-            return Err(SearchError::Universe {
-                outcome: outcome_now(&findings, &trace, &steps, oracle),
-                error,
-            });
-        }
-    };
-    let mut map_groups = Vec::new();
-    for batch in batches {
-        let mut ids = Vec::with_capacity(batch.len());
-        let mut map = Map::new();
-        for file in &batch {
-            ids.push(file.id.clone());
-            map.insert(file.id.clone(), Json::String(file.content.clone()));
-        }
-        map_groups.push(Group {
-            state: Json::Object(map),
-            ids,
-            leaf: true,
-        });
-    }
-    let judged = ask(
-        universe,
-        oracle,
-        proposition,
-        map_groups,
-        &findings,
-        &mut trace,
-        &mut steps,
-    )?;
-    for decision in judged {
-        if let Some(value) = decision.applied.value() {
-            findings.push(Finding::File {
-                id: decision.id,
-                value,
-                confidence: decision.confidence,
-            });
-        }
-    }
-    Ok(outcome_now(&findings, &trace, &steps, oracle))
+struct Pending {
+    ticket: Ticket,
+    proposition: String,
 }
 
 struct Group {
     state: Json,
     ids: Vec<String>,
-    leaf: bool,
+    view: Vec<ViewObject>,
 }
 
-struct Pending {
-    ticket: Ticket,
-    id: String,
-    leaf: bool,
-    step: usize,
+/// A universe and an oracle shared by every proposition submitted to this
+/// session. `submit` only enqueues. `wait` asks.
+pub struct Search<U, O> {
+    universe: U,
+    oracle: O,
+    budget: usize,
+    next: u64,
+    pending: Vec<Pending>,
+    resolved: HashMap<Ticket, Result<View<U>, SearchError>>,
 }
 
-#[derive(Clone)]
-struct Body {
-    id: String,
-    content: String,
+impl<U, O> Search<U, O> {
+    pub fn new(universe: U, oracle: O, budget: usize) -> Self {
+        Self {
+            universe,
+            oracle,
+            budget,
+            next: 0,
+            pending: Vec::new(),
+            resolved: HashMap::new(),
+        }
+    }
+
+    pub fn usage(&self) -> Usage
+    where
+        O: Oracle,
+    {
+        self.oracle.usage()
+    }
 }
 
-fn ask<U: Universe, O: Oracle>(
-    universe: &U,
-    oracle: &mut O,
-    proposition: &str,
-    groups: Vec<Group>,
-    findings: &[Finding],
-    trace: &mut Vec<Decision>,
-    steps: &mut Vec<SearchStep>,
-) -> Result<Vec<Decision>, SearchError> {
-    let mut batch = Vec::new();
-    for group in groups {
-        let view = match capture(universe, &group.ids, group.leaf) {
-            Ok(view) => view,
-            Err(error) => {
-                return Err(SearchError::Universe {
-                    outcome: outcome_now(findings, trace, steps, oracle),
-                    error,
-                });
-            }
-        };
-        let step = steps.len();
-        steps.push(SearchStep {
-            view,
-            classifications: Vec::new(),
-            exchange: None,
+impl<U, O> Search<U, O>
+where
+    U: Universe + Clone,
+    O: Oracle,
+{
+    pub fn submit(&mut self, proposition: impl Into<String>) -> Ticket {
+        let ticket = Ticket(self.next);
+        self.next += 1;
+        self.pending.push(Pending {
+            ticket,
+            proposition: proposition.into(),
         });
-        for id in group.ids {
-            let ticket = oracle.submit(question(&group.state, &id, group.leaf, proposition));
-            batch.push(Pending {
-                ticket,
-                id,
-                leaf: group.leaf,
-                step,
+        ticket
+    }
+
+    /// Flush every pending proposition, then return this one's pruned window.
+    ///
+    /// Listings are rendered once. Each proposition contributes its own
+    /// question per directory, on that same state, so the oracle can fill a
+    /// request with questions from many propositions.
+    pub fn wait(&mut self, ticket: Ticket) -> Result<View<U>, SearchError> {
+        if let Some(done) = self.resolved.get(&ticket) {
+            return done.clone();
+        }
+        if !self.pending.iter().any(|item| item.ticket == ticket) {
+            return Err(SearchError {
+                steps: Vec::new(),
+                trace: Vec::new(),
+                usage: self.oracle.usage(),
+                message: format!("unknown ticket {}", ticket.0),
             });
         }
+        self.flush();
+        self.resolved.get(&ticket).cloned().unwrap_or_else(|| {
+            Err(SearchError {
+                steps: Vec::new(),
+                trace: Vec::new(),
+                usage: self.oracle.usage(),
+                message: format!("missing ticket {}", ticket.0),
+            })
+        })
     }
-    let mut decisions = Vec::new();
-    for pending in batch {
-        let answer = match oracle.wait(pending.ticket) {
-            Ok(answer) => answer,
+
+    pub fn wait_many(&mut self, tickets: &[Ticket]) -> Vec<Result<View<U>, SearchError>> {
+        tickets
+            .iter()
+            .copied()
+            .map(|ticket| self.wait(ticket))
+            .collect()
+    }
+
+    fn reject_all(&mut self, pending: Vec<Pending>, message: String) {
+        let usage = self.oracle.usage();
+        for item in pending {
+            self.resolved.insert(
+                item.ticket,
+                Err(SearchError {
+                    steps: Vec::new(),
+                    trace: Vec::new(),
+                    usage,
+                    message: message.clone(),
+                }),
+            );
+        }
+    }
+
+    fn flush(&mut self) {
+        let pending = std::mem::take(&mut self.pending);
+        if pending.is_empty() {
+            return;
+        }
+        let directories = match directories_under(&self.universe, "") {
+            Ok(directories) => directories,
             Err(error) => {
-                return Err(SearchError::Oracle {
-                    outcome: outcome_now(findings, trace, steps, oracle),
-                    error,
-                });
+                self.reject_all(pending, error.to_string());
+                return;
             }
         };
-        let applied = if pending.leaf {
-            apply_file(&answer.choice, answer.confidence)
-        } else {
-            apply_directory(&answer.choice, answer.confidence)
+        let chunks = match pack_directories(&self.universe, &directories, self.budget) {
+            Ok(chunks) => chunks,
+            Err(error) => {
+                self.reject_all(pending, error.to_string());
+                return;
+            }
         };
-        let decision = Decision {
-            id: pending.id,
-            leaf: pending.leaf,
-            raw: answer.choice,
-            applied,
-            confidence: answer.confidence,
-        };
-        trace.push(decision.clone());
-        let step = &mut steps[pending.step];
-        step.classifications.push(decision.clone());
-        if step.exchange.is_none() {
-            if let Some(exchange) = &answer.exchange {
-                step.exchange = Some(ExchangeRecord::from_oracle(exchange));
+        let mut groups = Vec::new();
+        for chunk in chunks {
+            let state = match directory_state(&self.universe, &chunk) {
+                Ok(state) => state,
+                Err(error) => {
+                    self.reject_all(pending, error.to_string());
+                    return;
+                }
+            };
+            let view = match capture(&self.universe, &chunk) {
+                Ok(view) => view,
+                Err(error) => {
+                    self.reject_all(pending, error.to_string());
+                    return;
+                }
+            };
+            groups.push(Group {
+                state,
+                ids: chunk,
+                view,
+            });
+        }
+
+        struct Ask {
+            search_ticket: Ticket,
+            step: usize,
+            id: String,
+            oracle_ticket: OracleTicket,
+        }
+
+        let mut steps: HashMap<Ticket, Vec<SearchStep>> = HashMap::new();
+        let mut asks = Vec::new();
+        for group in &groups {
+            for item in &pending {
+                let prop_steps = steps.entry(item.ticket).or_default();
+                let step = prop_steps.len();
+                prop_steps.push(SearchStep {
+                    view: group.view.clone(),
+                    classifications: Vec::new(),
+                    exchange: None,
+                });
+                for id in &group.ids {
+                    let oracle_ticket =
+                        self.oracle
+                            .submit(question(&group.state, id, &item.proposition));
+                    asks.push(Ask {
+                        search_ticket: item.ticket,
+                        step,
+                        id: id.clone(),
+                        oracle_ticket,
+                    });
+                }
             }
         }
-        decisions.push(decision);
+
+        let mut failed: HashMap<Ticket, String> = HashMap::new();
+        for ask in asks {
+            match self.oracle.wait(ask.oracle_ticket) {
+                Ok(answer) => {
+                    let decision = Decision {
+                        id: ask.id,
+                        leaf: false,
+                        raw: answer.choice.clone(),
+                        applied: apply_directory(&answer.choice, answer.confidence),
+                        confidence: answer.confidence,
+                    };
+                    let step = &mut steps.get_mut(&ask.search_ticket).unwrap()[ask.step];
+                    step.classifications.push(decision);
+                    if step.exchange.is_none() {
+                        if let Some(exchange) = &answer.exchange {
+                            step.exchange = Some(ExchangeRecord::from_oracle(exchange));
+                        }
+                    }
+                }
+                Err(error) => {
+                    failed
+                        .entry(ask.search_ticket)
+                        .or_insert_with(|| error.to_string());
+                }
+            }
+        }
+
+        let usage = self.oracle.usage();
+        let bytes_before = reachable_estimate(&self.universe).unwrap_or(0);
+        for item in pending {
+            let prop_steps = steps.remove(&item.ticket).unwrap_or_default();
+            let trace: Vec<Decision> = prop_steps
+                .iter()
+                .flat_map(|step| step.classifications.clone())
+                .collect();
+            if let Some(message) = failed.remove(&item.ticket) {
+                self.resolved.insert(
+                    item.ticket,
+                    Err(SearchError {
+                        steps: prop_steps,
+                        trace,
+                        usage,
+                        message,
+                    }),
+                );
+                continue;
+            }
+            let ids = match candidate_ids(&self.universe, &trace) {
+                Ok(ids) => ids,
+                Err(error) => {
+                    self.resolved.insert(
+                        item.ticket,
+                        Err(SearchError {
+                            steps: prop_steps,
+                            trace,
+                            usage,
+                            message: error.to_string(),
+                        }),
+                    );
+                    continue;
+                }
+            };
+            let mut universe = self.universe.clone();
+            if let Err(error) = universe.set(ids) {
+                self.resolved.insert(
+                    item.ticket,
+                    Err(SearchError {
+                        steps: prop_steps,
+                        trace,
+                        usage,
+                        message: error.to_string(),
+                    }),
+                );
+                continue;
+            }
+            let bytes_after = universe.estimate().unwrap_or(0);
+            self.resolved.insert(
+                item.ticket,
+                Ok(View {
+                    proposition: item.proposition,
+                    universe,
+                    trace,
+                    steps: prop_steps,
+                    usage,
+                    bytes_before,
+                    bytes_after,
+                }),
+            );
+        }
     }
-    Ok(decisions)
 }
 
-fn outcome_now<O: Oracle>(
-    findings: &[Finding],
-    trace: &[Decision],
-    steps: &[SearchStep],
-    oracle: &O,
-) -> SearchOutcome {
-    SearchOutcome {
-        findings: findings.to_vec(),
-        trace: trace.to_vec(),
-        steps: steps.to_vec(),
-        usage: oracle.usage(),
+/// [`Universe::estimate`] of every reachable file and directory.
+fn reachable_estimate<U: Universe + Clone>(universe: &U) -> Result<usize, UniverseError> {
+    let mut full = universe.clone();
+    let mut ids = Vec::new();
+    let mut stack = vec![String::new()];
+    while let Some(dir) = stack.pop() {
+        for child in full.children(&dir)? {
+            ids.push(child.clone());
+            if !full.is_leaf(&child)? {
+                stack.push(child);
+            }
+        }
     }
+    full.set(ids)?;
+    full.estimate()
+}
+
+/// Paths in the window, directories with a trailing slash.
+pub fn window_lines<U: Universe>(universe: &U) -> Result<Vec<String>, UniverseError> {
+    let mut lines = Vec::new();
+    for id in universe.objects() {
+        lines.push(display_path(id, universe.is_leaf(id)?));
+    }
+    Ok(lines)
 }
 
 fn directories_under<U: Universe>(universe: &U, root: &str) -> Result<Vec<String>, UniverseError> {
@@ -400,10 +435,25 @@ fn candidate_files<U: Universe>(
     Ok(out)
 }
 
+fn candidate_ids<U: Universe>(
+    universe: &U,
+    decisions: &[Decision],
+) -> Result<Vec<String>, UniverseError> {
+    let pruned = pruned_directories(universe, decisions);
+    let mut ids: Vec<String> = decisions
+        .iter()
+        .filter(|decision| !pruned.contains(&decision.id))
+        .map(|decision| decision.id.clone())
+        .collect();
+    ids.extend(candidate_files(universe, &pruned)?);
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 fn pruned_directories<U: Universe>(universe: &U, decisions: &[Decision]) -> HashSet<String> {
     let mut ids: Vec<&str> = decisions
         .iter()
-        .filter(|decision| !decision.leaf)
         .map(|decision| decision.id.as_str())
         .collect();
     ids.sort_by_key(|id| id.matches('/').count());
@@ -460,89 +510,6 @@ fn directory_state<U: Universe>(universe: &U, ids: &[String]) -> Result<Json, Un
     Ok(Json::Object(map))
 }
 
-fn pack_files<U: Universe>(
-    universe: &U,
-    ids: &[String],
-    budget: usize,
-) -> Result<Vec<Vec<Body>>, UniverseError> {
-    let mut batches = Vec::new();
-    let mut current: Vec<Body> = Vec::new();
-    for id in ids {
-        let full = universe.read(id, usize::MAX)?;
-        if json_len(&body_state(id, &full)) > budget {
-            if !current.is_empty() {
-                batches.push(std::mem::take(&mut current));
-            }
-            batches.push(vec![Body {
-                id: id.clone(),
-                content: shrink_body(universe, id, budget)?,
-            }]);
-            continue;
-        }
-        let mut trial = current.clone();
-        trial.push(Body {
-            id: id.clone(),
-            content: full.clone(),
-        });
-        let too_wide = trial.len() > QUESTION_BUDGET || json_len(&bodies_state(&trial)) > budget;
-        if current.is_empty() || !too_wide {
-            current = trial;
-        } else {
-            batches.push(std::mem::take(&mut current));
-            current.push(Body {
-                id: id.clone(),
-                content: full,
-            });
-        }
-    }
-    if !current.is_empty() {
-        batches.push(current);
-    }
-    Ok(batches)
-}
-
-fn shrink_body<U: Universe>(
-    universe: &U,
-    id: &str,
-    budget: usize,
-) -> Result<String, UniverseError> {
-    let full = universe.read(id, usize::MAX)?;
-    if json_len(&body_state(id, &full)) <= budget {
-        return Ok(full);
-    }
-    let mut best = String::new();
-    let mut lo = 0usize;
-    let mut hi = full.len();
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let trimmed = universe.read(id, mid.max(1))?;
-        if json_len(&body_state(id, &trimmed)) <= budget {
-            best = trimmed;
-            lo = mid + 1;
-        } else if mid == 0 {
-            break;
-        } else {
-            hi = mid;
-        }
-    }
-    Ok(best)
-}
-
-fn body_state(id: &str, content: &str) -> Json {
-    bodies_state(&[Body {
-        id: id.to_string(),
-        content: content.to_string(),
-    }])
-}
-
-fn bodies_state(files: &[Body]) -> Json {
-    let mut map = Map::new();
-    for file in files {
-        map.insert(file.id.clone(), Json::String(file.content.clone()));
-    }
-    Json::Object(map)
-}
-
 fn json_len(value: &Json) -> usize {
     value.to_string().len()
 }
@@ -577,22 +544,16 @@ where
     Ok(chunks)
 }
 
-fn capture<U: Universe>(
-    universe: &U,
-    ids: &[String],
-    leaf: bool,
-) -> Result<Vec<ViewObject>, UniverseError> {
+fn capture<U: Universe>(universe: &U, ids: &[String]) -> Result<Vec<ViewObject>, UniverseError> {
     let mut view = Vec::new();
-    if !leaf {
-        let summary = universe.summary("")?;
-        view.push(ViewObject {
-            target: false,
-            id: String::new(),
-            leaf: false,
-            bytes: summary.bytes,
-            listing: summary.listing,
-        });
-    }
+    let summary = universe.summary("")?;
+    view.push(ViewObject {
+        target: false,
+        id: String::new(),
+        leaf: false,
+        bytes: summary.bytes,
+        listing: summary.listing,
+    });
     for id in ids {
         let summary = universe.summary(id)?;
         view.push(ViewObject {
@@ -606,14 +567,6 @@ fn capture<U: Universe>(
     Ok(view)
 }
 
-fn apply_file(raw: &str, confidence: f64) -> Applied {
-    match raw {
-        "true" if confidence >= SUPPORT => Applied::True,
-        "false" if confidence >= SUPPORT => Applied::False,
-        _ => Applied::Unknown,
-    }
-}
-
 fn apply_directory(raw: &str, confidence: f64) -> Applied {
     match raw {
         "prune" if confidence >= SUPPORT => Applied::Prune,
@@ -621,36 +574,18 @@ fn apply_directory(raw: &str, confidence: f64) -> Applied {
     }
 }
 
-fn question(state: &Json, id: &str, leaf: bool, proposition: &str) -> Classification {
-    let (kind, ask, pairs): (&str, &str, &[(&str, &str)]) = if leaf {
-        (
-            "file",
-            "State maps each file path to its body.\nJudge whether this file's body supports the proposition, contradicts it, or does neither.",
-            &[
-                ("true", "The body supports the proposition."),
-                ("false", "The body contradicts the proposition."),
-                ("unknown", "The body does neither, or it is unclear."),
-            ],
-        )
-    } else {
-        (
-            "directory",
-            "State maps each directory path to its child names. File bodies are not included.\nPrune this directory when nothing in its subtree bears on the proposition. Keep it otherwise.",
-            &[
-                ("prune", "Nothing in this subtree bears on the proposition."),
-                (
-                    "keep",
-                    "Something here might bear on the proposition.",
-                ),
-            ],
-        )
-    };
+fn question(state: &Json, id: &str, proposition: &str) -> Classification {
+    let ask = "State maps each directory path to its child names. File bodies are not included.\nPrune this directory when nothing in its subtree bears on the proposition. Keep it otherwise.";
+    let pairs = [
+        ("prune", "Nothing in this subtree bears on the proposition."),
+        ("keep", "Something here might bear on the proposition."),
+    ];
     Classification {
         state: state.clone(),
-        instructions: format!("target: {id}\nkind: {kind}\n{ask}\nProposition: {proposition}"),
+        instructions: format!("target: {id}\nkind: directory\n{ask}\nProposition: {proposition}"),
         criteria: pairs
-            .iter()
-            .map(|(label, text)| ((*label).to_string(), (*text).to_string()))
+            .into_iter()
+            .map(|(label, text)| (label.to_string(), text.to_string()))
             .collect(),
     }
 }
@@ -671,37 +606,6 @@ fn display_path(id: &str, leaf: bool) -> String {
     } else {
         format!("{id}/")
     }
-}
-
-pub fn format_findings(findings: &[Finding]) -> String {
-    let mut out = String::new();
-    for finding in findings {
-        match finding {
-            Finding::Directory {
-                id,
-                value,
-                confidence,
-            } => {
-                out.push_str(&format!(
-                    "{:<8}{}  {confidence:.2}\n",
-                    value.to_string(),
-                    display_path(id, false)
-                ));
-            }
-            Finding::File {
-                id,
-                value,
-                confidence,
-            } => {
-                out.push_str(&format!(
-                    "{:<8}{}  {confidence:.2}\n",
-                    value.to_string(),
-                    display_path(id, true)
-                ));
-            }
-        }
-    }
-    out
 }
 
 pub fn format_trace(trace: &[Decision]) -> String {
@@ -766,14 +670,14 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::*;
-    use crate::oracle::{Answer, Oracle, Ticket};
+    use crate::oracle::{Answer, Oracle, OracleError, Ticket as OracleTicket};
     use crate::universe::fs::Filesystem;
 
     struct Script {
         labels: HashMap<String, (String, f64)>,
         log: Vec<Classification>,
-        pending: Vec<(Ticket, Classification)>,
-        resolved: HashMap<Ticket, Answer>,
+        pending: Vec<(OracleTicket, Classification)>,
+        resolved: HashMap<OracleTicket, Answer>,
         next: u64,
     }
 
@@ -789,6 +693,13 @@ mod tests {
                 resolved: HashMap::new(),
                 next: 0,
             }
+        }
+
+        fn bind(&mut self, proposition: &str, id: &str, choice: &str, confidence: f64) {
+            self.labels.insert(
+                format!("{proposition}\t{id}"),
+                (choice.to_string(), confidence),
+            );
         }
 
         fn targets(&self) -> Vec<&str> {
@@ -816,25 +727,31 @@ mod tests {
     }
 
     impl Oracle for Script {
-        fn submit(&mut self, req: Classification) -> Ticket {
-            let ticket = Ticket(self.next);
+        fn submit(&mut self, req: Classification) -> OracleTicket {
+            let ticket = OracleTicket(self.next);
             self.next += 1;
             self.log.push(req.clone());
             self.pending.push((ticket, req));
             ticket
         }
 
-        fn wait(&mut self, ticket: Ticket) -> Result<Answer, OracleError> {
+        fn wait(&mut self, ticket: OracleTicket) -> Result<Answer, OracleError> {
             if let Some(answer) = self.resolved.get(&ticket) {
                 return Ok(answer.clone());
             }
             let pending = std::mem::take(&mut self.pending);
             for (pending_ticket, classification) in pending {
                 let id = target_of(&classification.instructions);
+                let proposition = classification
+                    .instructions
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Proposition: "))
+                    .unwrap_or("");
                 let (choice, confidence) = self
                     .labels
-                    .get(id)
-                    .unwrap_or_else(|| panic!("no label for {id}"))
+                    .get(&format!("{proposition}\t{id}"))
+                    .or_else(|| self.labels.get(id))
+                    .unwrap_or_else(|| panic!("no label for {proposition} {id}"))
                     .clone();
                 self.resolved.insert(
                     pending_ticket,
@@ -857,11 +774,6 @@ mod tests {
             ("backend", "prune", 0.95),
             ("decoy", "prune", 0.95),
             ("frontend", "prune", 0.95),
-            ("backend/__init__.py", "unknown", 0.95),
-            ("backend/api.py", "unknown", 0.95),
-            ("decoy/noise.py", "unknown", 0.95),
-            ("frontend/__init__.py", "unknown", 0.95),
-            ("frontend/app.py", "unknown", 0.95),
         ];
         for (id, choice, confidence) in overrides {
             if let Some(slot) = labels.iter_mut().find(|(existing, _, _)| existing == id) {
@@ -892,29 +804,44 @@ mod tests {
         root
     }
 
+    fn search_one(
+        universe: Filesystem,
+        oracle: Script,
+        proposition: &str,
+        budget: usize,
+    ) -> (View<Filesystem>, Script) {
+        let mut session = Search::new(universe, oracle, budget);
+        let ticket = session.submit(proposition);
+        let view = session.wait(ticket).unwrap();
+        (view, session.oracle)
+    }
+
+    fn ids(view: &View<Filesystem>) -> Vec<String> {
+        view.universe.objects().to_vec()
+    }
+
     #[test]
-    fn filter_is_one_path_state_and_map_sends_bodies_by_path() {
-        let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let mut oracle = Script::new(toy(&[
-            ("frontend", "keep", 0.95),
-            ("frontend/app.py", "true", 0.95),
-        ]));
-        let outcome = search(
-            &mut universe,
-            &mut oracle,
+    fn kept_directory_and_its_files_are_the_window() {
+        let universe = Filesystem::at_root("examples/toy-layered").unwrap();
+        let (view, oracle) = search_one(
+            universe,
+            Script::new(toy(&[("frontend", "keep", 0.95)])),
             "there is a frontend",
             DEFAULT_BUDGET_BYTES,
-        )
-        .unwrap();
-        assert_eq!(oracle.state_count(), 2, "targets {:?}", oracle.targets());
+        );
+        assert_eq!(oracle.state_count(), 1, "targets {:?}", oracle.targets());
         assert_eq!(oracle.of_kind("directory").len(), 3);
+        assert!(oracle.of_kind("file").is_empty());
         assert_eq!(keys(oracle.of_kind("directory")[0]), vec!["keep", "prune"]);
-        let files = oracle.of_kind("file");
-        assert_eq!(files.len(), 2, "{:?}", oracle.targets());
-        assert_eq!(keys(files[0]), vec!["false", "true", "unknown"]);
         assert!(!oracle.targets().contains(&""));
-        assert!(!oracle.targets().contains(&"backend/api.py"));
-        assert!(!oracle.targets().contains(&"decoy/noise.py"));
+        assert_eq!(
+            ids(&view),
+            vec![
+                "frontend".to_string(),
+                "frontend/__init__.py".to_string(),
+                "frontend/app.py".to_string(),
+            ]
+        );
 
         let filter = &oracle.of_kind("directory")[0].state;
         assert!(filter.get("view").is_none());
@@ -938,81 +865,36 @@ mod tests {
             .unwrap()
             .iter()
             .all(|value| value.is_string()));
-
-        let body = files[0].state["frontend/app.py"].as_str().unwrap();
-        assert!(body.contains("def main"), "{body}");
-        assert!(!body.contains("=== frontend/app.py ==="), "{body}");
-        assert!(files[0].state.get("backend/api.py").is_none());
-        assert_eq!(
-            outcome.findings,
-            vec![
-                Finding::File {
-                    id: "frontend/__init__.py".into(),
-                    value: Value::Unknown,
-                    confidence: 0.95,
-                },
-                Finding::File {
-                    id: "frontend/app.py".into(),
-                    value: Value::True,
-                    confidence: 0.95,
-                },
-            ]
-        );
+        assert!(filter.get("frontend/app.py").is_none());
+        assert!(view.bytes_before > view.bytes_after);
+        assert!(view.bytes_after > 0);
     }
 
     #[test]
-    fn weak_prune_keeps_the_directory_and_still_judges_its_files() {
-        let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let mut oracle = Script::new(toy(&[
-            ("frontend", "prune", 0.5),
-            ("frontend/app.py", "false", 0.95),
-        ]));
-        let outcome = search(&mut universe, &mut oracle, "frontend", DEFAULT_BUDGET_BYTES).unwrap();
-        let frontend = outcome
+    fn weak_prune_keeps_the_directory_and_its_files() {
+        let universe = Filesystem::at_root("examples/toy-layered").unwrap();
+        let (view, oracle) = search_one(
+            universe,
+            Script::new(toy(&[("frontend", "prune", 0.5)])),
+            "frontend",
+            DEFAULT_BUDGET_BYTES,
+        );
+        let frontend = view
             .trace
             .iter()
             .find(|decision| decision.id == "frontend")
             .unwrap();
         assert_eq!(frontend.raw, "prune");
         assert_eq!(frontend.applied, Applied::Keep);
-        assert!(oracle.targets().contains(&"frontend/app.py"));
-        assert!(!oracle.targets().contains(&"backend/api.py"));
-        assert!(outcome.findings.iter().any(|finding| matches!(
-            finding,
-            Finding::File { id, value: Value::False, .. } if id == "frontend/app.py"
-        )));
-    }
-
-    #[test]
-    fn weak_file_true_is_stored_as_unknown() {
-        let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let mut oracle = Script::new(toy(&[
-            ("frontend", "keep", 0.95),
-            ("frontend/app.py", "true", 0.5),
-        ]));
-        let outcome = search(&mut universe, &mut oracle, "frontend", DEFAULT_BUDGET_BYTES).unwrap();
+        assert!(!oracle.targets().contains(&"frontend/app.py"));
         assert_eq!(
-            outcome.findings,
+            ids(&view),
             vec![
-                Finding::File {
-                    id: "frontend/__init__.py".into(),
-                    value: Value::Unknown,
-                    confidence: 0.95,
-                },
-                Finding::File {
-                    id: "frontend/app.py".into(),
-                    value: Value::Unknown,
-                    confidence: 0.5,
-                },
+                "frontend".to_string(),
+                "frontend/__init__.py".to_string(),
+                "frontend/app.py".to_string(),
             ]
         );
-        let app = outcome
-            .trace
-            .iter()
-            .find(|decision| decision.id == "frontend/app.py")
-            .unwrap();
-        assert_eq!(app.raw, "true");
-        assert_eq!(app.applied, Applied::Unknown);
     }
 
     #[test]
@@ -1021,96 +903,127 @@ mod tests {
         std::fs::create_dir_all(root.join("nested/deep")).unwrap();
         std::fs::write(root.join("nested/keepme.txt"), "keep\n").unwrap();
         std::fs::write(root.join("nested/deep/file.txt"), "deep\n").unwrap();
-        let mut universe = Filesystem::at_root(&root).unwrap();
-        let mut oracle = Script::new(vec![
-            ("nested".into(), "prune".into(), 0.99),
-            ("nested/deep".into(), "keep".into(), 0.99),
-        ]);
-        let outcome = search(&mut universe, &mut oracle, "anything", DEFAULT_BUDGET_BYTES).unwrap();
+        let universe = Filesystem::at_root(&root).unwrap();
+        let (view, oracle) = search_one(
+            universe,
+            Script::new(vec![
+                ("nested".into(), "prune".into(), 0.99),
+                ("nested/deep".into(), "keep".into(), 0.99),
+            ]),
+            "anything",
+            DEFAULT_BUDGET_BYTES,
+        );
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(oracle.targets(), vec!["nested", "nested/deep"]);
-        assert!(outcome.findings.is_empty());
+        assert!(ids(&view).is_empty());
     }
 
     #[test]
-    fn root_file_is_judged_when_a_sibling_directory_is_pruned() {
+    fn root_file_stays_when_a_sibling_directory_is_pruned() {
         let root = scratch("root-file");
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("README.md"), "read me\n").unwrap();
         std::fs::write(root.join("src/lib.rs"), "fn lib() {}\n").unwrap();
-        let mut universe = Filesystem::at_root(&root).unwrap();
-        let mut oracle = Script::new(vec![
-            ("src".into(), "prune".into(), 0.95),
-            ("README.md".into(), "unknown".into(), 0.9),
-        ]);
-        let outcome = search(&mut universe, &mut oracle, "anything", DEFAULT_BUDGET_BYTES).unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(oracle.targets().contains(&"README.md"));
-        assert!(oracle.targets().contains(&"src"));
-        assert!(!oracle.targets().contains(&"src/lib.rs"));
-        assert_eq!(
-            outcome.findings,
-            vec![Finding::File {
-                id: "README.md".into(),
-                value: Value::Unknown,
-                confidence: 0.9,
-            }]
+        let universe = Filesystem::at_root(&root).unwrap();
+        let (view, oracle) = search_one(
+            universe,
+            Script::new(vec![("src".into(), "prune".into(), 0.95)]),
+            "anything",
+            DEFAULT_BUDGET_BYTES,
         );
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(oracle.targets(), vec!["src"]);
+        assert_eq!(ids(&view), vec!["README.md".to_string()]);
     }
 
     #[test]
     fn tiny_budget_puts_each_directory_in_its_own_state() {
-        let mut universe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let mut oracle = Script::new(toy(&[]));
-        search(&mut universe, &mut oracle, "frontend", 1).unwrap();
+        let universe = Filesystem::at_root("examples/toy-layered").unwrap();
+        let (_, oracle) = search_one(universe, Script::new(toy(&[])), "frontend", 1);
         assert_eq!(oracle.of_kind("directory").len(), 3);
         assert_eq!(oracle.state_count(), 3, "targets {:?}", oracle.targets());
         assert!(oracle.of_kind("file").is_empty());
     }
 
     #[test]
-    fn tight_budget_splits_file_bodies_across_states() {
-        let root = scratch("split-bodies");
-        std::fs::create_dir_all(root.join("keep")).unwrap();
-        std::fs::write(root.join("keep/a.txt"), "a".repeat(80)).unwrap();
-        std::fs::write(root.join("keep/b.txt"), "b".repeat(80)).unwrap();
-        let mut universe = Filesystem::at_root(&root).unwrap();
-        let mut oracle = Script::new(vec![
-            ("keep".into(), "keep".into(), 0.95),
-            ("keep/a.txt".into(), "unknown".into(), 0.9),
-            ("keep/b.txt".into(), "unknown".into(), 0.9),
-        ]);
-        search(&mut universe, &mut oracle, "anything", 120).unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-        let files = oracle.of_kind("file");
-        assert_eq!(files.len(), 2, "{:?}", oracle.targets());
-        assert_ne!(
-            files[0].state.to_string(),
-            files[1].state.to_string(),
-            "bodies shared a state"
+    fn submit_does_not_ask_until_wait() {
+        let mut session = Search::new(
+            Filesystem::at_root("examples/toy-layered").unwrap(),
+            Script::new(toy(&[("frontend", "keep", 0.95)])),
+            DEFAULT_BUDGET_BYTES,
         );
+        let ticket = session.submit("frontend");
+        assert!(session.oracle.log.is_empty());
+        session.wait(ticket).unwrap();
+        assert_eq!(session.oracle.of_kind("directory").len(), 3);
     }
 
     #[test]
-    fn oversized_leaf_is_trimmed_in_the_path_state() {
-        let root = scratch("trim");
-        std::fs::write(root.join("big.txt"), "x".repeat(8_000)).unwrap();
-        let mut universe = Filesystem::at_root(&root).unwrap();
-        let mut oracle = Script::new(vec![("big.txt".into(), "unknown".into(), 0.95)]);
-        let outcome = search(&mut universe, &mut oracle, "anything", 64).unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(oracle.targets(), vec!["big.txt"]);
-        let body = oracle.log[0].state["big.txt"].as_str().unwrap();
-        assert!(body.contains('…'), "{body}");
-        assert!(body.len() < 8_000, "{}", body.len());
-        assert!(oracle.log[0].state.get("view").is_none());
+    fn unknown_ticket_does_not_flush() {
+        let mut session = Search::new(
+            Filesystem::at_root("examples/toy-layered").unwrap(),
+            Script::new(toy(&[])),
+            DEFAULT_BUDGET_BYTES,
+        );
+        let queued = session.submit("frontend");
+        let err = match session.wait(Ticket(99)) {
+            Err(err) => err,
+            Ok(_) => panic!("unknown ticket resolved"),
+        };
+        assert!(err.to_string().contains("unknown ticket"));
+        assert!(session.oracle.log.is_empty());
+        session.wait(queued).unwrap();
+        assert_eq!(session.oracle.of_kind("directory").len(), 3);
+    }
+
+    #[test]
+    fn propositions_share_a_directory_state() {
+        let mut oracle = Script::new(vec![]);
+        for (proposition, id, choice) in [
+            ("frontend", "frontend", "keep"),
+            ("frontend", "backend", "prune"),
+            ("frontend", "decoy", "prune"),
+            ("backend", "backend", "keep"),
+            ("backend", "frontend", "prune"),
+            ("backend", "decoy", "prune"),
+        ] {
+            oracle.bind(proposition, id, choice, 0.95);
+        }
+        let mut session = Search::new(
+            Filesystem::at_root("examples/toy-layered").unwrap(),
+            oracle,
+            DEFAULT_BUDGET_BYTES,
+        );
+        let frontend = session.submit("frontend");
+        let backend = session.submit("backend");
+        let left = session.wait(frontend).unwrap();
+        let asked = session.oracle.log.len();
+        let right = session.wait(backend).unwrap();
+        assert_eq!(session.oracle.log.len(), asked);
+        assert_eq!(asked, 6, "targets {:?}", session.oracle.targets());
+        assert_eq!(session.oracle.state_count(), 1);
+        assert!(session.oracle.of_kind("file").is_empty());
+        let state = session.oracle.log[0].state.to_string();
+        assert!(session
+            .oracle
+            .log
+            .iter()
+            .all(|classification| classification.state.to_string() == state));
         assert_eq!(
-            outcome.findings,
-            vec![Finding::File {
-                id: "big.txt".into(),
-                value: Value::Unknown,
-                confidence: 0.95,
-            }]
+            ids(&left),
+            vec![
+                "frontend".to_string(),
+                "frontend/__init__.py".to_string(),
+                "frontend/app.py".to_string(),
+            ]
+        );
+        assert_eq!(
+            ids(&right),
+            vec![
+                "backend".to_string(),
+                "backend/__init__.py".to_string(),
+                "backend/api.py".to_string(),
+            ]
         );
     }
 }

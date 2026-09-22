@@ -5,7 +5,7 @@ fn bin() -> Command {
 }
 
 #[test]
-fn heuristic_search_judges_files_under_the_named_directory() {
+fn heuristic_search_keeps_the_named_directory() {
     let out = bin()
         .args([
             "search",
@@ -21,12 +21,23 @@ fn heuristic_search_judges_files_under_the_named_directory() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(code, 0, "stderr={stderr} stdout={stdout}");
-    assert!(stdout.contains("[TRUE]"), "{stdout}");
     assert!(stdout.contains("requests=0"), "{stdout}");
-    assert!(stdout.contains("frontend/app.py"), "{stdout}");
-    assert!(stdout.contains("frontend/__init__.py"), "{stdout}");
-    assert!(!stdout.contains("decoy"), "{stdout}");
-    assert!(!stdout.contains("backend"), "{stdout}");
+    let smaller = stdout.find("% smaller").expect("reduction");
+    let usage_at = stdout.find("requests=0").unwrap();
+    let trace_at = stdout.find("trace: ").expect("trace");
+    let tree_at = stdout.find("frontend/\n").unwrap();
+    assert!(
+        smaller < usage_at && usage_at < trace_at && trace_at < tree_at,
+        "{stdout}"
+    );
+    assert!(stdout.contains("frontend/\n"), "{stdout}");
+    assert!(stdout.contains("  __init__.py\n"), "{stdout}");
+    assert!(stdout.contains("  app.py\n"), "{stdout}");
+    assert!(stdout.contains("backend/\n"), "{stdout}");
+    assert!(stdout.contains("decoy/\n"), "{stdout}");
+    assert!(!stdout.contains("api.py"), "{stdout}");
+    assert!(!stdout.contains("noise.py"), "{stdout}");
+    assert_eq!(stdout.matches("__init__.py").count(), 1, "{stdout}");
     let path = stdout
         .lines()
         .find_map(|line| line.strip_prefix("trace: "))
@@ -43,6 +54,8 @@ fn heuristic_search_judges_files_under_the_named_directory() {
         .expect("inspect");
     let again_out = String::from_utf8_lossy(&again.stdout);
     assert_eq!(again.status.code(), Some(0), "{again_out}");
-    assert!(again_out.contains("[TRUE]"), "{again_out}");
-    assert!(again_out.contains("frontend/"), "{again_out}");
+    assert!(again_out.contains("frontend/\n"), "{again_out}");
+    assert!(again_out.contains("  app.py\n"), "{again_out}");
+    assert!(again_out.contains("backend/\n"), "{again_out}");
+    assert!(!again_out.contains("api.py"), "{again_out}");
 }

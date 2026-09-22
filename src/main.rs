@@ -5,13 +5,14 @@ use autoground::edb::Store;
 use autoground::eval::run;
 use autoground::navigator::judge::epoch_ms;
 use autoground::navigator::{FixtureFile, FixtureJudge, JevJudge, RecordingJudge, TreeNavigator};
-use autoground::oracle::{HeuristicOracle, JevOracle};
+use autoground::oracle::{HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::report::{
     allocate_record_path, format_require_traces, format_run_body, format_run_header,
     jev_request_count, require_traces, run_exit_code, RunTiming,
 };
+use autoground::search::trace::SearchStep;
 use autoground::search::{
-    present_search, search, SearchError, SearchTraceFile, UsageRecord, DEFAULT_BUDGET_BYTES,
+    present_search, window_lines, Search, SearchTraceFile, UsageRecord, DEFAULT_BUDGET_BYTES,
 };
 use autoground::universe::Filesystem;
 use autoground::{compile, parse, verbalize_source};
@@ -180,21 +181,13 @@ fn search_cmd(
     let proposition = proposition.expect("proposition required");
     let started_at = std::time::SystemTime::now();
     let record_path = allocate_record_path()?;
-    let mut universe = Filesystem::at_root(repo)?;
+    let universe = Filesystem::at_root(repo)?;
     let searched = match judge {
         JudgeKind::Heuristic => {
-            let mut oracle = HeuristicOracle::new(universe.clone(), proposition);
-            search(&mut universe, &mut oracle, proposition, budget)
+            let oracle = HeuristicOracle::new(universe.clone());
+            run_search(universe, oracle, proposition, budget)?
         }
-        JudgeKind::Jev => {
-            let mut oracle = JevOracle::from_env()?;
-            search(&mut universe, &mut oracle, proposition, budget)
-        }
-    };
-    let (outcome, failure) = match searched {
-        Ok(outcome) => (outcome, None),
-        Err(SearchError::Universe { outcome, error }) => (outcome, Some(error.to_string())),
-        Err(SearchError::Oracle { outcome, error }) => (outcome, Some(error.to_string())),
+        JudgeKind::Jev => run_search(universe, JevOracle::from_env()?, proposition, budget)?,
     };
     let ended_at = std::time::SystemTime::now();
     let repo_name = repo.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
@@ -202,19 +195,61 @@ fn search_cmd(
         kind: autoground::search::trace::TRACE_KIND.to_string(),
         proposition: proposition.to_string(),
         repo_name: repo_name.to_string(),
-        findings: outcome.findings.clone(),
-        usage: UsageRecord::from_usage(&outcome.usage),
+        objects: searched.objects,
+        bytes_before: searched.bytes_before,
+        bytes_after: searched.bytes_after,
+        usage: UsageRecord::from_usage(&searched.usage),
         started_at_ms: epoch_ms(started_at),
         ended_at_ms: epoch_ms(ended_at),
-        steps: outcome.steps.clone(),
+        steps: searched.steps,
     };
     file.save(&record_path)?;
     present_search(&record_path, &file, full)?;
-    if let Some(err) = failure {
+    if let Some(err) = searched.failure {
         eprintln!("{err}");
         Ok(3)
     } else {
         Ok(0)
+    }
+}
+
+struct Searched {
+    objects: Vec<String>,
+    steps: Vec<SearchStep>,
+    usage: Usage,
+    bytes_before: u64,
+    bytes_after: u64,
+    failure: Option<String>,
+}
+
+fn run_search<O: Oracle>(
+    universe: Filesystem,
+    oracle: O,
+    proposition: &str,
+    budget: usize,
+) -> Result<Searched, Box<dyn std::error::Error>> {
+    let mut session = Search::new(universe, oracle, budget);
+    let ticket = session.submit(proposition);
+    match session.wait(ticket) {
+        Ok(view) => Ok(Searched {
+            objects: window_lines(&view.universe)?,
+            steps: view.steps,
+            usage: view.usage,
+            bytes_before: view.bytes_before as u64,
+            bytes_after: view.bytes_after as u64,
+            failure: None,
+        }),
+        Err(error) => {
+            let message = error.to_string();
+            Ok(Searched {
+                objects: Vec::new(),
+                steps: error.steps,
+                usage: error.usage,
+                bytes_before: 0,
+                bytes_after: 0,
+                failure: Some(message),
+            })
+        }
     }
 }
 

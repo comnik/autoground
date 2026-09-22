@@ -9,21 +9,20 @@ use super::{Answer, Classification, Oracle, OracleError, Ticket};
 /// `prune`. A file is `true` when its stem or a parent directory name occurs;
 /// otherwise `unknown`.
 ///
-/// File versus directory comes from a `kind:` line in the instructions.
-/// The judged id comes from a `target:` line.
+/// The proposition is the `Proposition:` line of the instructions, so one
+/// oracle can answer questions for many propositions. File versus directory
+/// comes from a `kind:` line. The judged id comes from a `target:` line.
 pub struct HeuristicOracle<U> {
     universe: U,
-    tokens: HashSet<String>,
     next: u64,
     pending: Vec<(Ticket, Answer)>,
     resolved: HashMap<Ticket, Answer>,
 }
 
 impl<U: Universe> HeuristicOracle<U> {
-    pub fn new(universe: U, proposition: &str) -> Self {
+    pub fn new(universe: U) -> Self {
         Self {
             universe,
-            tokens: tokens(proposition),
             next: 0,
             pending: Vec::new(),
             resolved: HashMap::new(),
@@ -32,13 +31,14 @@ impl<U: Universe> HeuristicOracle<U> {
 
     fn answer(&self, req: &Classification) -> Answer {
         let id = target_of(&req.instructions);
+        let tokens = tokens(proposition_of(&req.instructions));
         let choice = if is_leaf_question(&req.instructions, &self.universe, id) {
-            if path_matches(id, &self.tokens) {
+            if path_matches(id, &tokens) {
                 "true"
             } else {
                 "unknown"
             }
-        } else if dir_matches(id, &self.tokens) || self.descendant_matches(id) {
+        } else if dir_matches(id, &tokens) || self.descendant_matches(id, &tokens) {
             "keep"
         } else {
             "prune"
@@ -50,7 +50,7 @@ impl<U: Universe> HeuristicOracle<U> {
         }
     }
 
-    fn descendant_matches(&self, id: &str) -> bool {
+    fn descendant_matches(&self, id: &str, tokens: &HashSet<String>) -> bool {
         let mut stack = vec![id.to_string()];
         while let Some(dir) = stack.pop() {
             let Ok(children) = self.universe.children(&dir) else {
@@ -60,9 +60,9 @@ impl<U: Universe> HeuristicOracle<U> {
                 let name = basename(&child).to_ascii_lowercase();
                 let is_dir = self.universe.is_leaf(&child).ok() == Some(false);
                 let hit = if is_dir {
-                    self.tokens.contains(&name)
+                    tokens.contains(&name)
                 } else {
-                    self.tokens.contains(&stem(&name).to_ascii_lowercase())
+                    tokens.contains(&stem(&name).to_ascii_lowercase())
                 };
                 if hit {
                     return true;
@@ -121,6 +121,13 @@ fn is_leaf_question<U: Universe>(instructions: &str, universe: &U, id: &str) -> 
         "directory" => false,
         _ => universe.is_leaf(id).unwrap_or(false),
     }
+}
+
+fn proposition_of(instructions: &str) -> &str {
+    instructions
+        .lines()
+        .find_map(|line| line.strip_prefix("Proposition: "))
+        .unwrap_or("")
 }
 
 fn kind_of(instructions: &str) -> &str {

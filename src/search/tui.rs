@@ -9,7 +9,9 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
-use super::trace::{format_exchange, format_steps, format_summary, SearchStep, SearchTraceFile};
+use super::trace::{
+    format_exchange, format_steps, summary_lines, SearchStep, SearchTraceFile, SummaryLine,
+};
 use super::{Applied, Decision};
 
 struct RawMode;
@@ -42,15 +44,20 @@ impl Drop for AlternateScreen {
     }
 }
 
-/// Print the verdict, usage, trace path, and true/false evidence.
-/// On a TTY, left/right opens the step pager.
+/// Print the pruned window as a nested listing, then usage and the trace path.
+/// Pruned directories are collapsed. On a TTY they are grey, and left/right
+/// opens the step pager.
 pub fn present_search(path: &Path, file: &SearchTraceFile, full: bool) -> std::io::Result<()> {
-    print!("{}", format_summary(path, file));
-    if full && !file.steps.is_empty() {
-        println!();
-        print!("{}", format_steps(&file.steps));
+    let color = stdout().is_terminal();
+    let mut out = stdout();
+    for line in summary_lines(path, file) {
+        write_summary_line(&mut out, &line, color)?;
     }
-    stdout().flush()?;
+    if full && !file.steps.is_empty() {
+        writeln!(out)?;
+        write!(out, "{}", format_steps(&file.steps))?;
+    }
+    out.flush()?;
     if !stdout().is_terminal() || file.steps.is_empty() {
         return Ok(());
     }
@@ -72,6 +79,31 @@ pub fn present_search(path: &Path, file: &SearchTraceFile, full: bool) -> std::i
             Event::Resize(_, _) => {}
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn write_summary_line(
+    out: &mut impl Write,
+    line: &SummaryLine,
+    color: bool,
+) -> std::io::Result<()> {
+    if color && line.prominent {
+        queue!(
+            out,
+            SetAttribute(Attribute::Bold),
+            Print(&line.text),
+            SetAttribute(Attribute::Reset)
+        )?;
+    } else if color && line.pruned {
+        queue!(
+            out,
+            SetForegroundColor(Color::DarkGrey),
+            Print(&line.text),
+            ResetColor
+        )?;
+    } else {
+        write!(out, "{}", line.text)?;
     }
     Ok(())
 }
@@ -278,10 +310,8 @@ fn paint_entry(
 ) -> std::io::Result<()> {
     let name = fit(&entry_name(decision), width);
     let color = match decision.applied {
-        Applied::True => Some(Color::Green),
-        Applied::False => Some(Color::Red),
         Applied::Prune => Some(Color::DarkGrey),
-        Applied::Keep | Applied::Refine | Applied::Unknown => None,
+        Applied::Keep => None,
     };
     if selected {
         queue!(out, SetAttribute(Attribute::Reverse))?;

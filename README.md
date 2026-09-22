@@ -166,6 +166,10 @@ TBD verbalization is how we go from symbolic atoms to unstructured propositions.
 
 ### Interfaces
 
+**Log**: a unified log / session trace available to all components. Any `autoground` run
+keeps a log in `/tmp/autoground`. The log interface allows all other components to append
+their own structured events in a thread-safe way.
+
 **Universe**: a view over the universe.
 - estimate / compute the size of the current view of the universe (e.g. total size of all reachable files from the repo root)
 - rendering the current view (e.g. rendering the current set of paths as a tree, concatenating files with header information, things like that)
@@ -184,6 +188,11 @@ would render its listing.
 - report usage on this instance so far: spend, input tokens, request count, latency percentiles, mean batch size (questions per request / max questions per request), and mean fill factor (input tokens / the 32k state-side cap)
 
 The oracle hashes the `state` it is given (a Universe render, a listing tree, a file body). Universe itself has no digest method. Search uses this interface. The 3VL engine does not hold an oracle.
+
+**Search**: takes a universe, an oracle, and a natural language proposition, returns the
+pruned universe that is relevant to answering the proposition. Same auto-batching behaviour
+as the oracle: multiple search requests can be submitted that then get batched up
+appropriately.
 
 ### jev best practices
 

@@ -1,13 +1,13 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
-use crate::eval::Value;
 use crate::oracle::{LatencyPercentiles, OracleExchange, Usage};
 
-use super::{Decision, Finding};
+use super::{Applied, Decision};
 
 pub const TRACE_KIND: &str = "search";
 
@@ -61,66 +61,6 @@ impl ExchangeRecord {
             output_tokens: ex.output_tokens,
             cost_usd: ex.cost_usd,
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Verdict {
-    True,
-    False,
-    Unknown,
-    Conflict,
-}
-
-impl Verdict {
-    pub fn label(self) -> &'static str {
-        match self {
-            Verdict::True => "[TRUE]",
-            Verdict::False => "[FALSE]",
-            Verdict::Unknown => "[UNKNOWN]",
-            Verdict::Conflict => "[CONFLICT]",
-        }
-    }
-}
-
-impl std::fmt::Display for Verdict {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// True when any evidence is true and none is false, and the mirror for false.
-/// Both is a conflict. Neither is unknown.
-pub fn verdict_of(findings: &[Finding]) -> Verdict {
-    let mut saw_true = false;
-    let mut saw_false = false;
-    for finding in findings {
-        match finding_value(finding) {
-            Value::True => saw_true = true,
-            Value::False => saw_false = true,
-            Value::Unknown => {}
-        }
-    }
-    match (saw_true, saw_false) {
-        (true, true) => Verdict::Conflict,
-        (true, false) => Verdict::True,
-        (false, true) => Verdict::False,
-        (false, false) => Verdict::Unknown,
-    }
-}
-
-pub fn evidence(findings: &[Finding]) -> Vec<Finding> {
-    findings
-        .iter()
-        .filter(|finding| matches!(finding_value(finding), Value::True | Value::False))
-        .cloned()
-        .collect()
-}
-
-fn finding_value(finding: &Finding) -> Value {
-    match finding {
-        Finding::Directory { value, .. } | Finding::File { value, .. } => *value,
     }
 }
 
@@ -194,7 +134,14 @@ pub struct SearchTraceFile {
     pub kind: String,
     pub proposition: String,
     pub repo_name: String,
-    pub findings: Vec<Finding>,
+    /// Window after pruning. Directories carry a trailing slash.
+    pub objects: Vec<String>,
+    /// [`crate::universe::Universe::estimate`] of every reachable object.
+    #[serde(default)]
+    pub bytes_before: u64,
+    /// [`crate::universe::Universe::estimate`] of the pruned window.
+    #[serde(default)]
+    pub bytes_after: u64,
     pub usage: UsageRecord,
     pub started_at_ms: u64,
     pub ended_at_ms: u64,
@@ -217,22 +164,180 @@ impl SearchTraceFile {
     }
 }
 
+/// One line of the search summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryLine {
+    pub text: String,
+    /// Collapsed pruned directory.
+    pub pruned: bool,
+    /// The size-reduction headline.
+    pub prominent: bool,
+}
+
 pub fn format_summary(path: &Path, file: &SearchTraceFile) -> String {
-    let usage = file.usage.to_usage();
-    let mut out = format!(
-        "{} ({})\n",
-        verdict_of(&file.findings),
-        super::format_usage(&usage)
-    );
-    out.push_str(&format!("trace: {}\n", path.display()));
-    let evidence = evidence(&file.findings);
-    if evidence.is_empty() {
-        out.push_str("\n(no evidence)\n");
-    } else {
-        out.push('\n');
-        out.push_str(&super::format_findings(&evidence));
+    summary_lines(path, file)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
+}
+
+/// Usage, trace path, and the size cut, then the nested listing.
+/// A pruned directory is one line, with no children.
+pub fn summary_lines(path: &Path, file: &SearchTraceFile) -> Vec<SummaryLine> {
+    let mut lines = Vec::new();
+    if let Some(headline) = format_reduction(file.bytes_before, file.bytes_after) {
+        lines.push(SummaryLine {
+            text: format!("{headline}\n"),
+            pruned: false,
+            prominent: true,
+        });
     }
-    out
+    lines.push(SummaryLine {
+        text: format!("({})\n", super::format_usage(&file.usage.to_usage())),
+        pruned: false,
+        prominent: false,
+    });
+    lines.push(SummaryLine {
+        text: format!("trace: {}\n", path.display()),
+        pruned: false,
+        prominent: false,
+    });
+    lines.push(SummaryLine {
+        text: "\n".into(),
+        pruned: false,
+        prominent: false,
+    });
+    let mut listing = listing_lines(file);
+    if listing.is_empty() {
+        listing.push(SummaryLine {
+            text: "(empty)\n".into(),
+            pruned: false,
+            prominent: false,
+        });
+    }
+    lines.extend(listing);
+    lines
+}
+
+/// Share of the original view that pruning removed, plus the two estimates.
+pub fn format_reduction(before: u64, after: u64) -> Option<String> {
+    if before == 0 {
+        return None;
+    }
+    let pct = before.saturating_sub(after) as f64 * 100.0 / before as f64;
+    Some(format!(
+        "{pct:.1}% smaller   {} → {}",
+        format_bytes(before),
+        format_bytes(after)
+    ))
+}
+
+fn format_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    let n = n as f64;
+    if n < KB {
+        format!("{n:.0} B")
+    } else if n < MB {
+        format!("{:.1} KB", n / KB)
+    } else {
+        format!("{:.1} MB", n / MB)
+    }
+}
+
+struct Node {
+    id: String,
+    label: String,
+    dir: bool,
+    pruned: bool,
+}
+
+fn listing_lines(file: &SearchTraceFile) -> Vec<SummaryLine> {
+    let nodes = listing_nodes(file);
+    let mut lines = Vec::new();
+    write_listing(&nodes, "", 0, &mut lines);
+    lines
+}
+
+fn listing_nodes(file: &SearchTraceFile) -> Vec<Node> {
+    let mut nodes = Vec::new();
+    let mut kept = HashSet::new();
+    for object in &file.objects {
+        let dir = object.ends_with('/');
+        let id = object.trim_end_matches('/').to_string();
+        if id.is_empty() {
+            continue;
+        }
+        kept.insert(id.clone());
+        nodes.push(Node {
+            label: entry_label(&id, dir),
+            id,
+            dir,
+            pruned: false,
+        });
+    }
+    let pruned: HashSet<String> = file
+        .steps
+        .iter()
+        .flat_map(|step| step.classifications.iter())
+        .filter(|decision| decision.applied == Applied::Prune)
+        .map(|decision| decision.id.clone())
+        .filter(|id| !id.is_empty() && !kept.contains(id))
+        .collect();
+    let collapse: Vec<String> = pruned
+        .iter()
+        .filter(|id| !pruned.iter().any(|other| is_under(id, other)))
+        .cloned()
+        .collect();
+    for id in collapse {
+        nodes.push(Node {
+            label: entry_label(&id, true),
+            id,
+            dir: true,
+            pruned: true,
+        });
+    }
+    nodes
+}
+
+fn write_listing(nodes: &[Node], parent: &str, depth: usize, out: &mut Vec<SummaryLine>) {
+    let mut kids: Vec<&Node> = nodes
+        .iter()
+        .filter(|node| parent_id(&node.id) == parent)
+        .collect();
+    kids.sort_by(|a, b| basename(&a.id).cmp(basename(&b.id)).then(a.id.cmp(&b.id)));
+    for node in kids {
+        out.push(SummaryLine {
+            text: format!("{}{}\n", " ".repeat(depth * 2), node.label),
+            pruned: node.pruned,
+            prominent: false,
+        });
+        if node.dir && !node.pruned {
+            write_listing(nodes, &node.id, depth + 1, out);
+        }
+    }
+}
+
+fn entry_label(id: &str, dir: bool) -> String {
+    let name = basename(id);
+    if dir {
+        format!("{name}/")
+    } else {
+        name.to_string()
+    }
+}
+
+fn basename(id: &str) -> &str {
+    id.rsplit_once('/').map(|(_, name)| name).unwrap_or(id)
+}
+
+fn parent_id(id: &str) -> &str {
+    id.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("")
+}
+
+fn is_under(id: &str, ancestor: &str) -> bool {
+    id.strip_prefix(ancestor)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 pub fn format_steps(steps: &[SearchStep]) -> String {
@@ -307,4 +412,125 @@ fn epoch_ms(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search::{Applied, Decision};
+
+    fn decision(id: &str, applied: Applied) -> Decision {
+        Decision {
+            id: id.into(),
+            leaf: false,
+            raw: applied.to_string(),
+            applied,
+            confidence: 0.95,
+        }
+    }
+
+    fn file(objects: Vec<&str>, decisions: Vec<Decision>) -> SearchTraceFile {
+        SearchTraceFile {
+            kind: TRACE_KIND.into(),
+            proposition: "p".into(),
+            repo_name: "repo".into(),
+            objects: objects.into_iter().map(str::to_string).collect(),
+            bytes_before: 0,
+            bytes_after: 0,
+            usage: UsageRecord {
+                spend_usd: 0.0,
+                input_tokens: 0,
+                requests: 0,
+                batch_size: None,
+                fill_factor: None,
+                latency_p50_ms: None,
+                latency_p95_ms: None,
+                latency_p99_ms: None,
+            },
+            started_at_ms: 0,
+            ended_at_ms: 0,
+            steps: vec![SearchStep {
+                view: Vec::new(),
+                classifications: decisions,
+                exchange: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn summary_nests_kept_files_and_collapses_prunes() {
+        let file = file(
+            vec![
+                "frontend/",
+                "frontend/app.py",
+                "frontend/__init__.py",
+                "keep/",
+                "keep/nested/",
+                "keep/nested/file.txt",
+            ],
+            vec![
+                decision("backend", Applied::Prune),
+                decision("decoy", Applied::Prune),
+                decision("frontend", Applied::Keep),
+                decision("nested", Applied::Prune),
+                decision("nested/deep", Applied::Keep),
+            ],
+        );
+        let shown = summary_lines(Path::new("/tmp/t.json"), &file);
+        assert!(
+            shown[0].text.starts_with('('),
+            "usage leads when size is unknown"
+        );
+        assert!(shown[1].text.starts_with("trace:"));
+        let lines: Vec<&str> = shown
+            .iter()
+            .skip_while(|line| !line.text.starts_with("trace:"))
+            .skip(1)
+            .skip_while(|line| line.text == "\n")
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "backend/\n",
+                "decoy/\n",
+                "frontend/\n",
+                "  __init__.py\n",
+                "  app.py\n",
+                "keep/\n",
+                "  nested/\n",
+                "    file.txt\n",
+                "nested/\n",
+            ]
+        );
+        let pruned: Vec<&str> = shown
+            .iter()
+            .filter(|line| line.pruned)
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(pruned, vec!["backend/\n", "decoy/\n", "nested/\n"]);
+    }
+
+    #[test]
+    fn reduction_leads_the_summary() {
+        let mut file = file(vec!["frontend/", "frontend/app.py"], vec![]);
+        file.bytes_before = 4096;
+        file.bytes_after = 1024;
+        let shown = summary_lines(Path::new("/tmp/t.json"), &file);
+        assert!(shown[0].prominent);
+        assert_eq!(shown[0].text, "75.0% smaller   4.0 KB → 1.0 KB\n");
+        assert!(shown[1].text.starts_with('('));
+        assert!(shown[2].text.starts_with("trace:"));
+        assert_eq!(shown[3].text, "\n");
+        assert_eq!(shown[4].text, "frontend/\n");
+    }
+
+    #[test]
+    fn reduction_is_absent_without_an_original_size() {
+        assert_eq!(format_reduction(0, 0), None);
+        assert_eq!(
+            format_reduction(1000, 250).as_deref(),
+            Some("75.0% smaller   1000 B → 250 B")
+        );
+    }
 }
