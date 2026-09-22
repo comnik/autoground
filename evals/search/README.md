@@ -17,4 +17,4 @@ cargo run --bin search-eval -- baseline --refresh
 cargo run --bin search-eval -- score --judge jev
 ```
 
-Baseline cost is session tokens times `prices.toml` (xAI list rates, short-context band). `cache_creation` has no published rate; a non-zero bucket is left out of the dollar sum and the estimate is marked partial. The horizontal axis of the chart is percent of universe bytes pruned. The vertical axis is percent of evidence files selected.
+Baseline cost is session tokens times `prices.toml` (xAI list rates, short-context band). `cache_creation` has no published rate; a non-zero bucket is left out of the dollar sum and the estimate is marked partial. The horizontal axis of the chart is percent of universe bytes pruned. The vertical axis is percent of evidence files selected. The dashed line is the prune rate of a window that contains exactly the evidence files.

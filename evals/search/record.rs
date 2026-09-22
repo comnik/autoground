@@ -50,6 +50,10 @@ pub struct SuiteSummary {
     pub scored: usize,
     pub unscored: usize,
     pub failed: usize,
+    /// Mean, across scored propositions, of the prune rate of a window that
+    /// contains exactly that proposition's evidence files.
+    #[serde(default)]
+    pub ideal_pruned: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -53,6 +53,20 @@ pub fn render(runs: &[HistoryRun]) -> String {
         TOP + PLOT_H / 2.0
     ));
 
+    if let Some(ideal) = runs.iter().rev().find_map(|run| run.suite.ideal_pruned) {
+        let (x, _) = xy(ideal, 1.0);
+        body.push_str(&format!(
+            r##"<line x1="{x:.1}" y1="{TOP}" x2="{x:.1}" y2="{}" stroke="#666" stroke-dasharray="4 3" stroke-width="1.2"/>"##,
+            TOP + PLOT_H
+        ));
+        let anchor = if ideal > 0.75 { "end" } else { "start" };
+        let label_x = if ideal > 0.75 { x - 6.0 } else { x + 6.0 };
+        body.push_str(&format!(
+            r##"<text x="{label_x:.1}" y="{}" text-anchor="{anchor}" font-family="ui-sans-serif, sans-serif" font-size="11" fill="#666">evidence only</text>"##,
+            TOP + 14.0
+        ));
+    }
+
     let last = runs.len().saturating_sub(1);
     for (index, run) in runs.iter().enumerate() {
         let color = COLORS[index % COLORS.len()];
@@ -133,6 +147,7 @@ mod tests {
                 scored: 1,
                 unscored: 0,
                 failed: 0,
+                ideal_pruned: Some(0.9),
             },
             curve: vec![CurvePoint {
                 floor: 0.85,
@@ -144,5 +159,7 @@ mod tests {
         let svg = render(&[run]);
         assert!(svg.contains("<circle "), "{svg}");
         assert!(svg.contains("abcdef1"), "{svg}");
+        assert!(svg.contains("stroke-dasharray"), "{svg}");
+        assert!(svg.contains("evidence only"), "{svg}");
     }
 }

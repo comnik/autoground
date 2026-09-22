@@ -65,6 +65,26 @@ pub fn score_floors(
     Ok(points)
 }
 
+/// Prune rate of a window that contains exactly `evidence` and nothing else.
+pub fn ideal_pruned(
+    universe: &Filesystem,
+    evidence: &[String],
+) -> Result<Option<f64>, UniverseError> {
+    if evidence.is_empty() {
+        return Ok(None);
+    }
+    let bytes_before = reachable_bytes(universe)? as u64;
+    if bytes_before == 0 {
+        return Ok(None);
+    }
+    let mut view = universe.clone();
+    view.set(evidence.to_vec())?;
+    let bytes_after = view.estimate()? as u64;
+    Ok(Some(
+        (bytes_before - bytes_after) as f64 / bytes_before as f64,
+    ))
+}
+
 pub fn mean(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         None
@@ -143,6 +163,9 @@ mod tests {
         let mut readme = universe.clone();
         readme.set(vec!["README.md".to_string()]).unwrap();
         assert_eq!(tight.bytes_after, readme.estimate().unwrap() as u64);
+        let ideal = ideal_pruned(&universe, &["README.md".to_string()]).unwrap();
+        assert!((ideal.unwrap() - tight.pruned.unwrap()).abs() < 1e-9);
+        assert!(ideal.unwrap() > loose.pruned.unwrap());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

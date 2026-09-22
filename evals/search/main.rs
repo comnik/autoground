@@ -57,6 +57,10 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
         judge: JudgeKind,
     },
+    /// Redraw `pareto.svg` from `history.jsonl`.
+    ///
+    /// Fills a missing evidence-only prune line from the stored baselines.
+    Plot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -96,6 +100,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Baseline { refresh, only } => baseline(&repo, &dir, refresh, only.as_deref()),
         Commands::Score { judge } => score(&repo, &dir, judge),
+        Commands::Plot => redraw(&repo, &dir),
     }
 }
 
@@ -209,6 +214,7 @@ fn score(repo: &Path, dir: &Path, judge: JudgeKind) -> Result<(), Box<dyn std::e
     }
     let mut cases = Vec::new();
     let mut points_by_case: Vec<Vec<FloorPoint>> = Vec::new();
+    let mut ideals = Vec::new();
     let mut search_spend = 0.0;
     for item in &propositions {
         let baseline = &baselines[&item.id];
@@ -230,6 +236,9 @@ fn score(repo: &Path, dir: &Path, judge: JudgeKind) -> Result<(), Box<dyn std::e
                 let points =
                     metrics::score_floors(&ran.full, &ran.decisions, &baseline.evidence, &FLOORS)?;
                 print_case(&item.id, &points, ran.spend, &ran.trace);
+                if let Some(ideal) = metrics::ideal_pruned(&ran.full, &baseline.evidence)? {
+                    ideals.push(ideal);
+                }
                 cases.push(CaseRecord {
                     id: item.id.clone(),
                     status: "scored".to_string(),
@@ -252,7 +261,8 @@ fn score(repo: &Path, dir: &Path, judge: JudgeKind) -> Result<(), Box<dyn std::e
             }
         }
     }
-    let suite = suite_summary(&points_by_case, &cases);
+    let mut suite = suite_summary(&points_by_case, &cases);
+    suite.ideal_pruned = metrics::mean(&ideals);
     let curve = curve(&points_by_case);
     print_suite(&suite, search_spend, &baselines);
     let failed = cases.iter().any(|case| case.status == "failed");
@@ -396,11 +406,12 @@ fn print_suite(
     };
     let partial = if partial { " partial" } else { "" };
     eprintln!(
-        "suite @ {:.2}  pruned {}  evidence {}  micro {}  scored {}  unscored {}  failed {}  search {}  baseline {baseline}{partial}",
+        "suite @ {:.2}  pruned {}  evidence {}  micro {}  evidence-only {}  scored {}  unscored {}  failed {}  search {}  baseline {baseline}{partial}",
         suite.floor,
         fmt_pct(suite.mean_pruned),
         fmt_pct(suite.mean_evidence),
         fmt_pct(suite.micro_evidence),
+        fmt_pct(suite.ideal_pruned),
         suite.scored,
         suite.unscored,
         suite.failed,
@@ -443,7 +454,40 @@ fn suite_summary(points: &[Vec<FloorPoint>], cases: &[CaseRecord]) -> SuiteSumma
             .filter(|case| case.status == "unscored")
             .count(),
         failed: cases.iter().filter(|case| case.status == "failed").count(),
+        ideal_pruned: None,
     }
+}
+
+fn redraw(repo: &Path, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let propositions = load_propositions(&dir.join("propositions.json"))?;
+    let baselines = load_baselines(dir, &propositions)?;
+    let universe = Filesystem::at_root(repo)?;
+    let history_path = dir.join("history.jsonl");
+    let mut runs = load_history(&history_path)?;
+    for run in &mut runs {
+        if run.suite.ideal_pruned.is_some() {
+            continue;
+        }
+        let mut ideals = Vec::new();
+        for case in &run.cases {
+            if case.status != "scored" {
+                continue;
+            }
+            let Some(baseline) = baselines.get(&case.id) else {
+                continue;
+            };
+            if let Some(ideal) = metrics::ideal_pruned(&universe, &baseline.evidence)? {
+                ideals.push(ideal);
+            }
+        }
+        run.suite.ideal_pruned = metrics::mean(&ideals);
+    }
+    write_history(&history_path, &runs)?;
+    fs::write(dir.join("pareto.svg"), plot::render(&runs))?;
+    if let Some(ideal) = runs.iter().rev().find_map(|run| run.suite.ideal_pruned) {
+        eprintln!("evidence only {}", fmt_pct(Some(ideal)));
+    }
+    Ok(())
 }
 
 fn curve(points: &[Vec<FloorPoint>]) -> Vec<CurvePoint> {
