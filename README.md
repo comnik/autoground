@@ -185,6 +185,12 @@ would render its listing.
 
 The oracle hashes the `state` it is given (a Universe render, a listing tree, a file body). Universe itself has no digest method. Search uses this interface. The 3VL engine does not hold an oracle.
 
+### jev best practices
+
+- Leverage structured inputs. There should be no need for string templating.
+- Bias towards asking more questions over the same state. Really, really decompose.
+- Break things down into the smallest semantic unit.
+
 ### Notes
 
 No baked-in assumptions about schema.
