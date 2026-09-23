@@ -330,7 +330,7 @@ fn paint_entry(
 fn right_lines(step: &SearchStep, sel: usize, raw: bool, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(decision) = step.classifications.get(sel) {
-        lines.push(format!("{}  {:.2}", decision.raw, decision.confidence));
+        lines.push(format!("{}  {:.2}", decision.applied, decision.signal));
     } else {
         lines.push(String::new());
     }

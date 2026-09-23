@@ -425,7 +425,7 @@ pub fn format_step(step: &SearchStep, index: usize, total: usize) -> String {
         let name = display_id(&decision.id, decision.leaf);
         out.push_str(&format!(
             "  {name:<28} {:<8} {:.2}\n",
-            decision.raw, decision.confidence
+            decision.applied, decision.signal
         ));
     }
     out
@@ -478,9 +478,11 @@ mod tests {
         Decision {
             id: id.into(),
             leaf: false,
-            raw: applied.to_string(),
+            signal: match applied {
+                Applied::Keep => 0.95,
+                Applied::Prune => 0.05,
+            },
             applied,
-            confidence: 0.95,
         }
     }
 

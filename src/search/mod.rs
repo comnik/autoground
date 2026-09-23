@@ -24,7 +24,6 @@ use serde::Serialize;
 use serde_json::{json, Map, Value as Json};
 
 use crate::log::Log;
-use crate::navigator::confidence::SUPPORT;
 use crate::oracle::jev::QUESTION_BUDGET;
 use crate::oracle::{Classification, Oracle, Ticket as OracleTicket, Usage};
 use crate::universe::{Universe, UniverseError};
@@ -69,9 +68,11 @@ impl fmt::Display for Applied {
 pub struct Decision {
     pub id: String,
     pub leaf: bool,
-    pub raw: String,
+    /// `1 - P(irrelevant)`. Higher means information about the proposition is
+    /// more likely under this directory. Keep and prune are derived from this
+    /// and a floor; the number does not change meaning with the label.
+    pub signal: f64,
     pub applied: Applied,
-    pub confidence: f64,
 }
 
 /// Pruned universe for one proposition, plus the directory decisions that
@@ -631,29 +632,30 @@ fn capture<U: Universe>(universe: &U, ids: &[String]) -> Result<Vec<ViewObject>,
     Ok(view)
 }
 
-/// A directory `prune` at or above `min_confidence` drops its subtree. A live
-/// search passes [`PRUNE_FLOOR`].
-fn apply_prune(raw: &str, confidence: f64, min_confidence: f64) -> Applied {
-    match raw {
-        "prune" if confidence >= min_confidence => Applied::Prune,
-        _ => Applied::Keep,
+/// Drop a directory when its irrelevance, `1 - signal`, is at least `floor`.
+/// A live search passes [`PRUNE_FLOOR`].
+fn apply_signal(signal: f64, floor: f64) -> Applied {
+    if (1.0 - signal) >= floor {
+        Applied::Prune
+    } else {
+        Applied::Keep
     }
 }
 
-/// Object ids kept when directory decisions are applied at `min_confidence`.
+/// Object ids kept when each directory's irrelevance is compared with `floor`.
 ///
 /// `universe` is the full tree. `children` is read from disk, so a universe
 /// whose window is already narrowed still yields the same ids.
 pub fn retained_ids<U: Universe>(
     universe: &U,
     decisions: &[Decision],
-    min_confidence: f64,
+    floor: f64,
 ) -> Result<Vec<String>, UniverseError> {
     let adjusted = decisions
         .iter()
         .cloned()
         .map(|mut decision| {
-            decision.applied = apply_prune(&decision.raw, decision.confidence, min_confidence);
+            decision.applied = apply_signal(decision.signal, floor);
             decision
         })
         .collect::<Vec<_>>();
@@ -737,27 +739,14 @@ fn irrelevant_question(state: &Json, path: &str, proposition: &str) -> Classific
 
 /// `signal` is how likely it is that information about the proposition is
 /// under the directory: one minus that directory's own "irrelevant" answer.
-/// The listing in the question's state is already the subtree. At or above
-/// [`SUPPORT`] that is a keep. Below it, the recorded prune confidence is the
-/// irrelevance probability, and the directory drops at [`PRUNE_FLOOR`].
+/// The listing in the question's state is already the subtree. The directory
+/// drops when that irrelevance is at least [`PRUNE_FLOOR`].
 fn decision_from_signal(id: &str, signal: f64) -> Decision {
-    if signal >= SUPPORT {
-        Decision {
-            id: id.to_string(),
-            leaf: false,
-            raw: "keep".to_string(),
-            applied: Applied::Keep,
-            confidence: signal,
-        }
-    } else {
-        let confidence = 1.0 - signal;
-        Decision {
-            id: id.to_string(),
-            leaf: false,
-            raw: "prune".to_string(),
-            applied: apply_prune("prune", confidence, PRUNE_FLOOR),
-            confidence,
-        }
+    Decision {
+        id: id.to_string(),
+        leaf: false,
+        signal,
+        applied: apply_signal(signal, PRUNE_FLOOR),
     }
 }
 
@@ -775,11 +764,10 @@ pub fn format_trace(trace: &[Decision]) -> String {
     let mut out = String::new();
     for decision in trace {
         out.push_str(&format!(
-            "{:<8}{}  raw={}  {:.2}\n",
+            "{:<8}{}  signal={:.2}\n",
             decision.applied.as_str(),
             display_path(&decision.id, decision.leaf),
-            decision.raw,
-            decision.confidence
+            decision.signal
         ));
     }
     out
@@ -833,6 +821,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::*;
+    use crate::navigator::confidence::SUPPORT;
     use crate::oracle::{Answer, Oracle, OracleError, QuestionKind, Ticket as OracleTicket};
     use crate::universe::fs::Filesystem;
 
@@ -1073,9 +1062,8 @@ mod tests {
             .iter()
             .find(|decision| decision.id == "frontend")
             .unwrap();
-        assert_eq!(frontend.raw, "prune");
         assert_eq!(frontend.applied, Applied::Keep);
-        assert!((frontend.confidence - 0.5).abs() < 1e-9);
+        assert!((frontend.signal - 0.5).abs() < 1e-9);
         assert_eq!(
             ids(&view),
             vec![
@@ -1111,7 +1099,7 @@ mod tests {
             .iter()
             .find(|decision| decision.id == "nested")
             .unwrap();
-        assert_eq!(nested.raw, "prune");
+        assert!((nested.signal - 0.01).abs() < 1e-9);
         assert_eq!(nested.applied, Applied::Prune);
         assert!(ids(&view).is_empty());
     }

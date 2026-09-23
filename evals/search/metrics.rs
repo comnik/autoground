@@ -113,13 +113,12 @@ fn reachable_bytes(universe: &Filesystem) -> Result<usize, UniverseError> {
 mod tests {
     use super::*;
 
-    fn decision(id: &str, confidence: f64) -> Decision {
+    fn decision(id: &str, signal: f64) -> Decision {
         Decision {
             id: id.to_string(),
             leaf: false,
-            raw: "prune".to_string(),
+            signal,
             applied: autoground::search::Applied::Keep,
-            confidence,
         }
     }
 
@@ -135,7 +134,9 @@ mod tests {
         std::fs::write(root.join("README.md"), "root\n").unwrap();
         std::fs::write(root.join("src/a.txt"), "aaaa\n").unwrap();
         let universe = Filesystem::at_root(&root).unwrap();
-        let decisions = vec![decision("src", 0.60)];
+        // Irrelevance 0.60 sits between the two floors. The stored number is
+        // the signal, one minus that.
+        let decisions = vec![decision("src", 0.40)];
         let evidence = vec!["README.md".to_string(), "src/a.txt".to_string()];
         let points = score_floors(&universe, &decisions, &evidence, &[0.85, 0.50]).unwrap();
 
