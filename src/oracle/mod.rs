@@ -16,25 +16,83 @@ use std::time::{Duration, SystemTime};
 pub use jev::{JevOracle, Transport, UreqTransport};
 pub use mock::HeuristicOracle;
 
-/// One Choice to evaluate against a shared System One `state`.
+/// Which System One primitive a [`Classification`] asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuestionKind {
+    Choice,
+    Noul,
+}
+
+impl QuestionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuestionKind::Choice => "choice",
+            QuestionKind::Noul => "noul",
+        }
+    }
+}
+
+/// One question to evaluate against a shared System One `state`.
+///
+/// `instructions` and `criteria` are JSON. A string is a one-line question.
+/// An object names the fields the question text refers to, so a value that
+/// comes from code is a field rather than a spliced sentence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Classification {
     /// Shared context. Equal states share a POST.
     pub state: serde_json::Value,
-    pub instructions: String,
-    /// Label → criterion. Keys are the answer space.
-    pub criteria: BTreeMap<String, String>,
+    pub kind: QuestionKind,
+    pub instructions: serde_json::Value,
+    /// Choice options, or a Noul's `true` / `false` boundary. Null omits the field.
+    pub criteria: serde_json::Value,
+}
+
+impl Classification {
+    pub fn choice(
+        state: serde_json::Value,
+        instructions: impl Into<String>,
+        criteria: BTreeMap<String, String>,
+    ) -> Self {
+        let criteria = criteria
+            .into_iter()
+            .map(|(label, text)| (label, serde_json::Value::String(text)))
+            .collect();
+        Self {
+            state,
+            kind: QuestionKind::Choice,
+            instructions: serde_json::Value::String(instructions.into()),
+            criteria: serde_json::Value::Object(criteria),
+        }
+    }
+
+    pub fn noul(
+        state: serde_json::Value,
+        instructions: serde_json::Value,
+        criteria: serde_json::Value,
+    ) -> Self {
+        Self {
+            state,
+            kind: QuestionKind::Noul,
+            instructions,
+            criteria,
+        }
+    }
 }
 
 /// Opaque id returned by [`Oracle::submit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ticket(pub(crate) u64);
 
-/// A Choice answer, plus the exchange that produced it when the impl is remote.
+/// One answer, plus the exchange that produced it when the impl is remote.
+///
+/// A Choice fills `choice` and `confidence`. A Noul fills `noul` with the
+/// probability the answer is yes. That probability is the whole answer: a
+/// Noul has no separate confidence.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Answer {
     pub choice: String,
     pub confidence: f64,
+    pub noul: Option<f64>,
     pub exchange: Option<OracleExchange>,
 }
 

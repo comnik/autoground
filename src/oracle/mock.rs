@@ -4,14 +4,12 @@ use crate::universe::Universe;
 
 use super::{Answer, Classification, Oracle, OracleError, Ticket};
 
-/// Keyless stand-in over a [`Universe`]. A directory is `keep` when its own
-/// name occurs in the proposition or a descendant name does; otherwise
-/// `prune`. A file is `true` when its stem or a parent directory name occurs;
-/// otherwise `unknown`.
+/// Keyless stand-in over a [`Universe`]. A Noul is yes when the path's own
+/// name occurs in the proposition, and no otherwise. Search turns those
+/// probabilities into keep and prune.
 ///
-/// The proposition is the `Proposition:` line of the instructions, so one
-/// oracle can answer questions for many propositions. File versus directory
-/// comes from a `kind:` line. The judged id comes from a `target:` line.
+/// The proposition and the path are fields on the instruction object, so one
+/// oracle can answer questions for many propositions.
 pub struct HeuristicOracle<U> {
     universe: U,
     next: u64,
@@ -30,49 +28,20 @@ impl<U: Universe> HeuristicOracle<U> {
     }
 
     fn answer(&self, req: &Classification) -> Answer {
-        let id = target_of(&req.instructions);
-        let tokens = tokens(proposition_of(&req.instructions));
-        let choice = if is_leaf_question(&req.instructions, &self.universe, id) {
-            if path_matches(id, &tokens) {
-                "true"
-            } else {
-                "unknown"
-            }
-        } else if dir_matches(id, &tokens) || self.descendant_matches(id, &tokens) {
-            "keep"
+        let proposition = field(&req.instructions, "proposition");
+        let path = field(&req.instructions, "path");
+        let known = self.universe.is_leaf(path).is_ok();
+        let noul = if known && path_matches(path, &tokens(proposition)) {
+            0.95
         } else {
-            "prune"
+            0.05
         };
         Answer {
-            choice: choice.to_string(),
-            confidence: 0.9,
+            choice: String::new(),
+            confidence: noul,
+            noul: Some(noul),
             exchange: None,
         }
-    }
-
-    fn descendant_matches(&self, id: &str, tokens: &HashSet<String>) -> bool {
-        let mut stack = vec![id.to_string()];
-        while let Some(dir) = stack.pop() {
-            let Ok(children) = self.universe.children(&dir) else {
-                continue;
-            };
-            for child in children {
-                let name = basename(&child).to_ascii_lowercase();
-                let is_dir = self.universe.is_leaf(&child).ok() == Some(false);
-                let hit = if is_dir {
-                    tokens.contains(&name)
-                } else {
-                    tokens.contains(&stem(&name).to_ascii_lowercase())
-                };
-                if hit {
-                    return true;
-                }
-                if is_dir {
-                    stack.push(child);
-                }
-            }
-        }
-        false
     }
 }
 
@@ -107,46 +76,15 @@ fn tokens(proposition: &str) -> HashSet<String> {
         .collect()
 }
 
-fn basename(id: &str) -> &str {
-    id.rsplit('/').next().unwrap_or(id)
-}
-
 fn stem(name: &str) -> &str {
     name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name)
 }
 
-fn is_leaf_question<U: Universe>(instructions: &str, universe: &U, id: &str) -> bool {
-    match kind_of(instructions) {
-        "file" => true,
-        "directory" => false,
-        _ => universe.is_leaf(id).unwrap_or(false),
-    }
-}
-
-fn proposition_of(instructions: &str) -> &str {
+fn field<'a>(instructions: &'a serde_json::Value, key: &str) -> &'a str {
     instructions
-        .lines()
-        .find_map(|line| line.strip_prefix("Proposition: "))
+        .get(key)
+        .and_then(|value| value.as_str())
         .unwrap_or("")
-}
-
-fn kind_of(instructions: &str) -> &str {
-    instructions
-        .lines()
-        .find_map(|line| line.strip_prefix("kind: "))
-        .unwrap_or("")
-}
-
-fn target_of(instructions: &str) -> &str {
-    instructions
-        .lines()
-        .find_map(|line| line.strip_prefix("target: "))
-        .unwrap_or("")
-}
-
-fn dir_matches(id: &str, tokens: &HashSet<String>) -> bool {
-    let name = basename(id).to_ascii_lowercase();
-    !name.is_empty() && tokens.contains(&name)
 }
 
 fn path_matches(id: &str, tokens: &HashSet<String>) -> bool {

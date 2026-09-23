@@ -9,7 +9,7 @@ Two numbers:
 
 Evidence is the files a Grok session opened with `read_file` while looking at that proposition on its own. Those sessions are stored under `baseline/` and reused. `baseline --refresh` replaces them. Grep and directory listings are navigation, recorded on the baseline and left out of the evidence set.
 
-`score` runs one search per proposition, the same isolation as the agent. A later comparison can batch propositions in one flush. The shipped prune floor is 0.85. The same directory decisions are replayed at 0.50, 0.70, 0.85, 0.95, and 1.00, which is the curve in `pareto.svg`. Jev runs append `history.jsonl`. `--judge heuristic` prints the table and leaves history alone.
+`score` runs two passes. The first searches each proposition on its own, the same isolation as the agent. The second submits every proposition and flushes them together, so they share one listing. Both curves are appended to `history.jsonl`. `pareto.svg` draws the latest score only, individual and batch; the batch curve is labeled `batch`. Older scores stay in the history file. The shipped prune floor is 0.85. The same directory decisions are replayed at 0.50, 0.70, 0.85, 0.95, and 1.00. `--judge heuristic` prints both tables and leaves history alone.
 
 ```
 cargo run --bin search-eval -- baseline

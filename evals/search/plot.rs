@@ -12,6 +12,7 @@ const COLORS: [&str; 6] = [
 ];
 
 pub fn render(runs: &[HistoryRun]) -> String {
+    let runs = shown(runs);
     let mut body = String::new();
     body.push_str(&format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}" viewBox="0 0 {WIDTH} {HEIGHT}">"##
@@ -67,7 +68,6 @@ pub fn render(runs: &[HistoryRun]) -> String {
         ));
     }
 
-    let last = runs.len().saturating_sub(1);
     for (index, run) in runs.iter().enumerate() {
         let color = COLORS[index % COLORS.len()];
         let mut points = Vec::new();
@@ -77,15 +77,13 @@ pub fn render(runs: &[HistoryRun]) -> String {
             }
         }
         if points.len() >= 2 {
-            let width = if index == last { 2.4 } else { 1.2 };
-            let opacity = if index == last { 1.0 } else { 0.45 };
             let rendered = points
                 .iter()
                 .map(|(x, y)| format!("{x:.1},{y:.1}"))
                 .collect::<Vec<_>>()
                 .join(" ");
             body.push_str(&format!(
-                r##"<polyline fill="none" stroke="{color}" stroke-width="{width}" opacity="{opacity}" points="{rendered}"/>"##
+                r##"<polyline fill="none" stroke="{color}" stroke-width="2.2" points="{rendered}"/>"##
             ));
         }
         if let Some(mark) = run
@@ -95,22 +93,38 @@ pub fn render(runs: &[HistoryRun]) -> String {
         {
             if let (Some(pruned), Some(evidence)) = (mark.mean_pruned, mark.mean_evidence) {
                 let (x, y) = xy(pruned, evidence);
-                let radius = if index == last { 4.5 } else { 3.0 };
                 body.push_str(&format!(
-                    r##"<circle cx="{x:.1}" cy="{y:.1}" r="{radius}" fill="{color}"/>"##
+                    r##"<circle cx="{x:.1}" cy="{y:.1}" r="4" fill="{color}"/>"##
                 ));
             }
         }
         let sha = short_sha(&run.git_sha);
         let dirty = if run.git_dirty { "*" } else { "" };
+        let mode = if run.batched { " batch" } else { "" };
         let y = TOP + 14.0 + index as f64 * 14.0;
         body.push_str(&format!(
-            r##"<text x="{}" y="{y:.1}" font-family="ui-sans-serif, sans-serif" font-size="11" fill="{color}">{sha}{dirty}</text>"##,
+            r##"<text x="{}" y="{y:.1}" font-family="ui-sans-serif, sans-serif" font-size="11" fill="{color}">{sha}{dirty}{mode}</text>"##,
             LEFT + 8.0
         ));
     }
     body.push_str("</svg>\n");
     body
+}
+
+/// The latest score writes the individual pass and then the batch pass.
+/// Older scores stay in history and drop off the chart.
+fn shown(runs: &[HistoryRun]) -> &[HistoryRun] {
+    let Some(last) = runs.last() else {
+        return runs;
+    };
+    if last.batched {
+        if let Some(prev) = runs.len().checked_sub(2) {
+            if !runs[prev].batched {
+                return &runs[prev..];
+            }
+        }
+    }
+    &runs[runs.len() - 1..]
 }
 
 fn xy(pruned: f64, evidence: f64) -> (f64, f64) {
@@ -136,6 +150,7 @@ mod tests {
             git_dirty: false,
             scored_at_ms: 0,
             judge: "jev".to_string(),
+            batched: false,
             search_spend_usd: 0.0,
             baseline_estimated_usd: None,
             baseline_estimate_partial: false,
@@ -161,5 +176,89 @@ mod tests {
         assert!(svg.contains("abcdef1"), "{svg}");
         assert!(svg.contains("stroke-dasharray"), "{svg}");
         assert!(svg.contains("evidence only"), "{svg}");
+        assert!(!svg.contains("batch"), "{svg}");
+    }
+
+    #[test]
+    fn a_batched_run_is_labeled() {
+        let mut run = HistoryRun {
+            git_sha: "abcdef123456".to_string(),
+            git_dirty: true,
+            scored_at_ms: 0,
+            judge: "jev".to_string(),
+            batched: true,
+            search_spend_usd: 0.0,
+            baseline_estimated_usd: None,
+            baseline_estimate_partial: false,
+            suite: SuiteSummary {
+                floor: 0.85,
+                mean_pruned: Some(0.4),
+                mean_evidence: Some(0.8),
+                micro_evidence: Some(0.8),
+                scored: 1,
+                unscored: 0,
+                failed: 0,
+                ideal_pruned: None,
+            },
+            curve: vec![CurvePoint {
+                floor: 0.85,
+                mean_pruned: Some(0.5),
+                mean_evidence: Some(0.9),
+            }],
+            cases: Vec::new(),
+        };
+        let svg = render(std::slice::from_ref(&run));
+        assert!(svg.contains("abcdef1* batch"), "{svg}");
+        run.batched = false;
+        let svg = render(std::slice::from_ref(&run));
+        assert!(!svg.contains("batch"), "{svg}");
+    }
+
+    #[test]
+    fn older_scores_drop_off_the_chart() {
+        let older = sample("oldsha111", false, 0.1, 1.0);
+        let each = sample("newsha222", false, 0.3, 0.9);
+        let batch = sample("newsha222", true, 0.35, 0.9);
+        let svg = render(&[older, each, batch]);
+        assert!(!svg.contains("oldsha1"), "{svg}");
+        assert!(svg.contains("newsha2"), "{svg}");
+        assert!(svg.contains("batch"), "{svg}");
+        assert_eq!(svg.matches("<polyline ").count(), 2, "{svg}");
+    }
+
+    fn sample(sha: &str, batched: bool, pruned: f64, evidence: f64) -> HistoryRun {
+        HistoryRun {
+            git_sha: sha.to_string(),
+            git_dirty: false,
+            scored_at_ms: 0,
+            judge: "jev".to_string(),
+            batched,
+            search_spend_usd: 0.0,
+            baseline_estimated_usd: None,
+            baseline_estimate_partial: false,
+            suite: SuiteSummary {
+                floor: 0.85,
+                mean_pruned: Some(pruned),
+                mean_evidence: Some(evidence),
+                micro_evidence: Some(evidence),
+                scored: 1,
+                unscored: 0,
+                failed: 0,
+                ideal_pruned: Some(0.9),
+            },
+            curve: vec![
+                CurvePoint {
+                    floor: 0.5,
+                    mean_pruned: Some(pruned + 0.1),
+                    mean_evidence: Some(evidence - 0.1),
+                },
+                CurvePoint {
+                    floor: 0.85,
+                    mean_pruned: Some(pruned),
+                    mean_evidence: Some(evidence),
+                },
+            ],
+            cases: Vec::new(),
+        }
     }
 }

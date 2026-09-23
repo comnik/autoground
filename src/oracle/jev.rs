@@ -4,13 +4,19 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 
-use super::{Answer, Classification, Oracle, OracleError, OracleExchange, Ticket, Usage};
+use super::{
+    Answer, Classification, Oracle, OracleError, OracleExchange, QuestionKind, Ticket, Usage,
+};
 
 const DEFAULT_BASE: &str = "https://api.typesafe.ai";
 const DEFAULT_MODEL: &str = "jev-latest";
 
 const MAX_RETRIES: u32 = 4;
-const POST_PARALLELISM: usize = 8;
+/// In-flight POSTs. Jev publishes 250k input tokens per second and 1,200
+/// requests per minute; both can change without notice. A full search
+/// request is about 15k tokens, so 16 fills the token budget. The request
+/// cap is looser.
+const POST_PARALLELISM: usize = 16;
 /// Published Jev input price. Output tokens are unmetered.
 const INPUT_USD_PER_MILLION_TOKENS: f64 = 0.042;
 /// Hard cap on recorded Jev spend for one oracle instance.
@@ -288,12 +294,10 @@ impl<T: Transport> JevOracle<T> {
                     self.last_exchanges.push(ex.clone());
                     for p in items {
                         let key = question_key(p.ticket);
-                        let parsed =
-                            parse_choice(&response, &key).map(|(choice, confidence)| Answer {
-                                choice,
-                                confidence,
-                                exchange: Some(ex.clone()),
-                            });
+                        let parsed = parse_answer(&response, &key, p.req.kind).map(|mut answer| {
+                            answer.exchange = Some(ex.clone());
+                            answer
+                        });
                         self.resolved.insert(p.ticket, parsed);
                     }
                 }
@@ -352,14 +356,13 @@ fn question_key(ticket: Ticket) -> String {
 fn request_body(model: &str, state: &Value, items: &[Pending]) -> Value {
     let mut questions = serde_json::Map::new();
     for p in items {
-        questions.insert(
-            question_key(p.ticket),
-            json!({
-                "type": "choice",
-                "instructions": p.req.instructions,
-                "criteria": p.req.criteria,
-            }),
-        );
+        let mut question = serde_json::Map::new();
+        question.insert("type".into(), json!(p.req.kind.as_str()));
+        question.insert("instructions".into(), p.req.instructions.clone());
+        if !p.req.criteria.is_null() {
+            question.insert("criteria".into(), p.req.criteria.clone());
+        }
+        questions.insert(question_key(p.ticket), Value::Object(question));
     }
     json!({
         "model": model,
@@ -380,7 +383,7 @@ fn state_digest(state: &Value) -> u64 {
     hasher.finish()
 }
 
-fn parse_choice(resp: &Value, key: &str) -> Result<(String, f64), OracleError> {
+fn parse_answer(resp: &Value, key: &str, kind: QuestionKind) -> Result<Answer, OracleError> {
     let answers = resp
         .get("answers")
         .and_then(|a| a.as_object())
@@ -388,15 +391,36 @@ fn parse_choice(resp: &Value, key: &str) -> Result<(String, f64), OracleError> {
     let ans = answers
         .get(key)
         .ok_or_else(|| OracleError::Parse(format!("missing answer {key}")))?;
-    let choice = ans
-        .get("choice")
-        .and_then(|c| c.as_str())
-        .ok_or_else(|| OracleError::Parse(format!("answer {key} missing choice")))?;
-    let confidence = ans
-        .get("confidence")
-        .and_then(|c| c.as_f64())
-        .unwrap_or(0.0);
-    Ok((choice.to_string(), confidence))
+    match kind {
+        QuestionKind::Choice => {
+            let choice = ans
+                .get("choice")
+                .and_then(|c| c.as_str())
+                .ok_or_else(|| OracleError::Parse(format!("answer {key} missing choice")))?;
+            let confidence = ans
+                .get("confidence")
+                .and_then(|c| c.as_f64())
+                .unwrap_or(0.0);
+            Ok(Answer {
+                choice: choice.to_string(),
+                confidence,
+                noul: None,
+                exchange: None,
+            })
+        }
+        QuestionKind::Noul => {
+            let noul = ans
+                .get("noul")
+                .and_then(|c| c.as_f64())
+                .ok_or_else(|| OracleError::Parse(format!("answer {key} missing noul")))?;
+            Ok(Answer {
+                choice: String::new(),
+                confidence: noul,
+                noul: Some(noul),
+                exchange: None,
+            })
+        }
+    }
 }
 
 fn exchange_from_posted(request: Value, posted: Posted) -> OracleExchange {
@@ -451,11 +475,11 @@ mod tests {
     }
 
     fn classify(state: Value, instructions: &str) -> Classification {
-        Classification {
+        Classification::choice(
             state,
-            instructions: instructions.into(),
-            criteria: criteria(&[("yes", "yes"), ("no", "no")]),
-        }
+            instructions,
+            criteria(&[("yes", "yes"), ("no", "no")]),
+        )
     }
 
     fn choice_resp(keys: &[&str], choice: &str) -> Value {
@@ -520,6 +544,29 @@ mod tests {
             "http://example/v1/systemone",
             "jev-latest",
         )
+    }
+
+    #[test]
+    fn noul_posts_its_type_and_reads_the_probability() {
+        let mut o = oracle(vec![json!({
+            "answers": { "q0": { "type": "noul", "noul": 0.17 } }
+        })]);
+        let ticket = o.submit(Classification::noul(
+            json!({ "tree": {} }),
+            json!({
+                "path": "src/core/mod.rs",
+                "name": "mod.rs",
+                "proposition": "The codebase has a search component.",
+                "question": "Does `name` name something `proposition` is about?"
+            }),
+            json!({ "true": "The name denotes it.", "false": "The name does not." }),
+        ));
+        let answer = o.wait(ticket).unwrap();
+        assert_eq!(answer.noul, Some(0.17));
+        let posted = &o.transport.bodies[0]["questions"]["q0"];
+        assert_eq!(posted["type"], "noul");
+        assert_eq!(posted["instructions"]["path"], "src/core/mod.rs");
+        assert!(posted["instructions"]["proposition"].is_string());
     }
 
     #[test]

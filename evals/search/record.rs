@@ -33,6 +33,10 @@ pub struct HistoryRun {
     pub git_dirty: bool,
     pub scored_at_ms: u64,
     pub judge: String,
+    /// Every proposition was submitted before the first wait, so the listing
+    /// was sent once and the questions shared requests.
+    #[serde(default)]
+    pub batched: bool,
     pub search_spend_usd: f64,
     pub baseline_estimated_usd: Option<f64>,
     pub baseline_estimate_partial: bool,

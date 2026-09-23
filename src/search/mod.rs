@@ -1,12 +1,15 @@
-//! Prune a [`Universe`] down to the objects that bear on a proposition.
+//! Prune a [`Universe`] down to where information about a proposition is likely
+//! to be found.
 //!
 //! [`Search::submit`] enqueues a proposition. [`Search::wait`] flushes every
 //! pending proposition together: directory listings are built once, and each
-//! proposition adds a prune/keep question on that shared state. The oracle
-//! then batches questions that share a state. A directory pruned at
-//! [`SUPPORT`](crate::navigator::confidence::SUPPORT) or above drops its
-//! subtree. What remains is a clone of the universe whose window is the kept
-//! directories and the files under them. File bodies are not judged.
+//! proposition adds the same three yes/no questions for every name in that
+//! listing. The oracle batches questions that share a state. A name is a
+//! strong indicator, and so is the place a behavior would be implemented or
+//! declared. A directory whose strongest yes under it falls short of
+//! [`SUPPORT`](crate::navigator::confidence::SUPPORT) drops its subtree. What
+//! remains is a clone of the universe whose window is the kept directories
+//! and the files under them. File bodies are not judged.
 
 mod tui;
 
@@ -18,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use serde::Serialize;
-use serde_json::{Map, Value as Json};
+use serde_json::{json, Map, Value as Json};
 
 use crate::log::Log;
 use crate::navigator::confidence::SUPPORT;
@@ -163,9 +166,9 @@ where
 
     /// Flush every pending proposition, then return this one's pruned window.
     ///
-    /// Listings are rendered once. Each proposition contributes its own
-    /// question per directory, on that same state, so the oracle can fill a
-    /// request with questions from many propositions.
+    /// Listings are rendered once. Each proposition contributes three Nouls
+    /// per name, on that same state, so the oracle can fill a request with
+    /// questions from many propositions.
     pub fn wait(&mut self, ticket: Ticket) -> Result<View<U>, SearchError> {
         if let Some(done) = self.resolved.get(&ticket) {
             return done.clone();
@@ -266,58 +269,100 @@ where
         struct Ask {
             search_ticket: Ticket,
             step: usize,
-            id: String,
+            path: String,
             oracle_ticket: OracleTicket,
         }
 
+        let names = match listing_names(&self.universe) {
+            Ok(names) => names,
+            Err(error) => {
+                self.reject_all(pending, error.to_string());
+                return;
+            }
+        };
+
         let mut steps: HashMap<Ticket, Vec<SearchStep>> = HashMap::new();
         let mut asks = Vec::new();
-        for group in &groups {
+        for (index, group) in groups.iter().enumerate() {
             for item in &pending {
                 let prop_steps = steps.entry(item.ticket).or_default();
-                let step = prop_steps.len();
                 prop_steps.push(SearchStep {
                     view: group.view.clone(),
                     classifications: Vec::new(),
                     exchange: None,
                 });
-                for id in &group.ids {
-                    let oracle_ticket =
-                        self.oracle
-                            .submit(question(&group.state, id, &item.proposition));
-                    asks.push(Ask {
-                        search_ticket: item.ticket,
-                        step,
-                        id: id.clone(),
-                        oracle_ticket,
-                    });
+                for name in names_in_group(&groups, index, &names) {
+                    for facet in Facet::ALL {
+                        let oracle_ticket = self.oracle.submit(noul_question(
+                            &group.state,
+                            &name.path,
+                            &item.proposition,
+                            facet,
+                        ));
+                        asks.push(Ask {
+                            search_ticket: item.ticket,
+                            step: index,
+                            path: name.path.clone(),
+                            oracle_ticket,
+                        });
+                    }
                 }
             }
         }
 
+        struct Hit {
+            search_ticket: Ticket,
+            step: usize,
+            path: String,
+            noul: f64,
+            exchange: Option<crate::oracle::OracleExchange>,
+        }
+
+        let mut hits = Vec::new();
         let mut failed: HashMap<Ticket, String> = HashMap::new();
         for ask in asks {
             match self.oracle.wait(ask.oracle_ticket) {
-                Ok(answer) => {
-                    let decision = Decision {
-                        id: ask.id,
-                        leaf: false,
-                        raw: answer.choice.clone(),
-                        applied: apply_directory(&answer.choice, answer.confidence),
-                        confidence: answer.confidence,
-                    };
-                    let step = &mut steps.get_mut(&ask.search_ticket).unwrap()[ask.step];
-                    step.classifications.push(decision);
-                    if step.exchange.is_none() {
-                        if let Some(exchange) = &answer.exchange {
-                            step.exchange = Some(ExchangeRecord::from_oracle(exchange));
-                        }
-                    }
-                }
+                Ok(answer) => hits.push(Hit {
+                    search_ticket: ask.search_ticket,
+                    step: ask.step,
+                    path: ask.path,
+                    noul: answer.noul.unwrap_or(0.0),
+                    exchange: answer.exchange,
+                }),
                 Err(error) => {
                     failed
                         .entry(ask.search_ticket)
                         .or_insert_with(|| error.to_string());
+                }
+            }
+        }
+
+        for (index, group) in groups.iter().enumerate() {
+            for item in &pending {
+                if failed.contains_key(&item.ticket) {
+                    continue;
+                }
+                let step = &mut steps.get_mut(&item.ticket).unwrap()[index];
+                for id in &group.ids {
+                    let signal = hits
+                        .iter()
+                        .filter(|hit| {
+                            hit.search_ticket == item.ticket
+                                && (hit.path == *id || is_under(&hit.path, id))
+                        })
+                        .map(|hit| hit.noul)
+                        .fold(0.0, f64::max);
+                    step.classifications.push(decision_from_signal(id, signal));
+                }
+                if step.exchange.is_none() {
+                    if let Some(hit) = hits
+                        .iter()
+                        .find(|hit| hit.search_ticket == item.ticket && hit.step == index)
+                    {
+                        if let Some(exchange) = &hit.exchange {
+                            step.exchange = Some(ExchangeRecord::from_oracle(exchange));
+                        }
+                    }
                 }
             }
         }
@@ -524,7 +569,7 @@ fn directory_state<U: Universe>(universe: &U, ids: &[String]) -> Result<Json, Un
         }
         map.insert(id, Json::Array(names));
     }
-    Ok(Json::Object(map))
+    Ok(json!({ "tree": Json::Object(map) }))
 }
 
 fn json_len(value: &Json) -> usize {
@@ -584,10 +629,6 @@ fn capture<U: Universe>(universe: &U, ids: &[String]) -> Result<Vec<ViewObject>,
     Ok(view)
 }
 
-fn apply_directory(raw: &str, confidence: f64) -> Applied {
-    apply_prune(raw, confidence, SUPPORT)
-}
-
 /// A directory `prune` at or above `min_confidence` drops its subtree. A live
 /// search passes [`SUPPORT`].
 fn apply_prune(raw: &str, confidence: f64, min_confidence: f64) -> Applied {
@@ -617,28 +658,142 @@ pub fn retained_ids<U: Universe>(
     candidate_ids(universe, &adjusted)
 }
 
-fn question(state: &Json, id: &str, proposition: &str) -> Classification {
-    let ask = "State maps each directory path to its child names. File bodies are not included.\nPrune this directory when nothing in its subtree bears on the proposition. Keep it otherwise.";
-    let pairs = [
-        ("prune", "Nothing in this subtree bears on the proposition."),
-        ("keep", "Something here might bear on the proposition."),
-    ];
-    Classification {
-        state: state.clone(),
-        instructions: format!("target: {id}\nkind: directory\n{ask}\nProposition: {proposition}"),
-        criteria: pairs
-            .into_iter()
-            .map(|(label, text)| (label.to_string(), text.to_string()))
-            .collect(),
+/// One way a name can be where information about the proposition lives.
+#[derive(Clone, Copy)]
+enum Facet {
+    Named,
+    Behavior,
+    Declared,
+}
+
+impl Facet {
+    const ALL: [Facet; 3] = [Facet::Named, Facet::Behavior, Facet::Declared];
+
+    fn question(self) -> &'static str {
+        match self {
+            Facet::Named => "Does `name` name something `proposition` is about?",
+            Facet::Behavior => {
+                "Is information about the behavior in `proposition` likely to be found at `path`, given where `path` sits in `tree`?"
+            }
+            Facet::Declared => {
+                "Is `path` where something `proposition` is about would be declared or defined?"
+            }
+        }
+    }
+
+    fn criteria(self) -> Json {
+        let (yes, no) = match self {
+            Facet::Named => (
+                "The name denotes a thing the proposition is about.",
+                "The name does not denote a thing the proposition is about. A name that merely might contain related code is a no.",
+            ),
+            Facet::Behavior => (
+                "A reader looking for how that behavior is implemented would open this path.",
+                "This path's place in the tree is not a likely home for that behavior.",
+            ),
+            Facet::Declared => (
+                "This path declares or defines something the proposition is about: a module root, a manifest, a public interface, or a concept inventory.",
+                "This path does not declare or define something the proposition is about.",
+            ),
+        };
+        json!({ "true": yes, "false": no })
     }
 }
 
-#[cfg(test)]
-fn target_of(instructions: &str) -> &str {
-    instructions
-        .lines()
-        .find_map(|line| line.strip_prefix("target: "))
-        .unwrap_or("")
+struct ListedName {
+    path: String,
+    directory: bool,
+    parent: String,
+}
+
+fn listing_names<U: Universe>(universe: &U) -> Result<Vec<ListedName>, UniverseError> {
+    let mut out = Vec::new();
+    let mut stack = vec![String::new()];
+    while let Some(dir) = stack.pop() {
+        for child in universe.children(&dir)? {
+            let directory = !universe.is_leaf(&child)?;
+            out.push(ListedName {
+                path: child.clone(),
+                directory,
+                parent: dir.clone(),
+            });
+            if directory {
+                stack.push(child);
+            }
+        }
+    }
+    out.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(out)
+}
+
+fn names_in_group<'a>(
+    groups: &[Group],
+    index: usize,
+    names: &'a [ListedName],
+) -> Vec<&'a ListedName> {
+    names
+        .iter()
+        .filter(|name| group_for(groups, name) == index)
+        .collect()
+}
+
+fn group_for(groups: &[Group], name: &ListedName) -> usize {
+    let key = if name.directory {
+        name.path.as_str()
+    } else {
+        name.parent.as_str()
+    };
+    if key.is_empty() {
+        return 0;
+    }
+    groups
+        .iter()
+        .position(|group| group.ids.iter().any(|id| id == key))
+        .unwrap_or(0)
+}
+
+fn noul_question(state: &Json, path: &str, proposition: &str, facet: Facet) -> Classification {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    Classification::noul(
+        state.clone(),
+        json!({
+            "path": path,
+            "name": name,
+            "proposition": proposition,
+            "question": facet.question(),
+        }),
+        facet.criteria(),
+    )
+}
+
+/// `signal` is the strongest Noul under the directory: the probability that
+/// information about the proposition is there. At or above [`SUPPORT`] that is
+/// a keep. Below it, the recorded prune confidence is how unlikely that
+/// strongest yes is, so a later floor can still accept a weaker prune.
+fn decision_from_signal(id: &str, signal: f64) -> Decision {
+    if signal >= SUPPORT {
+        Decision {
+            id: id.to_string(),
+            leaf: false,
+            raw: "keep".to_string(),
+            applied: Applied::Keep,
+            confidence: signal,
+        }
+    } else {
+        let confidence = 1.0 - signal;
+        Decision {
+            id: id.to_string(),
+            leaf: false,
+            raw: "prune".to_string(),
+            applied: apply_prune("prune", confidence, SUPPORT),
+            confidence,
+        }
+    }
+}
+
+fn is_under(path: &str, dir: &str) -> bool {
+    path.strip_prefix(dir)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn display_path(id: &str, leaf: bool) -> String {
@@ -713,7 +868,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::*;
-    use crate::oracle::{Answer, Oracle, OracleError, Ticket as OracleTicket};
+    use crate::oracle::{Answer, Oracle, OracleError, QuestionKind, Ticket as OracleTicket};
     use crate::universe::fs::Filesystem;
 
     struct Script {
@@ -745,10 +900,10 @@ mod tests {
             );
         }
 
-        fn targets(&self) -> Vec<&str> {
+        fn paths(&self) -> Vec<&str> {
             self.log
                 .iter()
-                .map(|classification| target_of(&classification.instructions))
+                .filter_map(|classification| classification.instructions["path"].as_str())
                 .collect()
         }
 
@@ -759,14 +914,41 @@ mod tests {
                 .collect::<HashSet<_>>()
                 .len()
         }
+    }
 
-        fn of_kind(&self, kind: &str) -> Vec<&Classification> {
-            let marker = format!("kind: {kind}\n");
-            self.log
-                .iter()
-                .filter(|classification| classification.instructions.contains(&marker))
-                .collect()
+    fn instruction_str<'a>(classification: &'a Classification, key: &str) -> &'a str {
+        classification
+            .instructions
+            .get(key)
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+    }
+
+    fn labeled_noul(labels: &HashMap<String, (String, f64)>, proposition: &str, path: &str) -> f64 {
+        let mut best: Option<(usize, f64)> = None;
+        for (key, (choice, confidence)) in labels {
+            let (label_prop, id) = match key.split_once('\t') {
+                Some(pair) => pair,
+                None => ("", key.as_str()),
+            };
+            if !label_prop.is_empty() && label_prop != proposition {
+                continue;
+            }
+            let hit = id == path || path.starts_with(&format!("{id}/"));
+            if !hit {
+                continue;
+            }
+            let replace = best.is_none_or(|(len, _)| id.len() > len);
+            if replace {
+                let noul = if choice == "keep" {
+                    *confidence
+                } else {
+                    1.0 - *confidence
+                };
+                best = Some((id.len(), noul));
+            }
         }
+        best.map(|(_, noul)| noul).unwrap_or(0.05)
     }
 
     impl Oracle for Script {
@@ -784,23 +966,15 @@ mod tests {
             }
             let pending = std::mem::take(&mut self.pending);
             for (pending_ticket, classification) in pending {
-                let id = target_of(&classification.instructions);
-                let proposition = classification
-                    .instructions
-                    .lines()
-                    .find_map(|line| line.strip_prefix("Proposition: "))
-                    .unwrap_or("");
-                let (choice, confidence) = self
-                    .labels
-                    .get(&format!("{proposition}\t{id}"))
-                    .or_else(|| self.labels.get(id))
-                    .unwrap_or_else(|| panic!("no label for {proposition} {id}"))
-                    .clone();
+                let path = instruction_str(&classification, "path");
+                let proposition = instruction_str(&classification, "proposition");
+                let noul = labeled_noul(&self.labels, proposition, path);
                 self.resolved.insert(
                     pending_ticket,
                     Answer {
-                        choice,
-                        confidence,
+                        choice: String::new(),
+                        confidence: noul,
+                        noul: Some(noul),
                         exchange: None,
                     },
                 );
@@ -828,14 +1002,6 @@ mod tests {
         labels
             .into_iter()
             .map(|(id, choice, confidence)| (id.to_string(), choice.to_string(), confidence))
-            .collect()
-    }
-
-    fn keys(classification: &Classification) -> Vec<&str> {
-        classification
-            .criteria
-            .keys()
-            .map(|key| key.as_str())
             .collect()
     }
 
@@ -872,11 +1038,25 @@ mod tests {
             "there is a frontend",
             DEFAULT_BUDGET_BYTES,
         );
-        assert_eq!(oracle.state_count(), 1, "targets {:?}", oracle.targets());
-        assert_eq!(oracle.of_kind("directory").len(), 3);
-        assert!(oracle.of_kind("file").is_empty());
-        assert_eq!(keys(oracle.of_kind("directory")[0]), vec!["keep", "prune"]);
-        assert!(!oracle.targets().contains(&""));
+        assert_eq!(oracle.state_count(), 1, "paths {:?}", oracle.paths());
+        assert_eq!(oracle.log.len(), 24);
+        assert!(oracle
+            .log
+            .iter()
+            .all(|classification| classification.kind == QuestionKind::Noul));
+        let questions: HashSet<&str> = oracle
+            .log
+            .iter()
+            .filter_map(|classification| classification.instructions["question"].as_str())
+            .collect();
+        assert_eq!(questions.len(), 3);
+        assert!(oracle.paths().contains(&"frontend"));
+        assert!(oracle.paths().contains(&"frontend/app.py"));
+        assert!(!oracle.paths().contains(&""));
+        let sample = &oracle.log[0];
+        assert!(sample.instructions["proposition"].is_string());
+        assert!(sample.criteria["true"].is_string());
+        assert!(sample.criteria.get("keep").is_none());
         assert_eq!(
             ids(&view),
             vec![
@@ -886,8 +1066,8 @@ mod tests {
             ]
         );
 
-        let filter = &oracle.of_kind("directory")[0].state;
-        assert!(filter.get("view").is_none());
+        let filter = &oracle.log[0].state["tree"];
+        assert!(oracle.log[0].state.get("view").is_none());
         assert_eq!(
             filter[""].as_array().unwrap(),
             &vec![
@@ -929,7 +1109,8 @@ mod tests {
             .unwrap();
         assert_eq!(frontend.raw, "prune");
         assert_eq!(frontend.applied, Applied::Keep);
-        assert!(!oracle.targets().contains(&"frontend/app.py"));
+        assert!((frontend.confidence - 0.5).abs() < 1e-9);
+        assert!(oracle.paths().contains(&"frontend/app.py"));
         assert_eq!(
             ids(&view),
             vec![
@@ -941,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_prune_drops_a_nested_directory_the_model_kept() {
+    fn a_yes_under_a_directory_keeps_its_ancestors() {
         let root = scratch("nested");
         std::fs::create_dir_all(root.join("nested/deep")).unwrap();
         std::fs::write(root.join("nested/keepme.txt"), "keep\n").unwrap();
@@ -957,8 +1138,24 @@ mod tests {
             DEFAULT_BUDGET_BYTES,
         );
         let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(oracle.targets(), vec!["nested", "nested/deep"]);
-        assert!(ids(&view).is_empty());
+        assert!(oracle.paths().contains(&"nested"));
+        assert!(oracle.paths().contains(&"nested/deep"));
+        assert!(oracle.paths().contains(&"nested/deep/file.txt"));
+        let nested = view
+            .trace
+            .iter()
+            .find(|decision| decision.id == "nested")
+            .unwrap();
+        assert_eq!(nested.raw, "keep");
+        assert_eq!(
+            ids(&view),
+            vec![
+                "nested".to_string(),
+                "nested/deep".to_string(),
+                "nested/deep/file.txt".to_string(),
+                "nested/keepme.txt".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -975,7 +1172,9 @@ mod tests {
             DEFAULT_BUDGET_BYTES,
         );
         let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(oracle.targets(), vec!["src"]);
+        assert!(oracle.paths().contains(&"src"));
+        assert!(oracle.paths().contains(&"src/lib.rs"));
+        assert!(oracle.paths().contains(&"README.md"));
         assert_eq!(ids(&view), vec!["README.md".to_string()]);
     }
 
@@ -983,9 +1182,14 @@ mod tests {
     fn tiny_budget_puts_each_directory_in_its_own_state() {
         let universe = Filesystem::at_root("examples/toy-layered").unwrap();
         let (_, oracle) = search_one(universe, Script::new(toy(&[])), "frontend", 1);
-        assert_eq!(oracle.of_kind("directory").len(), 3);
-        assert_eq!(oracle.state_count(), 3, "targets {:?}", oracle.targets());
-        assert!(oracle.of_kind("file").is_empty());
+        assert_eq!(oracle.log.len(), 24);
+        assert_eq!(oracle.state_count(), 3, "paths {:?}", oracle.paths());
+        let app = oracle
+            .log
+            .iter()
+            .find(|classification| classification.instructions["path"] == "frontend/app.py")
+            .unwrap();
+        assert!(app.state["tree"].get("frontend").is_some());
     }
 
     #[test]
@@ -998,7 +1202,7 @@ mod tests {
         let ticket = session.submit("frontend");
         assert!(session.oracle.log.is_empty());
         session.wait(ticket).unwrap();
-        assert_eq!(session.oracle.of_kind("directory").len(), 3);
+        assert_eq!(session.oracle.log.len(), 24);
     }
 
     #[test]
@@ -1016,7 +1220,7 @@ mod tests {
         assert!(err.to_string().contains("unknown ticket"));
         assert!(session.oracle.log.is_empty());
         session.wait(queued).unwrap();
-        assert_eq!(session.oracle.of_kind("directory").len(), 3);
+        assert_eq!(session.oracle.log.len(), 24);
     }
 
     #[test]
@@ -1043,9 +1247,8 @@ mod tests {
         let asked = session.oracle.log.len();
         let right = session.wait(backend).unwrap();
         assert_eq!(session.oracle.log.len(), asked);
-        assert_eq!(asked, 6, "targets {:?}", session.oracle.targets());
+        assert_eq!(asked, 48, "paths {:?}", session.oracle.paths());
         assert_eq!(session.oracle.state_count(), 1);
-        assert!(session.oracle.of_kind("file").is_empty());
         let state = session.oracle.log[0].state.to_string();
         assert!(session
             .oracle

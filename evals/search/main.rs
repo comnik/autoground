@@ -8,12 +8,12 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use autoground::log::Log;
 use autoground::navigator::confidence::SUPPORT;
 use autoground::oracle::{HeuristicOracle, JevOracle, Oracle};
-use autoground::report::format_usd;
+use autoground::report::{format_duration, format_usd};
 use autoground::search::{Search, DEFAULT_BUDGET_BYTES};
 use autoground::universe::{Filesystem, Universe, UniverseError};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -52,7 +52,7 @@ enum Commands {
         #[arg(long)]
         only: Option<String>,
     },
-    /// Run one search per proposition and compare its window to the baseline.
+    /// Search each proposition alone, then all of them in one flush.
     Score {
         #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
         judge: JudgeKind,
@@ -212,97 +212,235 @@ fn score(repo: &Path, dir: &Path, judge: JudgeKind) -> Result<(), Box<dyn std::e
     if judge == JudgeKind::Jev {
         JevOracle::from_env().map_err(|err| err.to_string())?;
     }
-    let mut cases = Vec::new();
-    let mut points_by_case: Vec<Vec<FloorPoint>> = Vec::new();
-    let mut ideals = Vec::new();
-    let mut search_spend = 0.0;
-    for item in &propositions {
-        let baseline = &baselines[&item.id];
-        if baseline.evidence.is_empty() {
-            eprintln!("{}  unscored  no in-universe reads", item.id);
-            cases.push(CaseRecord {
-                id: item.id.clone(),
-                status: "unscored".to_string(),
-                message: Some("no in-universe reads".to_string()),
-                search_spend_usd: None,
-                floors: Vec::new(),
-            });
-            continue;
-        }
-        eprintln!("{}  searching", item.id);
-        match search_one(repo, &item.proposition, judge) {
-            Ok(ran) => {
-                search_spend += ran.spend;
-                let points =
-                    metrics::score_floors(&ran.full, &ran.decisions, &baseline.evidence, &FLOORS)?;
-                print_case(&item.id, &points, ran.spend, &ran.trace);
-                if let Some(ideal) = metrics::ideal_pruned(&ran.full, &baseline.evidence)? {
-                    ideals.push(ideal);
-                }
-                cases.push(CaseRecord {
-                    id: item.id.clone(),
-                    status: "scored".to_string(),
-                    message: None,
-                    search_spend_usd: Some(ran.spend),
-                    floors: floor_records(&points),
-                });
-                points_by_case.push(points);
-            }
-            Err(failure) => {
-                search_spend += failure.spend;
-                eprintln!("{}  failed  {}", item.id, failure.message);
-                cases.push(CaseRecord {
-                    id: item.id.clone(),
-                    status: "failed".to_string(),
-                    message: Some(failure.message),
-                    search_spend_usd: Some(failure.spend),
-                    floors: Vec::new(),
-                });
-            }
-        }
-    }
-    let mut suite = suite_summary(&points_by_case, &cases);
-    suite.ideal_pruned = metrics::mean(&ideals);
-    let curve = curve(&points_by_case);
-    print_suite(&suite, search_spend, &baselines);
-    let failed = cases.iter().any(|case| case.status == "failed");
+    let each = pass(repo, &propositions, &baselines, judge, false)?;
+    let batch = pass(repo, &propositions, &baselines, judge, true)?;
+    let failed = each.failed || batch.failed;
     if judge == JudgeKind::Jev {
-        let (estimated, partial) = baseline_cost(&baselines);
-        let (git_sha, git_dirty) = git_state(repo);
-        let run = HistoryRun {
-            git_sha,
-            git_dirty,
-            scored_at_ms: now_ms(),
-            judge: judge.as_str().to_string(),
-            search_spend_usd: search_spend,
-            baseline_estimated_usd: estimated,
-            baseline_estimate_partial: partial,
-            suite,
-            curve,
-            cases,
-        };
         let history_path = dir.join("history.jsonl");
         let mut runs = load_history(&history_path)?;
-        runs.push(run);
+        let (git_sha, git_dirty) = git_state(repo);
+        let (estimated, partial) = baseline_cost(&baselines);
+        for scored in [&each, &batch] {
+            runs.push(history_run(
+                &git_sha, git_dirty, judge, estimated, partial, scored,
+            ));
+        }
         write_history(&history_path, &runs)?;
         fs::write(dir.join("pareto.svg"), plot::render(&runs))?;
         eprintln!("history {}", history_path.display());
     }
+    eprintln!();
+    print_recap(&each, &baselines);
+    print_recap(&batch, &baselines);
     if failed {
         return Err("one or more searches failed".into());
     }
     Ok(())
 }
 
+struct Scored {
+    batched: bool,
+    cases: Vec<CaseRecord>,
+    suite: SuiteSummary,
+    curve: Vec<CurvePoint>,
+    search_spend: f64,
+    requests: u64,
+    elapsed: Duration,
+    failed: bool,
+}
+
+fn pass(
+    repo: &Path,
+    propositions: &[Proposition],
+    baselines: &std::collections::BTreeMap<String, Baseline>,
+    judge: JudgeKind,
+    batched: bool,
+) -> Result<Scored, Box<dyn std::error::Error>> {
+    let started = Instant::now();
+    eprintln!("{}", if batched { "batch" } else { "each" });
+    let mut cases = Vec::new();
+    let mut points_by_case: Vec<Vec<FloorPoint>> = Vec::new();
+    let mut ideals = Vec::new();
+    let mut search_spend = 0.0;
+    let mut requests = 0u64;
+    let mut failed = false;
+    if batched {
+        let pending: Vec<&Proposition> = propositions
+            .iter()
+            .filter(|item| {
+                let evidence = &baselines[&item.id].evidence;
+                if evidence.is_empty() {
+                    eprintln!("{}  unscored  no in-universe reads", item.id);
+                    cases.push(unscored(&item.id));
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        match search_batch(repo, &pending, judge) {
+            Ok(batch) => {
+                search_spend = batch.spend;
+                requests = batch.requests;
+                for (item, outcome) in pending.iter().zip(batch.outcomes) {
+                    record_outcome(
+                        item,
+                        &baselines[&item.id],
+                        outcome,
+                        None,
+                        &mut cases,
+                        &mut points_by_case,
+                        &mut ideals,
+                        &mut failed,
+                    )?;
+                }
+            }
+            Err(failure) => {
+                search_spend = failure.spend;
+                requests = failure.requests;
+                failed = true;
+                for item in &pending {
+                    eprintln!("{}  failed  {}", item.id, failure.message);
+                    cases.push(CaseRecord {
+                        id: item.id.clone(),
+                        status: "failed".to_string(),
+                        message: Some(failure.message.clone()),
+                        search_spend_usd: None,
+                        floors: Vec::new(),
+                    });
+                }
+            }
+        }
+    } else {
+        for item in propositions {
+            let baseline = &baselines[&item.id];
+            if baseline.evidence.is_empty() {
+                eprintln!("{}  unscored  no in-universe reads", item.id);
+                cases.push(unscored(&item.id));
+                continue;
+            }
+            eprintln!("{}  searching", item.id);
+            let outcome = search_one(repo, &item.proposition, judge);
+            let (spend, outcome_requests) = match &outcome {
+                Ok(ran) => (ran.spend, ran.requests),
+                Err(failure) => (failure.spend, failure.requests),
+            };
+            search_spend += spend;
+            requests += outcome_requests;
+            record_outcome(
+                item,
+                baseline,
+                outcome,
+                Some(spend),
+                &mut cases,
+                &mut points_by_case,
+                &mut ideals,
+                &mut failed,
+            )?;
+        }
+    }
+    let mut suite = suite_summary(&points_by_case, &cases);
+    suite.ideal_pruned = metrics::mean(&ideals);
+    let curve = curve(&points_by_case);
+    print_suite(&suite, search_spend, baselines);
+    Ok(Scored {
+        batched,
+        cases,
+        suite,
+        curve,
+        search_spend,
+        requests,
+        elapsed: started.elapsed(),
+        failed,
+    })
+}
+
+fn unscored(id: &str) -> CaseRecord {
+    CaseRecord {
+        id: id.to_string(),
+        status: "unscored".to_string(),
+        message: Some("no in-universe reads".to_string()),
+        search_spend_usd: None,
+        floors: Vec::new(),
+    }
+}
+
+fn record_outcome(
+    item: &Proposition,
+    baseline: &Baseline,
+    outcome: Result<Ran, SearchFailure>,
+    spend: Option<f64>,
+    cases: &mut Vec<CaseRecord>,
+    points_by_case: &mut Vec<Vec<FloorPoint>>,
+    ideals: &mut Vec<f64>,
+    failed: &mut bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match outcome {
+        Ok(ran) => {
+            let points =
+                metrics::score_floors(&ran.full, &ran.decisions, &baseline.evidence, &FLOORS)?;
+            print_case(&item.id, &points, spend, &ran.trace);
+            if let Some(ideal) = metrics::ideal_pruned(&ran.full, &baseline.evidence)? {
+                ideals.push(ideal);
+            }
+            cases.push(CaseRecord {
+                id: item.id.clone(),
+                status: "scored".to_string(),
+                message: None,
+                search_spend_usd: spend,
+                floors: floor_records(&points),
+            });
+            points_by_case.push(points);
+        }
+        Err(failure) => {
+            *failed = true;
+            eprintln!("{}  failed  {}", item.id, failure.message);
+            cases.push(CaseRecord {
+                id: item.id.clone(),
+                status: "failed".to_string(),
+                message: Some(failure.message),
+                search_spend_usd: spend,
+                floors: Vec::new(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn history_run(
+    git_sha: &str,
+    git_dirty: bool,
+    judge: JudgeKind,
+    estimated: Option<f64>,
+    partial: bool,
+    scored: &Scored,
+) -> HistoryRun {
+    HistoryRun {
+        git_sha: git_sha.to_string(),
+        git_dirty,
+        scored_at_ms: now_ms(),
+        judge: judge.as_str().to_string(),
+        batched: scored.batched,
+        search_spend_usd: scored.search_spend,
+        baseline_estimated_usd: estimated,
+        baseline_estimate_partial: partial,
+        suite: scored.suite.clone(),
+        curve: scored.curve.clone(),
+        cases: scored.cases.clone(),
+    }
+}
+
 struct Ran {
     full: Filesystem,
     decisions: Vec<autoground::search::Decision>,
     spend: f64,
+    requests: u64,
     trace: PathBuf,
 }
 
 struct SearchFailure {
     spend: f64,
+    requests: u64,
     message: String,
 }
 
@@ -312,6 +450,7 @@ fn search_one(repo: &Path, proposition: &str, judge: JudgeKind) -> Result<Ran, S
         Err(err) => {
             return Err(SearchFailure {
                 spend: 0.0,
+                requests: 0,
                 message: err.to_string(),
             })
         }
@@ -322,6 +461,7 @@ fn search_one(repo: &Path, proposition: &str, judge: JudgeKind) -> Result<Ran, S
         Err(err) => {
             return Err(SearchFailure {
                 spend: 0.0,
+                requests: 0,
                 message: err.to_string(),
             })
         }
@@ -336,6 +476,7 @@ fn search_one(repo: &Path, proposition: &str, judge: JudgeKind) -> Result<Ran, S
             Ok(oracle) => wait(universe, oracle, proposition, &log),
             Err(err) => Err(SearchFailure {
                 spend: 0.0,
+                requests: 0,
                 message: err.to_string(),
             }),
         },
@@ -345,13 +486,119 @@ fn search_one(repo: &Path, proposition: &str, judge: JudgeKind) -> Result<Ran, S
             full,
             decisions: view.trace,
             spend: view.usage.spend_usd,
+            requests: view.usage.requests,
             trace,
         }),
         Err(failure) => Err(SearchFailure {
             spend: failure.spend,
+            requests: failure.requests,
             message: format!("{}  trace {}", failure.message, trace.display()),
         }),
     }
+}
+
+struct Batch {
+    spend: f64,
+    requests: u64,
+    outcomes: Vec<Result<Ran, SearchFailure>>,
+}
+
+fn search_batch(
+    repo: &Path,
+    propositions: &[&Proposition],
+    judge: JudgeKind,
+) -> Result<Batch, SearchFailure> {
+    let universe = match Filesystem::at_root(repo) {
+        Ok(universe) => universe,
+        Err(err) => {
+            return Err(SearchFailure {
+                spend: 0.0,
+                requests: 0,
+                message: err.to_string(),
+            })
+        }
+    };
+    let full = universe.clone();
+    let log = match Log::create() {
+        Ok(log) => log,
+        Err(err) => {
+            return Err(SearchFailure {
+                spend: 0.0,
+                requests: 0,
+                message: err.to_string(),
+            })
+        }
+    };
+    let trace = log.path().to_path_buf();
+    let result = match judge {
+        JudgeKind::Heuristic => {
+            let oracle = HeuristicOracle::new(universe.clone());
+            wait_all(universe, oracle, propositions, &log)
+        }
+        JudgeKind::Jev => match JevOracle::from_env() {
+            Ok(oracle) => wait_all(universe, oracle, propositions, &log),
+            Err(err) => Err(SearchFailure {
+                spend: 0.0,
+                requests: 0,
+                message: err.to_string(),
+            }),
+        },
+    };
+    match result {
+        Ok((views, spend, request_count)) => Ok(Batch {
+            spend,
+            requests: request_count,
+            outcomes: views
+                .into_iter()
+                .map(|view| {
+                    view.map(|view| Ran {
+                        full: full.clone(),
+                        decisions: view.trace,
+                        spend,
+                        requests: view.usage.requests,
+                        trace: trace.clone(),
+                    })
+                    .map_err(|err| SearchFailure {
+                        spend,
+                        requests: err.usage.requests,
+                        message: format!("{}  trace {}", err, trace.display()),
+                    })
+                })
+                .collect(),
+        }),
+        Err(failure) => Err(SearchFailure {
+            spend: failure.spend,
+            requests: failure.requests,
+            message: format!("{}  trace {}", failure.message, trace.display()),
+        }),
+    }
+}
+
+fn wait_all<O: Oracle>(
+    universe: Filesystem,
+    oracle: O,
+    propositions: &[&Proposition],
+    log: &Log,
+) -> Result<
+    (
+        Vec<Result<autoground::search::View<Filesystem>, autoground::search::SearchError>>,
+        f64,
+        u64,
+    ),
+    SearchFailure,
+> {
+    let mut session = Search::new(universe, oracle, DEFAULT_BUDGET_BYTES);
+    session.set_log(log.clone());
+    let tickets: Vec<_> = propositions
+        .iter()
+        .map(|item| {
+            eprintln!("{}  searching", item.id);
+            session.submit(&item.proposition)
+        })
+        .collect();
+    let views = session.wait_many(&tickets);
+    let usage = session.usage();
+    Ok((views, usage.spend_usd, usage.requests))
 }
 
 fn wait<O: Oracle>(
@@ -367,12 +614,13 @@ fn wait<O: Oracle>(
         Ok(view) => Ok(view),
         Err(err) => Err(SearchFailure {
             spend: err.usage.spend_usd,
+            requests: err.usage.requests,
             message: err.to_string(),
         }),
     }
 }
 
-fn print_case(id: &str, points: &[FloorPoint], spend: f64, trace: &Path) {
+fn print_case(id: &str, points: &[FloorPoint], spend: Option<f64>, trace: &Path) {
     let Some(point) = points
         .iter()
         .find(|point| (point.floor - SUPPORT).abs() < 1e-9)
@@ -380,18 +628,45 @@ fn print_case(id: &str, points: &[FloorPoint], spend: f64, trace: &Path) {
         return;
     };
     let total = point.selected + point.missed.len();
+    let cost = match spend {
+        Some(usd) => format!("  {}", format_usd(usd)),
+        None => String::new(),
+    };
     eprintln!(
-        "{id}  pruned {}  evidence {} ({}/{})  {}  trace {}",
+        "{id}  pruned {}  evidence {} ({}/{}){cost}  trace {}",
         fmt_pct(point.pruned),
         fmt_pct(point.evidence),
         point.selected,
         total,
-        format_usd(spend),
         trace.display()
     );
     for path in &point.missed {
         eprintln!("  missed {path}");
     }
+}
+
+fn print_recap(scored: &Scored, baselines: &std::collections::BTreeMap<String, Baseline>) {
+    let label = if scored.batched { "batch" } else { "each" };
+    let (estimated, partial) = baseline_cost(baselines);
+    let baseline = match estimated {
+        Some(usd) => format_usd(usd),
+        None => "n/a".to_string(),
+    };
+    let partial = if partial { " partial" } else { "" };
+    eprintln!(
+        "{label:<5}  suite @ {:.2}  pruned {}  evidence {}  micro {}  evidence-only {}  scored {}  unscored {}  failed {}  search {}  requests {}  baseline {baseline}{partial}  {}",
+        scored.suite.floor,
+        fmt_pct(scored.suite.mean_pruned),
+        fmt_pct(scored.suite.mean_evidence),
+        fmt_pct(scored.suite.micro_evidence),
+        fmt_pct(scored.suite.ideal_pruned),
+        scored.suite.scored,
+        scored.suite.unscored,
+        scored.suite.failed,
+        format_usd(scored.search_spend),
+        scored.requests,
+        format_duration(scored.elapsed),
+    );
 }
 
 fn print_suite(

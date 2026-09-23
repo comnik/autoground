@@ -116,11 +116,11 @@ impl<T: Transport> Judge for JevJudge<T> {
             let statement = atom_text(&atom.pred, &atom.args, &atom.verbalization);
             let mut row = Vec::with_capacity(state.children.len());
             for child in &state.children {
-                row.push(self.inner.submit(Classification {
-                    state: shared.clone(),
-                    instructions: listing_instructions(&listing_path(child), &statement),
-                    criteria: listing_criteria(),
-                }));
+                row.push(self.inner.submit(Classification::choice(
+                    shared.clone(),
+                    listing_instructions(&listing_path(child), &statement),
+                    listing_criteria(),
+                )));
             }
             tickets.push(row);
         }
@@ -158,11 +158,11 @@ impl<T: Transport> Judge for JevJudge<T> {
             .iter()
             .map(|s| {
                 let statement = atom_text(&s.pred, &s.args, &s.verbalization);
-                self.inner.submit(Classification {
-                    state: document_shared_state(s),
-                    instructions: document_instructions(&statement),
-                    criteria: document_criteria(),
-                })
+                self.inner.submit(Classification::choice(
+                    document_shared_state(s),
+                    document_instructions(&statement),
+                    document_criteria(),
+                ))
             })
             .collect();
         let answers = self.inner.wait_many(&tickets);
@@ -178,20 +178,20 @@ impl<T: Transport> Judge for JevJudge<T> {
         self.exchanges.clear();
         let shared = conflict_shared_state(state);
         let statement = atom_text(&state.pred, &state.args, &state.verbalization);
-        let value_t = self.inner.submit(Classification {
-            state: shared.clone(),
-            instructions: format!(
+        let value_t = self.inner.submit(Classification::choice(
+            shared.clone(),
+            format!(
                 "Given these document judgements of the following statement, what is the codebase's overall answer: {statement}"
             ),
-            criteria: conflict_value_criteria(),
-        });
-        let cons_t = self.inner.submit(Classification {
-            state: shared,
-            instructions: format!(
+            conflict_value_criteria(),
+        ));
+        let cons_t = self.inner.submit(Classification::choice(
+            shared,
+            format!(
                 "Do the polar judgements agree about the following statement, or do they conflict: {statement}"
             ),
-            criteria: conflict_consistency_criteria(),
-        });
+            conflict_consistency_criteria(),
+        ));
         let answers = self.inner.wait_many(&[value_t, cons_t]);
         self.capture_exchanges();
         let value_ans = answers
