@@ -98,58 +98,37 @@ relevant context windows, followed by a map-reduce-like evaluation on all of tho
 
 #### Search
 
-Search walks the universe coarse to fine and judges each database in the call that selects
-it. The cost of a run is the number of oracle calls, so two bounds matter. If the children of
-the root fit in one window, that frontier is one call: a small repository is not walked
-directory by directory. If a directory listing fits and the bodies under it do not, the
-directory can be dropped before any body is opened.
+Search leverages the oracle to construct a candidate view: the paths in the universe that
+should be explored in order to evaluate a proposition. For every path, it asks the oracle
+whether that path is *irrelevant* to the given proposition. Only a confident "irrelevant"
+results in the path getting pruned from the candidate view. This keeps search conservative,
+while giving us a relevance signal in which to judge the remaining files. Because of this
+conservatism, the candidate view can be interpreted as a closed world, allowing the reader
+to short-circuit. Search never reads file contents.
 
-1. The frontier starts as the children of the root. The root is not a target.
-2. Render the frontier at native grain: a directory as its listing, a file as its path and
-   body. Split the frontier into chunks that fit. Trim a single oversized file. Replace a
-   single oversized listing with its children.
-3. Spend leftover budget on samples of the next level. Samples are context, not targets.
-4. One Choice per target, sharing that rendered state.
-   - A directory is $\lbrace \text{prune} \mid \text{refine} \mid \text{true} \mid \text{false} \rbrace$.
-     `true` and `false` mean the current view settles the proposition — the presence of a
-     subdirectory is enough for "the codebase has a frontend". There is no `unknown` for a
-     directory. `refine` means the view is missing something required to decide.
-   - A file is $\lbrace \text{true} \mid \text{false} \mid \text{unknown} \rbrace$. The body is
-     the whole leaf, so this call is the evaluation. When those bodies fit in the frontier's
-     budget they are judged in that same call, and a later `refine` does not fetch them again.
-5. Record every directory judgement and every file judgement. Step into the children of each
-   `refine`.
+#### Read
 
-`prune` below the confidence bar is treated as `refine`. `true` or `false` below the bar is
-`refine` on a directory and `unknown` on a file.
+`autoground read` submits a proposition, searches, then judges the leaves of that view.
+`submit`
+enqueues and `wait` flushes every pending proposition together, the same batching shape as
+search and the oracle.
 
-The universe has no collapse operation. Lifting every object to its parent mixes depths on an
-unbalanced tree, and the bounds above do not need it. Search refines by stepping to children.
+Files are judged in order of relevance (as determined by the search step). All propositions
+pending for a given file are packed into the same request.
 
-Deterministic strategies (CodeQL, grep) can later propose a frontier. They are not part of
-this walk.
+Each body is a choice of entailed, contradicted, or neutral. A confident "entailed"
+short-circuits to true, a confident "contradicted" to false. Weak judgements are kept until
+there is a conflict or the window runs out. Conflicting judgments are escalated once more to
+the oracle to resolve. Because search is conservative, we make a closed world assumption.
+Exhausting the candidate view with no witness is false.
 
-#### Map + Reduce
-
-Search already records a judgement for every database it accepts. A directory is `true` or
-`false` from its listing. A file is `true`, `false`, or `unknown` from its body. What remains
-is to reduce those judgements:
-
-$$
-\text{reduce}(v_1, v_2) = \begin{cases}
-    v_1 & \text{if } v_1 = v_2 \\
-    v_1 & \text{if } v_2 = \text{unknown} \\
-    v_2 & \text{if } v_1 = \text{unknown} \\
-    \text{ESCALATE} & \text{otherwise } (v_1 \neq v_2)
-\end{cases}
-$$
-
-Escalations result in a final call to the oracle, classifying the conflicting judgements
-into $\lbrace \text{true} \mid \text{false} \mid \text{contradiction} \rbrace$.
+Returns the truth value plus the evidence view: the objects the value depends on.
 
 ### Symbolic Evaluation
 
-TBD
+The planner decomposes a model into positive atomic propositions, submits them to the
+reader, applies negation itself, and combines the findings with Kleene three-valued logic.
+It does not render a file body. Not built yet.
 
 ### Verbalization
 
@@ -161,7 +140,7 @@ TBD verbalization is how we go from symbolic atoms to unstructured propositions.
 ### Milestones
 
 - [x] `autoground search "<arbitrary verbalized proposition>"`
-- [ ] `autoground eval "<arbitrary verbalized proposition>"`
+- [x] `autoground read "<arbitrary verbalized proposition>"`
 - [ ] `autoground plan xyz.ag`: demonstrate the top-down demand transform + verbalization
 
 ### Interfaces
@@ -187,12 +166,16 @@ would render its listing.
 - wait for a ticket when the label is required; pending questions that share a `state` go in one request, independent states overlap
 - report usage on this instance so far: spend, input tokens, request count, latency percentiles, mean batch size (questions per request / max questions per request), and mean fill factor (input tokens / the 32k state-side cap)
 
-The oracle hashes the `state` it is given (a Universe render, a listing tree, a file body). Universe itself has no digest method. Search uses this interface. The 3VL engine does not hold an oracle.
+The oracle hashes the `state` it is given (a Universe render, a listing tree, a file body). Universe itself has no digest method. Search and the reader use this interface. The 3VL engine does not hold an oracle.
 
 **Search**: takes a universe, an oracle, and a natural language proposition, returns the
 pruned universe that is relevant to answering the proposition. Same auto-batching behaviour
 as the oracle: multiple search requests can be submitted that then get batched up
 appropriately.
+
+**Reader**: takes a universe, an oracle, and a natural language proposition, returns a truth
+value and the evidence view inside the search window. Same auto-batching: `submit` enqueues;
+`wait` flushes every pending proposition so file bodies are shared across propositions.
 
 ### jev best practices
 
