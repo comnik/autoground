@@ -1,3 +1,4 @@
+pub mod confidence;
 pub mod core;
 pub mod edb;
 pub mod eval;
