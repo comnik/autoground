@@ -4,7 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::eval::Value;
-use crate::search::trace::UsageRecord;
+use crate::search::trace::{ExchangeRecord, UsageRecord};
 
 use super::Stance;
 
@@ -20,6 +20,10 @@ pub struct ReadStep {
     pub confidence: f64,
     pub rendered_bytes: u64,
     pub escalation: bool,
+    /// The Jev round-trip that produced this step. A stop answer shares the
+    /// document request, so only the document step carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exchange: Option<ExchangeRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,6 +91,17 @@ impl ReadTraceFile {
     }
 }
 
+fn indent_json(value: &serde_json::Value) -> String {
+    let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    let mut out = String::new();
+    for line in pretty.lines() {
+        out.push_str("    ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 fn assemble(events: Vec<serde_json::Value>, path: &Path) -> Result<ReadTraceFile, String> {
     let mut steps = Vec::new();
     let mut summary: Option<ReadSummary> = None;
@@ -146,6 +161,12 @@ pub fn present_read(path: &Path, file: &ReadTraceFile, full: bool) -> io::Result
                     "{}  {}  {:.2}",
                     step.path, step.verdict, step.confidence
                 )?;
+            }
+            if let Some(exchange) = &step.exchange {
+                writeln!(out, "  oracle request")?;
+                write!(out, "{}", indent_json(&exchange.request))?;
+                writeln!(out, "  oracle response")?;
+                write!(out, "{}", indent_json(&exchange.response))?;
             }
         }
     }

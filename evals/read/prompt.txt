@@ -1,0 +1,10 @@
+You are looking at this repository. Decide whether the proposition below holds of this codebase. The proposition is one atomic claim. Do not split it into other claims.
+
+value is true when the proposition holds, false when it does not, and unknown when the files leave it unsettled.
+
+Use a directory listing and a text search to locate the files. Open each file the decision rests on once. Stop when the files you have opened settle the claim. An absence is settled by a search that finds nothing and the files where the thing would have lived. Do not edit anything. Do not open anything under evals.
+
+provenance lists the files the decision rests on. Each item carries the repo-relative path, a verdict, and a short excerpt copied from that file. entailed means the file supports the proposition. contradicted means the file counts against it. A true answer includes at least one entailed file. A false answer includes at least one contradicted file. An unknown answer may leave provenance empty.
+
+Proposition:
+{proposition}

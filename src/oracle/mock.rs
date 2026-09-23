@@ -59,7 +59,7 @@ impl<U: Universe> HeuristicOracle<U> {
 
     fn choice(&self, req: &Classification) -> Answer {
         let proposition = field(&req.instructions, "proposition");
-        let path = field(&req.instructions, "path");
+        let path = asked_path(req);
         let known = self.universe.is_leaf(path).is_ok();
         let choice = if req.criteria.get("entailed").is_some()
             && known
@@ -113,6 +113,15 @@ fn tokens(proposition: &str) -> HashSet<String> {
 
 fn stem(name: &str) -> &str {
     name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name)
+}
+
+fn asked_path(req: &Classification) -> &str {
+    let on_question = field(&req.instructions, "path");
+    if on_question.is_empty() {
+        field(&req.state, "path")
+    } else {
+        on_question
+    }
 }
 
 fn field<'a>(instructions: &'a serde_json::Value, key: &str) -> &'a str {

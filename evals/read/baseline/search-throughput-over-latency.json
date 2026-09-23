@@ -1,0 +1,33 @@
+{
+  "id": "search-throughput-over-latency",
+  "proposition": "Search is optimized for throughput over latency.",
+  "model": "grok-4.7-build",
+  "session_id": "01a0cfe5-156d-7b70-8788-6b4cba24ef17",
+  "value": "true",
+  "provenance": [
+    {
+      "path": "src/oracle/jev.rs",
+      "verdict": "entailed",
+      "excerpt": "Jev publishes 250k input tokens per second and 1,200 requests per minute; both can change without notice. A full search request is about 15k tokens, so 16 fills the token budget. The request cap is looser."
+    },
+    {
+      "path": "src/search/mod.rs",
+      "verdict": "entailed",
+      "excerpt": "Listings are rendered once. Each proposition contributes one Noul per directory, on that same state, so the oracle can fill a request with questions from many propositions."
+    }
+  ],
+  "usage": {
+    "input_tokens": 41090,
+    "cache_read_input_tokens": 124416,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 6378,
+    "reasoning_tokens": 5614
+  },
+  "estimated_usd": 0.182656,
+  "estimate_partial": false,
+  "server_cost_usd": 0.062103,
+  "duration_ms": 101452,
+  "priced_at": "2026-09-22",
+  "rate_band": "under_200k",
+  "price_source": "https://docs.x.ai/docs/models"
+}

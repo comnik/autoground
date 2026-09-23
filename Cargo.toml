@@ -17,3 +17,7 @@ ureq = { version = "2.12", features = ["json"] }
 [[bin]]
 name = "search-eval"
 path = "evals/search/main.rs"
+
+[[bin]]
+name = "read-eval"
+path = "evals/read/main.rs"

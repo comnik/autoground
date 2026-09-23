@@ -1,0 +1,43 @@
+{
+  "id": "universe-no-dynamic-structures",
+  "proposition": "The universe component uses no dynamically growing data structures.",
+  "model": "grok-4.7-build",
+  "session_id": "01a0cfde-4745-7b53-a007-8fa276a7cd57",
+  "value": "false",
+  "provenance": [
+    {
+      "path": "src/universe/fs.rs",
+      "verdict": "contradicted",
+      "excerpt": "let mut out = Vec::new();\n    let mut stack = vec![rel.to_string()];\n    while let Some(dir) = stack.pop() {\n        for child in list_entries(root, &dir, filter)? {\n            if child.is_dir {\n                stack.push(child.rel_path);"
+    },
+    {
+      "path": "src/universe/fs.rs",
+      "verdict": "contradicted",
+      "excerpt": "let mut queues: Vec<VecDeque<String>> = Vec::new();\n        for parent in &self.objects {\n            queues.push(self.children(parent)?.into());\n        }"
+    },
+    {
+      "path": "src/universe/fs.rs",
+      "verdict": "contradicted",
+      "excerpt": "objects: Vec<String>,\n    samples: Vec<String>,"
+    },
+    {
+      "path": "src/universe/mod.rs",
+      "verdict": "contradicted",
+      "excerpt": "fn children(&self, id: &str) -> Result<Vec<String>, UniverseError>;"
+    }
+  ],
+  "usage": {
+    "input_tokens": 18483,
+    "cache_read_input_tokens": 27136,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 2644,
+    "reasoning_tokens": 2262
+  },
+  "estimated_usd": 0.066398,
+  "estimate_partial": false,
+  "server_cost_usd": 0.022575,
+  "duration_ms": 41095,
+  "priced_at": "2026-09-22",
+  "rate_band": "under_200k",
+  "price_source": "https://docs.x.ai/docs/models"
+}

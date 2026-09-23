@@ -23,13 +23,14 @@ use crate::confidence::{FLOOR, RESOLVE, SUPPORT};
 use crate::eval::Value;
 use crate::log::Log;
 use crate::oracle::{Answer, Classification, Oracle, QuestionKind, Usage};
+use crate::search::trace::ExchangeRecord;
 use crate::search::{Decision, Search, View};
 use crate::universe::{Universe, UniverseError};
 
 use trace::{ReadStep as Step, STEP_KIND};
 
-const DOCUMENT_QUESTION: &str = "How does `body` ground the proposition?";
-const ESCALATION_QUESTION: &str = "Does the proposition hold of the codebase given this evidence?";
+const DOCUMENT_QUESTION: &str = "How does `body` at `path` ground the proposition?";
+const ESCALATION_QUESTION: &str = "Does the proposition `proposition` hold of the codebase given the conflicting evidence `evidence`?";
 
 /// Handle for a proposition enqueued with [`Reader::submit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -323,6 +324,7 @@ where
             }
             let nominees = nominee_paths(opens);
             if nominees.is_empty() {
+                self.settle_ready(opens);
                 for open in opens.iter_mut() {
                     if open.is_reading() {
                         open.settle(Value::False, Vec::new(), true);
@@ -340,20 +342,25 @@ where
                 break;
             }
             self.judge(opens, prepared);
-            let mut escalate = Vec::new();
-            for (index, open) in opens.iter_mut().enumerate() {
-                if !open.is_reading() {
-                    continue;
-                }
-                match open.action() {
-                    Action::Continue => {}
-                    Action::Escalate => escalate.push(index),
-                    Action::Settle(value, ids, exhausted) => open.settle(value, ids, exhausted),
-                }
+            self.settle_ready(opens);
+        }
+    }
+
+    /// Apply the witness / refutation rule to whatever has been judged.
+    fn settle_ready(&mut self, opens: &mut [Open<U>]) {
+        let mut escalate = Vec::new();
+        for (index, open) in opens.iter_mut().enumerate() {
+            if !open.is_reading() {
+                continue;
             }
-            if !escalate.is_empty() {
-                self.escalate(opens, &escalate);
+            match open.action() {
+                Action::Continue => {}
+                Action::Escalate => escalate.push(index),
+                Action::Settle(value, ids, exhausted) => open.settle(value, ids, exhausted),
             }
+        }
+        if !escalate.is_empty() {
+            self.escalate(opens, &escalate);
         }
     }
 
@@ -372,7 +379,7 @@ where
                 }
             };
             let rendered_bytes = body.len() as u64;
-            let excerpt = excerpt_of(&body);
+            let excerpt = body.clone();
             let state = json!({ "path": path, "body": body });
             for (index, open) in opens.iter().enumerate() {
                 if open.is_reading() && open.contains(path) && !open.seen.contains(path.as_str()) {
@@ -393,11 +400,10 @@ where
     fn judge(&mut self, opens: &mut [Open<U>], prepared: Vec<Prepared>) {
         let mut tickets = Vec::with_capacity(prepared.len());
         for ask in &prepared {
-            let ticket = self.search.oracle_mut().submit(document_question(
-                &ask.state,
-                &ask.path,
-                &ask.proposition,
-            ));
+            let ticket = self
+                .search
+                .oracle_mut()
+                .submit(document_question(&ask.state, &ask.proposition));
             tickets.push(ticket);
         }
         for (ask, ticket) in prepared.into_iter().zip(tickets) {
@@ -426,6 +432,7 @@ where
             confidence: answer.confidence,
             rendered_bytes: ask.rendered_bytes,
             escalation: false,
+            exchange: answer.exchange.as_ref().map(ExchangeRecord::from_oracle),
         };
         self.log_step(&step);
         step
@@ -461,6 +468,7 @@ where
                             confidence: answer.confidence,
                             rendered_bytes: 0,
                             escalation: true,
+                            exchange: answer.exchange.as_ref().map(ExchangeRecord::from_oracle),
                         };
                         self.log_step(&step);
                         open.steps.push(step);
@@ -597,34 +605,36 @@ fn nominee_paths<U: Universe>(opens: &[Open<U>]) -> Vec<String> {
     nominees
 }
 
-fn document_question(state: &Json, path: &str, proposition: &str) -> Classification {
+fn document_question(state: &Json, proposition: &str) -> Classification {
     Classification {
         state: state.clone(),
         kind: QuestionKind::Choice,
         instructions: json!({
-            "path": path,
             "proposition": proposition,
             "question": DOCUMENT_QUESTION,
         }),
         criteria: json!({
-            "entailed": "body supplies information that makes the statement true",
-            "contradicted": "body supplies information that makes the statement false",
-            "neutral": "body neither supports nor refutes the statement",
+            "entailed": "`body` at `path` supplies information that makes the proposition true",
+            "contradicted": "`body` at `path` supplies information that makes the proposition false",
+            "neutral": "`body` at `path` neither supports nor refutes the proposition",
         }),
     }
 }
 
 fn escalation_question(proposition: &str, evidence: &[Json]) -> Classification {
     Classification {
-        state: json!({ "evidence": evidence }),
+        state: json!({
+            "proposition": proposition,
+            "evidence": evidence,
+        }),
         kind: QuestionKind::Choice,
         instructions: json!({
             "proposition": proposition,
             "question": ESCALATION_QUESTION,
         }),
         criteria: json!({
-            "true": "the statement holds of the codebase",
-            "false": "the statement does not hold of the codebase",
+            "true": "the proposition holds of the codebase",
+            "false": "the proposition does not hold of the codebase",
             "unknown": "the evidence is insufficient to decide",
         }),
     }
@@ -710,18 +720,6 @@ fn parse_resolution(choice: &str) -> Result<Value, String> {
     }
 }
 
-fn excerpt_of(body: &str) -> String {
-    const MAX: usize = 240;
-    if body.len() <= MAX {
-        return body.to_string();
-    }
-    let mut end = MAX;
-    while end > 0 && !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    body[..end].to_string()
-}
-
 fn ranked_leaves<U: Universe>(
     universe: &U,
     decisions: &[Decision],
@@ -775,13 +773,12 @@ mod tests {
     }
 
     fn scratch(files: &[(&str, &str)]) -> (Scratch, Filesystem) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "autoground-read-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         for (rel, body) in files {
             let path = root.join(rel);
@@ -879,7 +876,7 @@ mod tests {
 
     fn scripted_answer(inner: &ScriptInner, req: &Classification) -> Answer {
         let proposition = json_str(&req.instructions, "proposition");
-        let path = json_str(&req.instructions, "path");
+        let path = asked_path(req);
         match req.kind {
             QuestionKind::Noul => {
                 let noul = inner
@@ -916,6 +913,15 @@ mod tests {
         }
     }
 
+    fn asked_path(req: &Classification) -> &str {
+        let on_question = json_str(&req.instructions, "path");
+        if on_question.is_empty() {
+            json_str(&req.state, "path")
+        } else {
+            on_question
+        }
+    }
+
     fn json_str<'a>(value: &'a Json, key: &str) -> &'a str {
         value.get(key).and_then(|item| item.as_str()).unwrap_or("")
     }
@@ -936,7 +942,7 @@ mod tests {
                 req.kind == QuestionKind::Choice && req.criteria.get("entailed").is_some()
             })
             .filter(|req| json_str(&req.instructions, "proposition") == proposition)
-            .map(|req| json_str(&req.instructions, "path").to_string())
+            .map(|req| json_str(&req.state, "path").to_string())
             .collect()
     }
 
@@ -1044,8 +1050,12 @@ mod tests {
             .find(|req| req.kind == QuestionKind::Choice && req.criteria.get("true").is_some())
             .unwrap()
             .clone();
-        assert!(escalation.state.get("proposition").is_none());
+        assert_eq!(json_str(&escalation.state, "proposition"), "p");
+        assert!(escalation.state.get("evidence").is_some());
         assert!(escalation.state.get("body").is_none());
+        let question = json_str(&escalation.instructions, "question");
+        assert!(question.contains("`proposition`"), "{question}");
+        assert!(question.contains("`evidence`"), "{question}");
         assert_eq!(json_str(&escalation.instructions, "proposition"), "p");
     }
 
@@ -1103,7 +1113,8 @@ mod tests {
             .iter()
             .filter(|req| {
                 req.kind == QuestionKind::Choice
-                    && json_str(&req.instructions, "path") == "hi/a.txt"
+                    && req.criteria.get("entailed").is_some()
+                    && json_str(&req.state, "path") == "hi/a.txt"
             })
             .cloned()
             .collect();

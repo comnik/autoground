@@ -1,0 +1,43 @@
+{
+  "id": "search-oracle-interface",
+  "proposition": "An interface exists between the search component and the oracle.",
+  "model": "grok-4.7-build",
+  "session_id": "01a0cfd6-26a1-7c70-9420-795c3502ca48",
+  "value": "true",
+  "provenance": [
+    {
+      "path": "README.md",
+      "verdict": "entailed",
+      "excerpt": "Search and the reader use this interface. The 3VL engine does not hold an oracle."
+    },
+    {
+      "path": "src/main.rs",
+      "verdict": "entailed",
+      "excerpt": "fn run_search<O: Oracle>(\n    universe: Filesystem,\n    oracle: O,\n    proposition: &str,\n    budget: usize,\n    log: &Log,\n) -> Result<Searched, Box<dyn std::error::Error>> {\n    let mut session = Search::new(universe, oracle, budget);"
+    },
+    {
+      "path": "src/oracle/mod.rs",
+      "verdict": "entailed",
+      "excerpt": "pub trait Oracle {\n    fn submit(&mut self, req: Classification) -> Ticket;\n    fn wait(&mut self, ticket: Ticket) -> Result<Answer, OracleError>;"
+    },
+    {
+      "path": "src/search/mod.rs",
+      "verdict": "entailed",
+      "excerpt": "pub struct Search<U, O> {\n    universe: U,\n    oracle: O,"
+    }
+  ],
+  "usage": {
+    "input_tokens": 37788,
+    "cache_read_input_tokens": 49280,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 5416,
+    "reasoning_tokens": 4894
+  },
+  "estimated_usd": 0.132712,
+  "estimate_partial": false,
+  "server_cost_usd": 0.045122,
+  "duration_ms": 77778,
+  "priced_at": "2026-09-22",
+  "rate_band": "under_200k",
+  "price_source": "https://docs.x.ai/docs/models"
+}

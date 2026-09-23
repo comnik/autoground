@@ -1,0 +1,48 @@
+{
+  "id": "no-gpu-compiler",
+  "proposition": "The codebase does not have a GPU compiler.",
+  "model": "grok-4.7-build",
+  "session_id": "01a0cfd3-4e79-7ca3-8d26-f2bbeaafca92",
+  "value": "true",
+  "provenance": [
+    {
+      "path": "Cargo.toml",
+      "verdict": "entailed",
+      "excerpt": "description = \"Compile and run self-grounding conceptual models of a codebase\"\n[dependencies]\nclap = { version = \"4.5\", features = [\"derive\"] }\ncrossterm = \"0.28\"\nignore = \"0.4\"\nserde = { version = \"1\", features = [\"derive\"] }\nserde_json = \"1\"\ntoml = \"0.8\"\nureq = { version = \"2.12\", features = [\"json\"] }"
+    },
+    {
+      "path": "README.md",
+      "verdict": "entailed",
+      "excerpt": "`autoground` compiles and runs *neurosymbolic*, *self-validating* mental models of a codebase."
+    },
+    {
+      "path": "src/core/mod.rs",
+      "verdict": "entailed",
+      "excerpt": "/// A program with EDB/IDB classified and stratification checked.\n#[derive(Debug, Clone, PartialEq, Eq)]\npub struct Compiled {\n/// Classify predicates and reject unstratified IDB.\npub fn compile(program: &Program) -> Result<Compiled, CompileError> {"
+    },
+    {
+      "path": "src/navigator/jev.rs",
+      "verdict": "entailed",
+      "excerpt": "fn conflict_request_asks_value_and_consistency() {\n        let state = ConflictState {\n            pred: \"GPUCompiler\".into(),\n            args: vec![],\n            verbalization: \"the system has a gpu-based compiler\".into(),"
+    },
+    {
+      "path": "src/navigator/tree.rs",
+      "verdict": "entailed",
+      "excerpt": "fn nullary_atom_is_not_proved_by_investigating_a_directory() {\n        let mut nav =\n            TreeNavigator::new(\"examples/toy-layered\", Box::new(InvestigateAllUnknownDocs));\n        let answer = nav.answer(&nullary(\"GPUCompiler\"), &Store::new());"
+    }
+  ],
+  "usage": {
+    "input_tokens": 82697,
+    "cache_read_input_tokens": 29696,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 5609,
+    "reasoning_tokens": 4660
+  },
+  "estimated_usd": 0.213896,
+  "estimate_partial": false,
+  "server_cost_usd": 0.072725,
+  "duration_ms": 89815,
+  "priced_at": "2026-09-22",
+  "rate_band": "under_200k",
+  "price_source": "https://docs.x.ai/docs/models"
+}

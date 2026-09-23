@@ -13,6 +13,9 @@ use super::{Universe, UniverseError};
 pub struct ListingFilter {
     gitignore: Option<Gitignore>,
     model_rel: Option<String>,
+    /// When set, listings omit paths outside this directory. Ancestors stay
+    /// visible so a walk can enter it.
+    only: Option<String>,
 }
 
 impl ListingFilter {
@@ -20,7 +23,12 @@ impl ListingFilter {
         Self {
             gitignore: load_gitignore(root),
             model_rel: None,
+            only: None,
         }
+    }
+
+    pub fn set_only(&mut self, prefix: impl Into<String>) {
+        self.only = Some(prefix.into());
     }
 
     pub fn set_model(&mut self, root: &Path, model: &Path) {
@@ -28,6 +36,9 @@ impl ListingFilter {
     }
 
     pub fn hide(&self, rel: &str, is_dir: bool) -> bool {
+        if self.outside(rel) {
+            return true;
+        }
         if is_git_meta(rel) {
             return true;
         }
@@ -38,6 +49,18 @@ impl ListingFilter {
             Some(gi) => gi.matched(rel, is_dir).is_ignore(),
             None => false,
         }
+    }
+
+    fn outside(&self, rel: &str) -> bool {
+        let Some(prefix) = &self.only else {
+            return false;
+        };
+        if rel.is_empty() {
+            return false;
+        }
+        let under = rel == prefix.as_str() || rel.starts_with(&format!("{prefix}/"));
+        let ancestor = prefix.starts_with(&format!("{rel}/"));
+        !under && !ancestor
     }
 }
 
@@ -203,6 +226,12 @@ impl Filesystem {
             objects,
             samples: Vec::new(),
         })
+    }
+
+    /// Hide every path outside `prefix`. The prefix and its ancestors remain.
+    pub fn set_only(&mut self, prefix: &str) {
+        self.filter.set_only(prefix);
+        self.objects.retain(|id| !self.filter.outside(id));
     }
 
     pub fn samples(&self) -> &[String] {
@@ -677,6 +706,25 @@ mod tests {
     fn top_dirs(fs: &mut Filesystem) {
         fs.set(vec!["backend".into(), "decoy".into(), "frontend".into()])
             .unwrap();
+    }
+
+    #[test]
+    fn set_only_hides_paths_outside_the_prefix() {
+        let root = std::env::temp_dir().join(format!("autoground-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("evals")).unwrap();
+        std::fs::write(root.join("src/a.txt"), "a").unwrap();
+        std::fs::write(root.join("evals/b.txt"), "b").unwrap();
+        std::fs::write(root.join("README.md"), "r").unwrap();
+        let mut fs = Filesystem::at_root(&root).unwrap();
+        fs.set_only("src");
+        let children = fs.children("").unwrap();
+        assert!(children.contains(&"src".to_string()), "{children:?}");
+        assert!(!children.iter().any(|id| id == "evals"), "{children:?}");
+        assert!(!children.iter().any(|id| id == "README.md"), "{children:?}");
+        assert_eq!(fs.children("src").unwrap(), vec!["src/a.txt".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
