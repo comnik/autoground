@@ -6,6 +6,7 @@ pub mod log;
 pub mod navigator;
 pub mod oracle;
 pub mod proposers;
+pub mod read;
 pub mod report;
 pub mod search;
 pub mod syntax;

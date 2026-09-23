@@ -152,6 +152,10 @@ impl<U, O> Search<U, O> {
     {
         self.oracle.usage()
     }
+
+    pub fn oracle_mut(&mut self) -> &mut O {
+        &mut self.oracle
+    }
 }
 
 impl<U, O> Search<U, O>

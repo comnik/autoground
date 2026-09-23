@@ -2,12 +2,17 @@ use std::collections::{HashMap, HashSet};
 
 use crate::universe::Universe;
 
-use super::{Answer, Classification, Oracle, OracleError, Ticket};
+use super::{Answer, Classification, Oracle, OracleError, QuestionKind, Ticket};
 
-/// Keyless stand-in over a [`Universe`]. A Noul is the probability that the
-/// path is irrelevant to the proposition: high when no component
-/// of the path occurs in it, low when one does. Search keeps a directory that
-/// is not confidently irrelevant.
+/// Keyless stand-in over a [`Universe`].
+///
+/// A Noul is the probability that the path is irrelevant to the proposition:
+/// high when no component of the path occurs in it, low when one does. Search
+/// keeps a directory that is not confidently irrelevant.
+///
+/// A document Choice is `entailed` at 0.95 when a path component occurs in the
+/// proposition, and `neutral` at 0.95 otherwise. It does not answer
+/// `contradicted`. Any other Choice declines with `unknown`.
 ///
 /// The proposition and the path are fields on the instruction object, so one
 /// oracle can answer questions for many propositions.
@@ -29,6 +34,13 @@ impl<U: Universe> HeuristicOracle<U> {
     }
 
     fn answer(&self, req: &Classification) -> Answer {
+        match req.kind {
+            QuestionKind::Noul => self.noul(req),
+            QuestionKind::Choice => self.choice(req),
+        }
+    }
+
+    fn noul(&self, req: &Classification) -> Answer {
         let proposition = field(&req.instructions, "proposition");
         let path = field(&req.instructions, "path");
         let known = self.universe.is_leaf(path).is_ok();
@@ -41,6 +53,28 @@ impl<U: Universe> HeuristicOracle<U> {
             choice: String::new(),
             confidence: noul,
             noul: Some(noul),
+            exchange: None,
+        }
+    }
+
+    fn choice(&self, req: &Classification) -> Answer {
+        let proposition = field(&req.instructions, "proposition");
+        let path = field(&req.instructions, "path");
+        let known = self.universe.is_leaf(path).is_ok();
+        let choice = if req.criteria.get("entailed").is_some()
+            && known
+            && path_matches(path, &tokens(proposition))
+        {
+            "entailed"
+        } else if req.criteria.get("entailed").is_some() {
+            "neutral"
+        } else {
+            "unknown"
+        };
+        Answer {
+            choice: choice.to_string(),
+            confidence: 0.95,
+            noul: None,
             exchange: None,
         }
     }
