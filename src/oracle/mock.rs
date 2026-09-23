@@ -4,9 +4,10 @@ use crate::universe::Universe;
 
 use super::{Answer, Classification, Oracle, OracleError, Ticket};
 
-/// Keyless stand-in over a [`Universe`]. A Noul is yes when the path's own
-/// name occurs in the proposition, and no otherwise. Search turns those
-/// probabilities into keep and prune.
+/// Keyless stand-in over a [`Universe`]. A Noul is the probability that the
+/// path is irrelevant to the proposition: high when no component
+/// of the path occurs in it, low when one does. Search keeps a directory that
+/// is not confidently irrelevant.
 ///
 /// The proposition and the path are fields on the instruction object, so one
 /// oracle can answer questions for many propositions.
@@ -32,9 +33,9 @@ impl<U: Universe> HeuristicOracle<U> {
         let path = field(&req.instructions, "path");
         let known = self.universe.is_leaf(path).is_ok();
         let noul = if known && path_matches(path, &tokens(proposition)) {
-            0.95
-        } else {
             0.05
+        } else {
+            0.95
         };
         Answer {
             choice: String::new(),

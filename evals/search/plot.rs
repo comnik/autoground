@@ -89,7 +89,7 @@ pub fn render(runs: &[HistoryRun]) -> String {
         if let Some(mark) = run
             .curve
             .iter()
-            .find(|point| (point.floor - 0.85).abs() < 1e-9)
+            .find(|point| (point.floor - run.suite.floor).abs() < 1e-9)
         {
             if let (Some(pruned), Some(evidence)) = (mark.mean_pruned, mark.mean_evidence) {
                 let (x, y) = xy(pruned, evidence);

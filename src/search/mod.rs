@@ -3,13 +3,13 @@
 //!
 //! [`Search::submit`] enqueues a proposition. [`Search::wait`] flushes every
 //! pending proposition together: directory listings are built once, and each
-//! proposition adds the same three yes/no questions for every name in that
-//! listing. The oracle batches questions that share a state. A name is a
-//! strong indicator, and so is the place a behavior would be implemented or
-//! declared. A directory whose strongest yes under it falls short of
-//! [`SUPPORT`](crate::navigator::confidence::SUPPORT) drops its subtree. What
-//! remains is a clone of the universe whose window is the kept directories
-//! and the files under them. File bodies are not judged.
+//! proposition adds one yes/no question for every directory. The question
+//! asks whether that subtree is irrelevant to the proposition, and
+//! the listing in the state is the subtree the question judges. The oracle
+//! batches questions that share a state. A directory drops when its own
+//! answer is irrelevant at or above [`PRUNE_FLOOR`]. What remains is a
+//! clone of the universe whose window is the kept directories and the files
+//! under them. File bodies are not judged.
 
 mod tui;
 
@@ -34,6 +34,10 @@ use trace::{ExchangeRecord, SearchStep, ViewObject};
 /// Default render budget for one directory-listing state. About 12k tokens at
 /// 4 bytes each, under Jev's 32k state-side cap.
 pub const DEFAULT_BUDGET_BYTES: usize = 48 * 1024;
+
+/// Irrelevance probability at which a directory drops. On this question a
+/// 0.70 no keeps the evidence and still removes about a fifth of the tree.
+pub const PRUNE_FLOOR: f64 = 0.70;
 
 /// Handle for a proposition enqueued with [`Search::submit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -166,8 +170,8 @@ where
 
     /// Flush every pending proposition, then return this one's pruned window.
     ///
-    /// Listings are rendered once. Each proposition contributes three Nouls
-    /// per name, on that same state, so the oracle can fill a request with
+    /// Listings are rendered once. Each proposition contributes one Noul per
+    /// directory, on that same state, so the oracle can fill a request with
     /// questions from many propositions.
     pub fn wait(&mut self, ticket: Ticket) -> Result<View<U>, SearchError> {
         if let Some(done) = self.resolved.get(&ticket) {
@@ -292,20 +296,20 @@ where
                     exchange: None,
                 });
                 for name in names_in_group(&groups, index, &names) {
-                    for facet in Facet::ALL {
-                        let oracle_ticket = self.oracle.submit(noul_question(
-                            &group.state,
-                            &name.path,
-                            &item.proposition,
-                            facet,
-                        ));
-                        asks.push(Ask {
-                            search_ticket: item.ticket,
-                            step: index,
-                            path: name.path.clone(),
-                            oracle_ticket,
-                        });
+                    if !name.directory {
+                        continue;
                     }
+                    let oracle_ticket = self.oracle.submit(irrelevant_question(
+                        &group.state,
+                        &name.path,
+                        &item.proposition,
+                    ));
+                    asks.push(Ask {
+                        search_ticket: item.ticket,
+                        step: index,
+                        path: name.path.clone(),
+                        oracle_ticket,
+                    });
                 }
             }
         }
@@ -344,14 +348,12 @@ where
                 }
                 let step = &mut steps.get_mut(&item.ticket).unwrap()[index];
                 for id in &group.ids {
-                    let signal = hits
+                    let irrelevant = hits
                         .iter()
-                        .filter(|hit| {
-                            hit.search_ticket == item.ticket
-                                && (hit.path == *id || is_under(&hit.path, id))
-                        })
+                        .find(|hit| hit.search_ticket == item.ticket && hit.path == *id)
                         .map(|hit| hit.noul)
-                        .fold(0.0, f64::max);
+                        .unwrap_or(0.0);
+                    let signal = 1.0 - irrelevant;
                     step.classifications.push(decision_from_signal(id, signal));
                 }
                 if step.exchange.is_none() {
@@ -630,7 +632,7 @@ fn capture<U: Universe>(universe: &U, ids: &[String]) -> Result<Vec<ViewObject>,
 }
 
 /// A directory `prune` at or above `min_confidence` drops its subtree. A live
-/// search passes [`SUPPORT`].
+/// search passes [`PRUNE_FLOOR`].
 fn apply_prune(raw: &str, confidence: f64, min_confidence: f64) -> Applied {
     match raw {
         "prune" if confidence >= min_confidence => Applied::Prune,
@@ -658,46 +660,13 @@ pub fn retained_ids<U: Universe>(
     candidate_ids(universe, &adjusted)
 }
 
-/// One way a name can be where information about the proposition lives.
-#[derive(Clone, Copy)]
-enum Facet {
-    Named,
-    Behavior,
-    Declared,
-}
+const IRRELEVANT_QUESTION: &str = "Is the subtree at `path` irrelevant to `proposition`?";
 
-impl Facet {
-    const ALL: [Facet; 3] = [Facet::Named, Facet::Behavior, Facet::Declared];
-
-    fn question(self) -> &'static str {
-        match self {
-            Facet::Named => "Does `name` name something `proposition` is about?",
-            Facet::Behavior => {
-                "Is information about the behavior in `proposition` likely to be found at `path`, given where `path` sits in `tree`?"
-            }
-            Facet::Declared => {
-                "Is `path` where something `proposition` is about would be declared or defined?"
-            }
-        }
-    }
-
-    fn criteria(self) -> Json {
-        let (yes, no) = match self {
-            Facet::Named => (
-                "The name denotes a thing the proposition is about.",
-                "The name does not denote a thing the proposition is about. A name that merely might contain related code is a no.",
-            ),
-            Facet::Behavior => (
-                "A reader looking for how that behavior is implemented would open this path.",
-                "This path's place in the tree is not a likely home for that behavior.",
-            ),
-            Facet::Declared => (
-                "This path declares or defines something the proposition is about: a module root, a manifest, a public interface, or a concept inventory.",
-                "This path does not declare or define something the proposition is about.",
-            ),
-        };
-        json!({ "true": yes, "false": no })
-    }
+fn irrelevant_criteria() -> Json {
+    json!({
+        "true": "A reader looking for information about the proposition would skip this subtree.",
+        "false": "A reader looking for information about the proposition would open this subtree.",
+    })
 }
 
 struct ListedName {
@@ -752,7 +721,7 @@ fn group_for(groups: &[Group], name: &ListedName) -> usize {
         .unwrap_or(0)
 }
 
-fn noul_question(state: &Json, path: &str, proposition: &str, facet: Facet) -> Classification {
+fn irrelevant_question(state: &Json, path: &str, proposition: &str) -> Classification {
     let name = path.rsplit('/').next().unwrap_or(path);
     Classification::noul(
         state.clone(),
@@ -760,16 +729,17 @@ fn noul_question(state: &Json, path: &str, proposition: &str, facet: Facet) -> C
             "path": path,
             "name": name,
             "proposition": proposition,
-            "question": facet.question(),
+            "question": IRRELEVANT_QUESTION,
         }),
-        facet.criteria(),
+        irrelevant_criteria(),
     )
 }
 
-/// `signal` is the strongest Noul under the directory: the probability that
-/// information about the proposition is there. At or above [`SUPPORT`] that is
-/// a keep. Below it, the recorded prune confidence is how unlikely that
-/// strongest yes is, so a later floor can still accept a weaker prune.
+/// `signal` is how likely it is that information about the proposition is
+/// under the directory: one minus that directory's own "irrelevant" answer.
+/// The listing in the question's state is already the subtree. At or above
+/// [`SUPPORT`] that is a keep. Below it, the recorded prune confidence is the
+/// irrelevance probability, and the directory drops at [`PRUNE_FLOOR`].
 fn decision_from_signal(id: &str, signal: f64) -> Decision {
     if signal >= SUPPORT {
         Decision {
@@ -785,15 +755,10 @@ fn decision_from_signal(id: &str, signal: f64) -> Decision {
             id: id.to_string(),
             leaf: false,
             raw: "prune".to_string(),
-            applied: apply_prune("prune", confidence, SUPPORT),
+            applied: apply_prune("prune", confidence, PRUNE_FLOOR),
             confidence,
         }
     }
-}
-
-fn is_under(path: &str, dir: &str) -> bool {
-    path.strip_prefix(dir)
-        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn display_path(id: &str, leaf: bool) -> String {
@@ -940,15 +905,16 @@ mod tests {
             }
             let replace = best.is_none_or(|(len, _)| id.len() > len);
             if replace {
+                // The Noul is P(irrelevant). A keep label is a low score.
                 let noul = if choice == "keep" {
-                    *confidence
-                } else {
                     1.0 - *confidence
+                } else {
+                    *confidence
                 };
                 best = Some((id.len(), noul));
             }
         }
-        best.map(|(_, noul)| noul).unwrap_or(0.05)
+        best.map(|(_, noul)| noul).unwrap_or(0.95)
     }
 
     impl Oracle for Script {
@@ -1039,7 +1005,7 @@ mod tests {
             DEFAULT_BUDGET_BYTES,
         );
         assert_eq!(oracle.state_count(), 1, "paths {:?}", oracle.paths());
-        assert_eq!(oracle.log.len(), 24);
+        assert_eq!(oracle.log.len(), 3, "one question per directory");
         assert!(oracle
             .log
             .iter()
@@ -1049,9 +1015,9 @@ mod tests {
             .iter()
             .filter_map(|classification| classification.instructions["question"].as_str())
             .collect();
-        assert_eq!(questions.len(), 3);
+        assert_eq!(questions, HashSet::from([IRRELEVANT_QUESTION]));
         assert!(oracle.paths().contains(&"frontend"));
-        assert!(oracle.paths().contains(&"frontend/app.py"));
+        assert!(!oracle.paths().contains(&"frontend/app.py"));
         assert!(!oracle.paths().contains(&""));
         let sample = &oracle.log[0];
         assert!(sample.instructions["proposition"].is_string());
@@ -1096,7 +1062,7 @@ mod tests {
     #[test]
     fn weak_prune_keeps_the_directory_and_its_files() {
         let universe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let (view, oracle) = search_one(
+        let (view, _) = search_one(
             universe,
             Script::new(toy(&[("frontend", "prune", 0.5)])),
             "frontend",
@@ -1110,7 +1076,6 @@ mod tests {
         assert_eq!(frontend.raw, "prune");
         assert_eq!(frontend.applied, Applied::Keep);
         assert!((frontend.confidence - 0.5).abs() < 1e-9);
-        assert!(oracle.paths().contains(&"frontend/app.py"));
         assert_eq!(
             ids(&view),
             vec![
@@ -1122,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn a_yes_under_a_directory_keeps_its_ancestors() {
+    fn a_directory_answer_drops_its_subtree() {
         let root = scratch("nested");
         std::fs::create_dir_all(root.join("nested/deep")).unwrap();
         std::fs::write(root.join("nested/keepme.txt"), "keep\n").unwrap();
@@ -1140,21 +1105,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(oracle.paths().contains(&"nested"));
         assert!(oracle.paths().contains(&"nested/deep"));
-        assert!(oracle.paths().contains(&"nested/deep/file.txt"));
+        assert!(!oracle.paths().contains(&"nested/deep/file.txt"));
         let nested = view
             .trace
             .iter()
             .find(|decision| decision.id == "nested")
             .unwrap();
-        assert_eq!(nested.raw, "keep");
+        assert_eq!(nested.raw, "prune");
+        assert_eq!(nested.applied, Applied::Prune);
+        assert!(ids(&view).is_empty());
+    }
+
+    #[test]
+    fn a_nested_prune_leaves_the_parent() {
+        let root = scratch("nested-keep");
+        std::fs::create_dir_all(root.join("nested/deep")).unwrap();
+        std::fs::write(root.join("nested/keepme.txt"), "keep\n").unwrap();
+        std::fs::write(root.join("nested/deep/file.txt"), "deep\n").unwrap();
+        let universe = Filesystem::at_root(&root).unwrap();
+        let (view, _) = search_one(
+            universe,
+            Script::new(vec![
+                ("nested".into(), "keep".into(), 0.95),
+                ("nested/deep".into(), "prune".into(), 0.99),
+            ]),
+            "anything",
+            DEFAULT_BUDGET_BYTES,
+        );
+        let _ = std::fs::remove_dir_all(&root);
         assert_eq!(
             ids(&view),
-            vec![
-                "nested".to_string(),
-                "nested/deep".to_string(),
-                "nested/deep/file.txt".to_string(),
-                "nested/keepme.txt".to_string(),
-            ]
+            vec!["nested".to_string(), "nested/keepme.txt".to_string(),]
         );
     }
 
@@ -1173,8 +1154,8 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
         assert!(oracle.paths().contains(&"src"));
-        assert!(oracle.paths().contains(&"src/lib.rs"));
-        assert!(oracle.paths().contains(&"README.md"));
+        assert!(!oracle.paths().contains(&"src/lib.rs"));
+        assert!(!oracle.paths().contains(&"README.md"));
         assert_eq!(ids(&view), vec!["README.md".to_string()]);
     }
 
@@ -1182,14 +1163,14 @@ mod tests {
     fn tiny_budget_puts_each_directory_in_its_own_state() {
         let universe = Filesystem::at_root("examples/toy-layered").unwrap();
         let (_, oracle) = search_one(universe, Script::new(toy(&[])), "frontend", 1);
-        assert_eq!(oracle.log.len(), 24);
+        assert_eq!(oracle.log.len(), 3);
         assert_eq!(oracle.state_count(), 3, "paths {:?}", oracle.paths());
-        let app = oracle
+        let frontend = oracle
             .log
             .iter()
-            .find(|classification| classification.instructions["path"] == "frontend/app.py")
+            .find(|classification| classification.instructions["path"] == "frontend")
             .unwrap();
-        assert!(app.state["tree"].get("frontend").is_some());
+        assert!(frontend.state["tree"].get("frontend").is_some());
     }
 
     #[test]
@@ -1202,7 +1183,7 @@ mod tests {
         let ticket = session.submit("frontend");
         assert!(session.oracle.log.is_empty());
         session.wait(ticket).unwrap();
-        assert_eq!(session.oracle.log.len(), 24);
+        assert_eq!(session.oracle.log.len(), 3);
     }
 
     #[test]
@@ -1220,7 +1201,7 @@ mod tests {
         assert!(err.to_string().contains("unknown ticket"));
         assert!(session.oracle.log.is_empty());
         session.wait(queued).unwrap();
-        assert_eq!(session.oracle.log.len(), 24);
+        assert_eq!(session.oracle.log.len(), 3);
     }
 
     #[test]
@@ -1247,7 +1228,7 @@ mod tests {
         let asked = session.oracle.log.len();
         let right = session.wait(backend).unwrap();
         assert_eq!(session.oracle.log.len(), asked);
-        assert_eq!(asked, 48, "paths {:?}", session.oracle.paths());
+        assert_eq!(asked, 6, "paths {:?}", session.oracle.paths());
         assert_eq!(session.oracle.state_count(), 1);
         let state = session.oracle.log[0].state.to_string();
         assert!(session
@@ -1277,8 +1258,10 @@ mod tests {
     fn retained_ids_follows_the_prune_floor() {
         let root = scratch("replay");
         std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("mid")).unwrap();
         std::fs::create_dir_all(root.join("other")).unwrap();
         std::fs::write(root.join("src/a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("mid/c.txt"), "c\n").unwrap();
         std::fs::write(root.join("other/b.txt"), "b\n").unwrap();
         std::fs::write(root.join("README.md"), "root\n").unwrap();
         let universe = Filesystem::at_root(&root).unwrap();
@@ -1286,17 +1269,29 @@ mod tests {
             universe.clone(),
             Script::new(vec![
                 ("src".into(), "prune".into(), 0.90),
+                ("mid".into(), "prune".into(), 0.75),
                 ("other".into(), "prune".into(), 0.60),
             ]),
             "anything",
             DEFAULT_BUDGET_BYTES,
         );
+        let at_floor = retained_ids(&universe, &view.trace, PRUNE_FLOOR).unwrap();
+        assert_eq!(at_floor, ids(&view));
+        assert_eq!(
+            at_floor,
+            vec![
+                "README.md".to_string(),
+                "other".to_string(),
+                "other/b.txt".to_string(),
+            ]
+        );
         let at_support = retained_ids(&universe, &view.trace, SUPPORT).unwrap();
-        assert_eq!(at_support, ids(&view));
         assert_eq!(
             at_support,
             vec![
                 "README.md".to_string(),
+                "mid".to_string(),
+                "mid/c.txt".to_string(),
                 "other".to_string(),
                 "other/b.txt".to_string(),
             ]

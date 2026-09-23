@@ -14,6 +14,7 @@ use autoground::log::Log;
 use autoground::navigator::confidence::SUPPORT;
 use autoground::oracle::{HeuristicOracle, JevOracle, Oracle};
 use autoground::report::{format_duration, format_usd};
+use autoground::search::PRUNE_FLOOR;
 use autoground::search::{Search, DEFAULT_BUDGET_BYTES};
 use autoground::universe::{Filesystem, Universe, UniverseError};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -623,7 +624,7 @@ fn wait<O: Oracle>(
 fn print_case(id: &str, points: &[FloorPoint], spend: Option<f64>, trace: &Path) {
     let Some(point) = points
         .iter()
-        .find(|point| (point.floor - SUPPORT).abs() < 1e-9)
+        .find(|point| (point.floor - PRUNE_FLOOR).abs() < 1e-9)
     else {
         return;
     };
@@ -702,7 +703,7 @@ fn suite_summary(points: &[Vec<FloorPoint>], cases: &[CaseRecord]) -> SuiteSumma
     for case_points in points {
         if let Some(point) = case_points
             .iter()
-            .find(|point| (point.floor - SUPPORT).abs() < 1e-9)
+            .find(|point| (point.floor - PRUNE_FLOOR).abs() < 1e-9)
         {
             if let Some(value) = point.pruned {
                 pruned.push(value);
@@ -715,7 +716,7 @@ fn suite_summary(points: &[Vec<FloorPoint>], cases: &[CaseRecord]) -> SuiteSumma
         }
     }
     SuiteSummary {
-        floor: SUPPORT,
+        floor: PRUNE_FLOOR,
         mean_pruned: metrics::mean(&pruned),
         mean_evidence: metrics::mean(&evidence),
         micro_evidence: if total == 0 {
