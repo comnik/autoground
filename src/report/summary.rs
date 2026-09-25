@@ -1,5 +1,6 @@
-//! Closing lines of `autoground run`: request stats, how full the in-flight
-//! cap stayed, and the shape of round-trip latency.
+//! Closing lines of `autoground run`: where the trace went, how full the
+//! in-flight cap stayed, the shape of round-trip latency, and what the run
+//! cost.
 
 use std::io::{self, stdout, IsTerminal, Write};
 use std::path::Path;
@@ -8,6 +9,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use crossterm::{
     queue,
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
+    terminal,
 };
 
 use crate::oracle::{Flight, Usage};
@@ -60,6 +62,9 @@ pub fn print_run_summary(
     trace: &Path,
 ) -> io::Result<()> {
     let color = stdout().is_terminal();
+    let width = terminal::size()
+        .map(|(columns, _)| columns as usize)
+        .unwrap_or(80);
     let mut out = stdout();
     if color {
         writeln!(out)?;
@@ -72,6 +77,7 @@ pub fn print_run_summary(
         total,
         elapsed,
         trace,
+        width,
     ) {
         write_line(&mut out, &line, color)?;
     }
@@ -86,16 +92,18 @@ fn painted(
     total: usize,
     elapsed: Duration,
     trace: &Path,
+    width: usize,
 ) -> Vec<Painted> {
-    let mut lines = vec![plain(format!("({})", format_usage_stats(usage)))];
-    if let Some(line) = inflight_line(flights, flight_limit) {
-        lines.push(line);
-    }
+    let mut lines = vec![
+        rule(width),
+        plain(format!("trace available at {}", trace.display())),
+        throughput_line(usage, flights, flight_limit),
+    ];
     if let Some(text) = latency_line(usage, flights) {
         lines.push(plain(text));
     }
-    lines.push(verdict(true_count, total, elapsed));
-    lines.push(plain(format!("trace: {}", trace.display())));
+    lines.push(plain(utilization_line(usage)));
+    lines.push(verdict(usage, true_count, total, elapsed));
     lines
 }
 
@@ -107,7 +115,39 @@ fn plain(text: String) -> Painted {
     }
 }
 
-fn inflight_line(flights: &[Flight], flight_limit: Option<usize>) -> Option<Painted> {
+fn rule(width: usize) -> Painted {
+    Painted {
+        text: "─".repeat(width.max(20)),
+        paint: Paint::Dim,
+        bold: false,
+    }
+}
+
+/// One column for the throughput and latency charts. `utilization` is longer
+/// than that column, so it keeps a single space before `batch`.
+fn summary_label(label: &str) -> String {
+    format!("{label:<10} ")
+}
+
+fn throughput_line(usage: &Usage, flights: &[Flight], flight_limit: Option<usize>) -> Painted {
+    let label = summary_label("throughput");
+    let Some((spark, avg, limit, paint)) = inflight(flights, flight_limit) else {
+        return plain(format!("{label}{} requests", usage.requests));
+    };
+    Painted {
+        text: format!(
+            "{label}{spark}  {} requests averaging {avg:.1}/{limit}",
+            usage.requests
+        ),
+        paint,
+        bold: false,
+    }
+}
+
+fn inflight(
+    flights: &[Flight],
+    flight_limit: Option<usize>,
+) -> Option<(String, f64, usize, Paint)> {
     let limit = flight_limit.filter(|limit| *limit > 0)?;
     let windows = flight_windows(flights);
     if windows.is_empty() {
@@ -126,11 +166,7 @@ fn inflight_line(flights: &[Flight], flight_limit: Option<usize>) -> Option<Pain
     } else {
         Paint::Dim
     };
-    Some(Painted {
-        text: format!("{:<9}{spark}  avg {avg:.1}/{limit}", "in flight"),
-        paint,
-        bold: false,
-    })
+    Some((spark, avg, limit, paint))
 }
 
 fn latency_line(usage: &Usage, flights: &[Flight]) -> Option<String> {
@@ -141,7 +177,7 @@ fn latency_line(usage: &Usage, flights: &[Flight]) -> Option<String> {
     if samples.is_empty() {
         return None;
     }
-    let mut text = format!("{:<9}{}", "latency", hist_spark(&samples));
+    let mut text = format!("{}{}", summary_label("latency"), hist_spark(&samples));
     if let Some(latency) = usage.latency {
         text.push_str(&format!(
             "  p50 {}  p95 {}  p99 {}",
@@ -153,10 +189,39 @@ fn latency_line(usage: &Usage, flights: &[Flight]) -> Option<String> {
     Some(text)
 }
 
-fn verdict(true_count: usize, total: usize, elapsed: Duration) -> Painted {
+fn utilization_line(usage: &Usage) -> String {
+    let batch = match usage.batch_size {
+        Some(factor) => format!("{:.1}%", factor * 100.0),
+        None => "none".to_string(),
+    };
+    let fill = match usage.fill_factor {
+        Some(factor) => format!("{:.1}%", factor * 100.0),
+        None => "none".to_string(),
+    };
+    format!("{}batch={batch} fill={fill}", summary_label("utilization"))
+}
+
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        let millions = tokens as f64 / 1_000_000.0;
+        if tokens % 1_000_000 == 0 {
+            format!("{millions:.0}m")
+        } else {
+            format!("{millions:.1}m")
+        }
+    } else if tokens >= 1_000 {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn verdict(usage: &Usage, true_count: usize, total: usize, elapsed: Duration) -> Painted {
     let text = format!(
-        "{true_count}/{total} claims validated in {}",
-        super::format_duration(elapsed)
+        "{true_count}/{total} claims validated in {} for {} ({} tokens)",
+        super::format_duration(elapsed),
+        super::format_usd(usage.spend_usd),
+        format_tokens(usage.input_tokens),
     );
     let paint = if total > 0 && true_count == total {
         Paint::Green
@@ -321,6 +386,7 @@ mod tests {
             total,
             elapsed,
             Path::new("/tmp/trace.jsonl"),
+            40,
         )
         .into_iter()
         .map(|line| line.text)
@@ -352,12 +418,16 @@ mod tests {
             Duration::from_millis(5_910),
         );
         assert_eq!(
-            lines[0],
-            "(requests=111 tokens=307367 spend=$0.01 batch=5.0% fill=8.7%)"
+            lines,
+            vec![
+                "─".repeat(40),
+                "trace available at /tmp/trace.jsonl".to_string(),
+                "throughput 111 requests".to_string(),
+                "utilization batch=5.0% fill=8.7%".to_string(),
+                "2/4 claims validated in 5.91s for $0.01 (307k tokens)".to_string(),
+            ]
         );
-        assert!(!lines[0].contains("p50"));
-        assert_eq!(lines[1], "2/4 claims validated in 5.91s");
-        assert_eq!(lines[2], "trace: /tmp/trace.jsonl");
+        assert!(lines.iter().all(|line| !line.contains("p50")));
     }
 
     #[test]
@@ -371,12 +441,15 @@ mod tests {
             4,
             Duration::from_secs(6),
         );
-        let inflight = lines
+        let throughput = lines
             .iter()
-            .find(|line| line.starts_with("in flight"))
+            .find(|line| line.starts_with("throughput"))
             .unwrap();
-        assert!(inflight.contains(&"█".repeat(FLIGHT_BUCKETS)));
-        assert!(inflight.contains("avg 16.0/16"), "{inflight}");
+        assert!(throughput.contains(&"█".repeat(FLIGHT_BUCKETS)));
+        assert!(
+            throughput.contains("0 requests averaging 16.0/16"),
+            "{throughput}"
+        );
         assert!(lines.iter().any(|line| line.starts_with("latency")));
     }
 
@@ -391,13 +464,13 @@ mod tests {
             2,
             Duration::from_secs(1),
         );
-        let inflight = lines
+        let throughput = lines
             .iter()
-            .find(|line| line.starts_with("in flight"))
+            .find(|line| line.starts_with("throughput"))
             .unwrap();
-        assert!(inflight.contains('▄'), "{inflight}");
-        assert!(!inflight.contains('█'), "{inflight}");
-        assert!(inflight.contains("avg 8.0/16"), "{inflight}");
+        assert!(throughput.contains('▄'), "{throughput}");
+        assert!(!throughput.contains('█'), "{throughput}");
+        assert!(throughput.contains("averaging 8.0/16"), "{throughput}");
     }
 
     #[test]
@@ -429,17 +502,40 @@ mod tests {
             .find(|line| line.starts_with("latency"))
             .unwrap();
         assert!(latency.contains('█') || latency.contains('▇'), "{latency}");
+        assert_eq!(&latency[..11], "latency    ", "{latency}");
         assert!(latency.contains("p50 663ms"), "{latency}");
         assert!(latency.contains("p95 965ms"), "{latency}");
         assert!(latency.contains("p99 1.10s"), "{latency}");
         assert!(!latency.contains("p50="), "{latency}");
+        let throughput = lines
+            .iter()
+            .find(|line| line.starts_with("throughput"))
+            .unwrap();
+        assert_eq!(&throughput[..11], "throughput ");
     }
 
     #[test]
     fn no_flights_skips_the_charts() {
         let lines = texts(&Usage::default(), &[], None, 0, 0, Duration::from_millis(4));
-        assert!(lines.iter().all(|line| !line.starts_with("in flight")));
         assert!(lines.iter().all(|line| !line.starts_with("latency")));
-        assert_eq!(lines[1], "0/0 claims validated in 4ms");
+        assert_eq!(
+            lines,
+            vec![
+                "─".repeat(40),
+                "trace available at /tmp/trace.jsonl".to_string(),
+                "throughput 0 requests".to_string(),
+                "utilization batch=none fill=none".to_string(),
+                "0/0 claims validated in 4ms for $0.000000 (0 tokens)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn token_counts_collapse_past_a_thousand() {
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(405_947), "405k");
+        assert_eq!(format_tokens(2_000_000), "2m");
+        assert_eq!(format_tokens(1_500_000), "1.5m");
     }
 }

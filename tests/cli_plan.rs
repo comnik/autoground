@@ -81,21 +81,23 @@ fn heuristic_run_combines_and_or_and_not() {
             "false    (and (\"there is a GPU compiler\") (\"Frontend is part of the system\"))",
         ]
     );
-    assert!(lines[4].starts_with("(requests="), "{stdout}");
     assert!(
-        !lines[4].contains("p50="),
-        "percentiles belong on the latency chart, got {}",
-        lines[4]
+        lines[4].chars().all(|c| c == '─') && lines[4].chars().count() >= 20,
+        "{stdout}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with("3/4 claims validated in ")),
+        lines.iter().all(|line| !line.contains("p50=")),
+        "percentiles belong on the latency chart, got {stdout}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line.starts_with("3/4 claims validated in ") && line.contains(" for $")
+        }),
         "{stdout}"
     );
     let path = lines
         .iter()
-        .find_map(|line| line.strip_prefix("trace: "))
+        .find_map(|line| line.strip_prefix("trace available at "))
         .expect("trace path");
     assert!(path.starts_with("/tmp/autoground/trace-"), "{path}");
     let body = std::fs::read_to_string(path).unwrap();
