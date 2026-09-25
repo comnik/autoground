@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use autoground::log::Log;
 use autoground::oracle::{Flight, HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::plan::Plan;
-use autoground::read::{present_read, ReadTraceFile, Reader};
+use autoground::read::{present_read, Finding, ReadTraceFile, Reader, Verdict};
+use autoground::report::run::{Explain, Ground};
 use autoground::report::summary::print_run_summary;
 use autoground::search::trace::SearchStep;
 use autoground::search::trace::UsageRecord;
@@ -34,6 +35,23 @@ enum JudgeKind {
     Jev,
     /// Local stand-in. No API key.
     Heuristic,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ExplainMode {
+    /// Comment each false clause with the file that contradicted it.
+    Contradictions,
+    /// Also comment each true clause with the file that supported it.
+    All,
+}
+
+impl From<ExplainMode> for Explain {
+    fn from(mode: ExplainMode) -> Self {
+        match mode {
+            ExplainMode::Contradictions => Explain::Contradictions,
+            ExplainMode::All => Explain::All,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -66,7 +84,9 @@ enum Commands {
     /// combines those truth values with `and`, `or`, and `not`. On a terminal
     /// each claim shows a spinner while the run is planning, searching, or
     /// reading, and the finished view is the model file with true and false
-    /// claims marked. A session log is written under `/tmp/autoground/`.
+    /// claims marked. A false clause carries a comment naming the file that
+    /// contradicted it. `--explain all` also comments true clauses. A session
+    /// log is written under `/tmp/autoground/`.
     ///
     /// Examples:
     ///   autoground run examples/diagram.ag --repo .
@@ -86,6 +106,9 @@ enum Commands {
         budget: usize,
         #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
         judge: JudgeKind,
+        /// Comments in the finished view. Defaults to contradictions.
+        #[arg(long, value_enum, default_value_t = ExplainMode::Contradictions)]
+        explain: ExplainMode,
     },
     /// Judge a proposition against a repository, coarse to fine.
     ///
@@ -182,7 +205,8 @@ fn main() -> ExitCode {
             transcript,
             budget,
             judge,
-        } => match run_cmd(&input, &repo, transcript.as_ref(), budget, judge) {
+            explain,
+        } => match run_cmd(&input, &repo, transcript.as_ref(), budget, judge, explain) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("{err}");
@@ -501,6 +525,7 @@ fn run_cmd(
     transcript: Option<&PathBuf>,
     budget: usize,
     judge: JudgeKind,
+    explain: ExplainMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let started = std::time::Instant::now();
     let live = if std::io::stdout().is_terminal() {
@@ -525,6 +550,7 @@ fn run_cmd(
     let judged = if planned.atoms.is_empty() {
         Judged {
             values: Vec::new(),
+            grounds: Vec::new(),
             usage: Usage::default(),
             flights: Vec::new(),
             flight_limit: None,
@@ -542,6 +568,7 @@ fn run_cmd(
     };
     log.clear_hook();
     let atom_values = judged.values;
+    let grounds = judged.grounds;
     let usage = judged.usage;
     let flights = judged.flights;
     let flight_limit = judged.flight_limit;
@@ -569,7 +596,14 @@ fn run_cmd(
         .filter(|value| **value == autoground::Value::True)
         .count();
     if let Some(live) = live {
-        live.finish(&src, &program.clauses, &planned, &atom_values)?;
+        live.finish(
+            &src,
+            &program.clauses,
+            &planned,
+            &atom_values,
+            &grounds,
+            explain.into(),
+        )?;
     } else {
         for (claim, value) in planned.claims.iter().zip(&claim_values) {
             println!("{:<7}  {}", value.to_string(), claim.verbalized);
@@ -595,6 +629,7 @@ fn load_plan(input: &str) -> Result<Plan, Box<dyn std::error::Error>> {
 
 struct Judged {
     values: Vec<autoground::Value>,
+    grounds: Vec<Ground>,
     usage: Usage,
     flights: Vec<Flight>,
     flight_limit: Option<usize>,
@@ -630,18 +665,40 @@ fn read_with<U: Universe + Clone, O: Oracle>(
         .map(|atom| reader.submit(atom.clone()))
         .collect();
     let mut values = Vec::with_capacity(tickets.len());
+    let mut grounds = Vec::with_capacity(tickets.len());
     for result in reader.wait_many(&tickets) {
-        values.push(result?.value);
+        let finding = result?;
+        values.push(finding.value);
+        grounds.push(ground_of(&finding));
     }
     let flights = reader.flights().to_vec();
     let flight_limit = reader.flight_limit();
     let usage = reader.usage();
     Ok(Judged {
         values,
+        grounds,
         usage,
         flights,
         flight_limit,
     })
+}
+
+fn ground_of<U>(finding: &Finding<U>) -> Ground {
+    let mut entailed = Vec::new();
+    let mut contradicted = Vec::new();
+    for stance in &finding.stances {
+        match stance.verdict {
+            Verdict::Entailed => entailed.push(stance.id.clone()),
+            Verdict::Contradicted => contradicted.push(stance.id.clone()),
+            Verdict::Neutral => {}
+        }
+    }
+    match finding.value {
+        autoground::Value::True => Ground::Entailed(entailed),
+        autoground::Value::False if !contradicted.is_empty() => Ground::Contradicted(contradicted),
+        autoground::Value::False => Ground::Unsupported,
+        autoground::Value::Unknown => Ground::Unknown,
+    }
 }
 
 /// Read `input` as a `.ag` file when it names one, otherwise treat it as source.

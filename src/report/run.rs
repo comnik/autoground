@@ -3,7 +3,9 @@
 //! The view watches the shared log. Search steps and read steps move each
 //! claim between planning, search, and read. When the run finishes, the view
 //! is the model file: a true claim carries a quiet mark, and a false claim
-//! carries a red mark on the clauses that failed.
+//! carries a red mark on the clauses that failed. Just above a false clause
+//! is a comment naming the file that contradicted it, or noting that no file
+//! supported it. `--explain all` adds the same kind of comment to true clauses.
 //! Piped output never draws this.
 
 use std::collections::HashMap;
@@ -55,6 +57,10 @@ enum Tone {
     FalseText,
     UnknownMark,
     UnknownText,
+    /// A `;;` comment on a false clause. Red, but not the bold violation mark.
+    FalseNote,
+    /// A `;;` comment on a true clause.
+    TrueNote,
 }
 
 struct ClaimWatch {
@@ -207,11 +213,21 @@ impl RunView {
         self.mode = Mode::Working;
     }
 
-    fn finish(&mut self, source: &str, clauses: &[ClauseSpan], plan: &Plan, atom_values: &[Value]) {
+    fn finish(
+        &mut self,
+        source: &str,
+        clauses: &[ClauseSpan],
+        plan: &Plan,
+        atom_values: &[Value],
+        grounds: &[Ground],
+        explain: Explain,
+    ) {
         self.phase = Phase::Done;
         self.detail.clear();
         self.mode = Mode::Done;
-        self.done = source_rows(source, &paints(clauses, plan, atom_values));
+        let paints = paints(clauses, plan, atom_values);
+        let notes = notes(clauses, plan, atom_values, grounds, explain);
+        self.done = source_rows(source, &paints, &notes);
     }
 
     fn rows(&self, width: usize) -> Vec<Row> {
@@ -283,7 +299,8 @@ fn tone_color(tone: Tone) -> Option<Color> {
         Tone::Search => Color::Cyan,
         Tone::Read => Color::Blue,
         Tone::TrueMark => Color::DarkGreen,
-        Tone::FalseMark | Tone::FalseText => Color::Red,
+        Tone::FalseMark | Tone::FalseText | Tone::FalseNote => Color::Red,
+        Tone::TrueNote => Color::DarkGreen,
         Tone::UnknownMark | Tone::UnknownText => Color::Yellow,
         Tone::Source => return None,
     })
@@ -291,6 +308,25 @@ fn tone_color(tone: Tone) -> Option<Color> {
 
 fn tone_is_bold(tone: Tone) -> bool {
     matches!(tone, Tone::FalseMark | Tone::FalseText)
+}
+
+/// How much of a finished claim to annotate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Explain {
+    /// Comment false clauses only.
+    Contradictions,
+    /// Also comment true clauses with the file that supported them.
+    All,
+}
+
+/// What the reader found for one atomic sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ground {
+    Entailed(Vec<String>),
+    Contradicted(Vec<String>),
+    /// False because the window held no witness.
+    Unsupported,
+    Unknown,
 }
 
 fn search_detail(event: &Json) -> String {
@@ -422,11 +458,202 @@ fn regions_of(expr: &Expr, clause: &ClauseSpan, atoms: &[Value], out: &mut Vec<M
     }
 }
 
-fn source_rows(source: &str, paints: &[ClaimPaint]) -> Vec<Row> {
-    line_ranges(source)
-        .into_iter()
-        .map(|(lo, hi)| source_line(source, lo, hi, paints))
-        .collect()
+struct Note {
+    /// Byte offset of the clause this comment sits above.
+    at: usize,
+    text: String,
+    tone: Tone,
+}
+
+fn notes(
+    clauses: &[ClauseSpan],
+    plan: &Plan,
+    atoms: &[Value],
+    grounds: &[Ground],
+    explain: Explain,
+) -> Vec<Note> {
+    if grounds.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (clause, claim) in clauses.iter().zip(plan.claims.iter()) {
+        notes_of(
+            &claim.expr,
+            clause,
+            atoms,
+            grounds,
+            explain,
+            false,
+            &mut out,
+        );
+    }
+    out
+}
+
+/// `parent_holds` means an ancestor compound is already true, so a false
+/// clause inside it is not why the claim failed.
+fn notes_of(
+    expr: &Expr,
+    clause: &ClauseSpan,
+    atoms: &[Value],
+    grounds: &[Ground],
+    explain: Explain,
+    parent_holds: bool,
+    out: &mut Vec<Note>,
+) {
+    let value = expr.value(atoms);
+    match expr {
+        Expr::And(xs) | Expr::Or(xs) => {
+            if xs.len() != clause.children.len() {
+                return;
+            }
+            let holds = parent_holds || value == Value::True;
+            for (child, span) in xs.iter().zip(&clause.children) {
+                notes_of(child, span, atoms, grounds, explain, holds, out);
+            }
+        }
+        Expr::Not(inner) => {
+            if parent_holds && value == Value::False {
+                return;
+            }
+            if !shown(value, explain) {
+                return;
+            }
+            if let Some(text) = not_text(value, inner, grounds) {
+                out.push(Note {
+                    at: clause.span.start,
+                    text,
+                    tone: note_tone(value),
+                });
+            }
+        }
+        Expr::Atom(index) => {
+            if parent_holds && value == Value::False {
+                return;
+            }
+            if !shown(value, explain) {
+                return;
+            }
+            if let Some(text) = atom_text(value, grounds.get(*index)) {
+                out.push(Note {
+                    at: clause.span.start,
+                    text,
+                    tone: note_tone(value),
+                });
+            }
+        }
+    }
+}
+
+fn shown(value: Value, explain: Explain) -> bool {
+    match explain {
+        Explain::Contradictions => value == Value::False,
+        Explain::All => value == Value::True || value == Value::False,
+    }
+}
+
+fn note_tone(value: Value) -> Tone {
+    if value == Value::False {
+        Tone::FalseNote
+    } else {
+        Tone::TrueNote
+    }
+}
+
+fn atom_text(value: Value, ground: Option<&Ground>) -> Option<String> {
+    match (value, ground) {
+        (Value::False, Some(Ground::Contradicted(paths))) if !paths.is_empty() => {
+            Some(format!(";; contradicted in {}", join_paths(paths)))
+        }
+        (Value::False, _) => Some(";; no supporting file".to_string()),
+        (Value::True, Some(Ground::Entailed(paths))) if !paths.is_empty() => {
+            Some(format!(";; entailed in {}", join_paths(paths)))
+        }
+        _ => None,
+    }
+}
+
+fn not_text(value: Value, inner: &Expr, grounds: &[Ground]) -> Option<String> {
+    let mut entailed = Vec::new();
+    let mut contradicted = Vec::new();
+    let mut unsupported = false;
+    gather(
+        inner,
+        grounds,
+        &mut entailed,
+        &mut contradicted,
+        &mut unsupported,
+    );
+    match value {
+        Value::False if !entailed.is_empty() => {
+            Some(format!(";; entailed in {}", join_paths(&entailed)))
+        }
+        Value::False => Some(";; no supporting file".to_string()),
+        Value::True if !contradicted.is_empty() => {
+            Some(format!(";; contradicted in {}", join_paths(&contradicted)))
+        }
+        Value::True if unsupported => Some(";; no supporting file".to_string()),
+        _ => None,
+    }
+}
+
+fn gather(
+    expr: &Expr,
+    grounds: &[Ground],
+    entailed: &mut Vec<String>,
+    contradicted: &mut Vec<String>,
+    unsupported: &mut bool,
+) {
+    match expr {
+        Expr::Atom(index) => match grounds.get(*index) {
+            Some(Ground::Entailed(paths)) => entailed.extend(paths.clone()),
+            Some(Ground::Contradicted(paths)) => contradicted.extend(paths.clone()),
+            Some(Ground::Unsupported) => *unsupported = true,
+            Some(Ground::Unknown) | None => {}
+        },
+        Expr::Not(inner) => gather(inner, grounds, entailed, contradicted, unsupported),
+        Expr::And(xs) | Expr::Or(xs) => {
+            for child in xs {
+                gather(child, grounds, entailed, contradicted, unsupported);
+            }
+        }
+    }
+}
+
+fn join_paths(paths: &[String]) -> String {
+    let mut unique = Vec::new();
+    for path in paths {
+        if !unique.contains(path) {
+            unique.push(path.clone());
+        }
+    }
+    unique.join(", ")
+}
+
+fn source_rows(source: &str, paints: &[ClaimPaint], notes: &[Note]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (lo, hi) in line_ranges(source) {
+        for note in notes.iter().filter(|note| (lo..hi).contains(&note.at)) {
+            rows.push(comment_row(source, lo, note));
+        }
+        rows.push(source_line(source, lo, hi, paints));
+    }
+    rows
+}
+
+fn comment_row(source: &str, line_lo: usize, note: &Note) -> Row {
+    let prefix = &source[line_lo..note.at];
+    let indent = if prefix.chars().all(|ch| ch.is_whitespace()) {
+        prefix.to_string()
+    } else {
+        " ".repeat(prefix.chars().count())
+    };
+    Row {
+        pieces: vec![
+            piece("  ", Tone::Source),
+            piece(format!("{indent}{}", note.text), note.tone),
+        ],
+    }
 }
 
 fn line_ranges(source: &str) -> Vec<(usize, usize)> {
@@ -636,9 +863,12 @@ impl Live {
         clauses: &[ClauseSpan],
         plan: &Plan,
         atom_values: &[Value],
+        grounds: &[Ground],
+        explain: Explain,
     ) -> io::Result<()> {
         let mut body = self.lock();
-        body.view.finish(source, clauses, plan, atom_values);
+        body.view
+            .finish(source, clauses, plan, atom_values, grounds, explain);
         body.draw()
     }
 
@@ -751,6 +981,8 @@ mod tests {
             &program.clauses,
             &plan,
             &[Value::False, Value::False],
+            &[],
+            Explain::Contradictions,
         );
         let done = view.rows(160);
         let text: Vec<_> = done.iter().map(|row| row.plain()).collect();
@@ -942,9 +1174,143 @@ mod tests {
     }
 
     fn finished(src: &str, atoms: &[Value]) -> Vec<Row> {
+        explained(src, atoms, &[], Explain::Contradictions)
+    }
+
+    fn explained(src: &str, atoms: &[Value], grounds: &[Ground], explain: Explain) -> Vec<Row> {
         let program = parse(src).unwrap();
         let plan = Plan::of(&compile(&program).unwrap());
-        let paints = paints(&program.clauses, &plan, atoms);
-        source_rows(src, &paints)
+        let painted = paints(&program.clauses, &plan, atoms);
+        let notes = notes(&program.clauses, &plan, atoms, grounds, explain);
+        source_rows(src, &painted, &notes)
+    }
+
+    #[test]
+    fn a_false_clause_cites_the_file_that_contradicted_it() {
+        let src = "\
+(and
+  (\"All major components record structured events in the unified log.\")
+  (calls Oracle Log)
+  (calls Universe Log)
+  (calls Search Log))
+";
+        let src = &format!(
+        "(name Oracle)\n(name Universe)\n(name Search)\n(name Log)\n(sense calls \"{{caller}} calls {{callee}}\")\n\n{src}"
+    );
+        let grounds = [
+            Ground::Entailed(vec!["README.md".into()]),
+            Ground::Entailed(vec!["src/oracle/mod.rs".into()]),
+            Ground::Contradicted(vec!["src/universe/mod.rs".into()]),
+            Ground::Entailed(vec!["src/main.rs".into()]),
+        ];
+        let values = [Value::True, Value::True, Value::False, Value::True];
+        let rows = explained(src, &values, &grounds, Explain::Contradictions);
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        let and_at = text.iter().position(|line| line == "✗ (and").unwrap();
+        assert_eq!(
+            text[and_at..],
+            [
+                "✗ (and".to_string(),
+                "    (\"All major components record structured events in the unified log.\")"
+                    .to_string(),
+                "    (calls Oracle Log)".to_string(),
+                "    ;; contradicted in src/universe/mod.rs".to_string(),
+                "▌   (calls Universe Log)".to_string(),
+                "    (calls Search Log))".to_string(),
+            ]
+        );
+        let comment = &rows[and_at + 3];
+        assert!(comment
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::FalseNote));
+        assert!(comment
+            .pieces
+            .iter()
+            .all(|piece| piece.tone != Tone::FalseText && !tone_is_bold(piece.tone)));
+
+        let rows = explained(src, &values, &grounds, Explain::All);
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert!(text
+            .iter()
+            .any(|line| line == "    ;; entailed in src/main.rs"));
+        assert!(text
+            .iter()
+            .any(|line| line == "    ;; contradicted in src/universe/mod.rs"));
+        let support = rows
+            .iter()
+            .find(|row| row.plain().contains("entailed in src/main.rs"))
+            .unwrap();
+        assert!(support
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::TrueNote));
+
+        let held = "\
+(or
+  (\"a\")
+  (\"b\"))
+";
+        let rows = explained(
+            held,
+            &[Value::False, Value::True],
+            &[
+                Ground::Contradicted(vec!["decoy.rs".into()]),
+                Ground::Entailed(vec!["src/main.rs".into()]),
+            ],
+            Explain::Contradictions,
+        );
+        assert!(rows.iter().all(|row| !row.plain().contains(";;")));
+        let rows = explained(
+            held,
+            &[Value::False, Value::True],
+            &[
+                Ground::Contradicted(vec!["decoy.rs".into()]),
+                Ground::Entailed(vec!["src/main.rs".into()]),
+            ],
+            Explain::All,
+        );
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "✓ (or".to_string(),
+                "    (\"a\")".to_string(),
+                "    ;; entailed in src/main.rs".to_string(),
+                "    (\"b\"))".to_string(),
+            ]
+        );
+
+        let negated = "(not (\"Search calls Log\"))\n";
+        let rows = explained(
+            negated,
+            &[Value::True],
+            &[Ground::Entailed(vec!["src/main.rs".into()])],
+            Explain::Contradictions,
+        );
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "  ;; entailed in src/main.rs".to_string(),
+                "✗ (not (\"Search calls Log\"))".to_string(),
+            ]
+        );
+
+        let absent = "(\"nope\")\n";
+        let rows = explained(
+            absent,
+            &[Value::False],
+            &[Ground::Unsupported],
+            Explain::Contradictions,
+        );
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "  ;; no supporting file".to_string(),
+                "✗ (\"nope\")".to_string(),
+            ]
+        );
     }
 }
