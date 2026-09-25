@@ -9,11 +9,13 @@
 //! tool call in an agent transcript.
 
 pub mod fs;
+pub mod transcript;
 
 use std::fmt;
 use std::io;
 
 pub use fs::Filesystem;
+pub use transcript::Transcript;
 
 pub trait Universe {
     /// IDs of all databases in the current view.
