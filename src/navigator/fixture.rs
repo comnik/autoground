@@ -7,23 +7,10 @@ use super::judge::{
     ListingState, Transition,
 };
 use super::walk::parent_dir;
-use crate::eval::{EdbAtom, Value, Witness};
-
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FixtureFile {
     pub listings: Vec<ListingFixture>,
     pub documents: Vec<DocumentFixture>,
-}
-
-/// One `require` as shown in the run summary, with its printed formula.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct RequireTrace {
-    pub formula: String,
-    pub value: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub witness: Option<Witness>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub edb: Vec<EdbAtom>,
 }
 
 impl FixtureFile {

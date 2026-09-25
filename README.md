@@ -177,10 +177,6 @@ A model consists of *names*, *senses*, and *claims*:
 TBD verbalization is how we go from symbolic atoms to unstructured propositions.
 
 ```clojure
-;; Names verbalize as themselves.
-(name X) ;; => “X”
-(name Y) ;; => “Y”
-
 ;; Fully ground senses verbalize as themselves.
 (“X has an identifier”) ;; => "X has an identifier"
 

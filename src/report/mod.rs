@@ -1,13 +1,10 @@
 pub mod step;
 pub mod tui;
 
-use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use crate::core::Compiled;
-use crate::eval::{EdbAtom, Outcome, RunResult, Value};
-use crate::navigator::{GroundStep, RequireTrace};
-use crate::syntax::{print_ground_atom, print_require};
+use crate::navigator::GroundStep;
+use crate::value::Value;
 
 pub use crate::log::{allocate_unique_file, DEFAULT_TRACE_DIR};
 
@@ -81,109 +78,6 @@ pub fn format_usd(cost: f64) -> String {
     }
 }
 
-fn outcome_label(outcome: &Outcome) -> &'static str {
-    match outcome {
-        Outcome::Supported => "SUPPORTED",
-        Outcome::Unsupported => "UNSUPPORTED",
-        Outcome::Contradicted => "CONTRADICTED",
-    }
-}
-
-pub fn format_run_header(outcome: &Outcome, trace_path: &Path, jev_requests: usize) -> String {
-    let mut out = String::new();
-    out.push_str(outcome_label(outcome));
-    out.push('\n');
-    out.push_str(&format!("trace: {}\n", trace_path.display()));
-    out.push_str(&format!("jev requests: {jev_requests}\n"));
-    out
-}
-
-pub fn require_traces(compiled: &Compiled, result: &RunResult) -> Vec<RequireTrace> {
-    result
-        .requires
-        .iter()
-        .enumerate()
-        .map(|(i, req)| RequireTrace {
-            formula: compiled
-                .requires
-                .get(i)
-                .map(print_require)
-                .unwrap_or_else(|| format!("(require #{i})")),
-            value: req.value,
-            witness: req.witness.clone(),
-            edb: req.edb.clone(),
-        })
-        .collect()
-}
-
-pub fn format_run_body(compiled: &Compiled, result: &RunResult) -> String {
-    format_require_traces(&require_traces(compiled, result))
-}
-
-pub fn format_require_traces(requires: &[RequireTrace]) -> String {
-    let mut out = String::new();
-    for req in requires {
-        out.push('\n');
-        out.push_str(&req.formula);
-        out.push('\n');
-        out.push_str(&format!("  {}\n", req.value));
-        if let Some(w) = &req.witness {
-            let bits: Vec<String> = w
-                .assignment
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect();
-            let label = if req.value == Value::False {
-                "counterexample"
-            } else {
-                "witness"
-            };
-            out.push_str(&format!("  {label}: {}\n", bits.join(", ")));
-        }
-        out.push_str(&format_edb_leaves(&req.edb));
-    }
-    out
-}
-
-/// Human-readable summary of a run: header, then each `require` and the EDB it bottomed out on.
-pub fn format_run(
-    compiled: &Compiled,
-    result: &RunResult,
-    trace_path: &Path,
-    jev_requests: usize,
-) -> String {
-    let mut out = format_run_header(&result.outcome, trace_path, jev_requests);
-    out.push_str(&format_run_body(compiled, result));
-    out
-}
-
-fn format_edb_leaves(atoms: &[EdbAtom]) -> String {
-    if atoms.is_empty() {
-        return String::new();
-    }
-    let rows: Vec<(String, String)> = atoms
-        .iter()
-        .map(|a| (print_ground_atom(&a.pred, &a.args), edb_verdict(a.value)))
-        .collect();
-    let width = rows.iter().map(|(atom, _)| atom.len()).max().unwrap_or(0);
-    let mut out = String::new();
-    for (atom, verdict) in rows {
-        out.push_str("  ");
-        out.push_str(&atom);
-        if width > atom.len() {
-            out.push_str(&" ".repeat(width - atom.len()));
-        }
-        out.push_str("  ");
-        out.push_str(&verdict);
-        out.push('\n');
-    }
-    out
-}
-
-fn edb_verdict(value: Value) -> String {
-    value.to_string()
-}
-
 pub fn outcome_exit_code(value: &Value) -> i32 {
     match value {
         Value::True => 0,
@@ -192,124 +86,9 @@ pub fn outcome_exit_code(value: &Value) -> i32 {
     }
 }
 
-pub fn run_exit_code(outcome: &Outcome) -> i32 {
-    match outcome {
-        Outcome::Supported => 0,
-        Outcome::Unsupported => 1,
-        Outcome::Contradicted => 2,
-    }
-}
-
-/// A `run` session read back from its log.
-#[derive(Debug, Clone)]
-pub struct RunLog {
-    pub outcome: Outcome,
-    pub repo_name: String,
-    pub requires: Vec<RequireTrace>,
-    pub steps: Vec<GroundStep>,
-    pub started_at_ms: Option<u64>,
-    pub ended_at_ms: Option<u64>,
-}
-
-/// Read a run log.
-pub fn load_run_log(path: &Path) -> Result<RunLog, String> {
-    let src = std::fs::read_to_string(path)
-        .map_err(|err| format!("could not read trace {}: {err}", path.display()))?;
-    let events = crate::log::parse_jsonl(&src)
-        .map_err(|err| format!("could not read trace {}: {err}", path.display()))?;
-    assemble_run(events, path)
-}
-
-#[derive(serde::Deserialize)]
-struct RunSummary {
-    outcome: Outcome,
-    #[serde(default)]
-    repo_name: String,
-    #[serde(default)]
-    requires: Vec<RequireTrace>,
-    #[serde(default)]
-    started_at_ms: Option<u64>,
-    #[serde(default)]
-    ended_at_ms: Option<u64>,
-}
-
-fn assemble_run(events: Vec<serde_json::Value>, path: &Path) -> Result<RunLog, String> {
-    let mut steps = Vec::new();
-    let mut summary = None;
-    for event in events {
-        match event.get("kind").and_then(|kind| kind.as_str()) {
-            Some("step") => {
-                steps
-                    .push(serde_json::from_value(event).map_err(|err| {
-                        format!("could not read trace {}: {err}", path.display())
-                    })?);
-            }
-            Some("run") => {
-                summary =
-                    Some(serde_json::from_value::<RunSummary>(event).map_err(|err| {
-                        format!("could not read trace {}: {err}", path.display())
-                    })?);
-            }
-            _ => {}
-        }
-    }
-    let Some(summary) = summary else {
-        return Err(format!("{} is not a full run trace", path.display()));
-    };
-    Ok(RunLog {
-        outcome: summary.outcome,
-        repo_name: summary.repo_name,
-        requires: summary.requires,
-        steps,
-        started_at_ms: summary.started_at_ms,
-        ended_at_ms: summary.ended_at_ms,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::compile;
-    use crate::eval::run;
-    use crate::syntax::parse;
-
-    #[test]
-    fn run_log_reloads_steps_and_outcome() {
-        let path = std::env::temp_dir().join(format!(
-            "autoground-run-log-{}-{}.jsonl",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let log = crate::log::Log::open(&path).unwrap();
-        let step = GroundStep::Result {
-            pred: "component".into(),
-            args: vec!["Frontend".into()],
-            status: "found".into(),
-            bindings: vec![],
-        };
-        log.append_event("step", &step).unwrap();
-        log.append_event(
-            "run",
-            &serde_json::json!({
-                "outcome": "supported",
-                "repo_name": "toy",
-                "requires": [],
-                "started_at_ms": 10,
-                "ended_at_ms": 20,
-            }),
-        )
-        .unwrap();
-        let loaded = load_run_log(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(loaded.outcome, Outcome::Supported);
-        assert_eq!(loaded.repo_name, "toy");
-        assert_eq!(loaded.steps, vec![step]);
-        assert_eq!(loaded.started_at_ms, Some(10));
-        assert_eq!(loaded.ended_at_ms, Some(20));
-    }
 
     #[test]
     fn allocate_unique_file_uses_distinct_names() {
@@ -321,55 +100,6 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.extension().is_some_and(|e| e == "json"));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn format_run_prints_header_each_require_and_edb_verdicts() {
-        let src = r#"
-(require (component "Frontend"))
-(require (component "Missing"))
-(require (component "Open"))
-"#;
-        let compiled = compile(&parse(src).unwrap()).unwrap();
-        let mut store = crate::edb::Store::new();
-        store.insert_fact("component", vec!["Frontend".into()], "test");
-        store.close_pattern("component", vec![Some("Missing".into())]);
-        store.bind("Frontend", "ui/app.py");
-        let result = run(&compiled, &mut store, None);
-        let trace = Path::new("/tmp/autoground/trace-test.json");
-        let text = format_run(&compiled, &result, trace, 7);
-        assert!(
-            text.starts_with(
-                "CONTRADICTED\ntrace: /tmp/autoground/trace-test.json\njev requests: 7\n"
-            ),
-            "{text}"
-        );
-        assert!(!text.contains(" ← "), "{text}");
-        assert!(
-            text.contains(
-                "(require\n  (component \"Frontend\"))\n  true\n  (component \"Frontend\")  true\n"
-            ),
-            "{text}"
-        );
-        assert!(
-            text.contains(
-                "(require\n  (component \"Missing\"))\n  false\n  (component \"Missing\")  false\n"
-            ),
-            "{text}"
-        );
-        assert!(
-            text.contains(
-                "(require\n  (component \"Open\"))\n  unknown\n  (component \"Open\")  unknown\n"
-            ),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn outcome_label_reads_as_how_the_codebase_stands() {
-        assert_eq!(outcome_label(&Outcome::Unsupported), "UNSUPPORTED");
-        assert_eq!(outcome_label(&Outcome::Supported), "SUPPORTED");
-        assert_eq!(outcome_label(&Outcome::Contradicted), "CONTRADICTED");
     }
 
     #[test]

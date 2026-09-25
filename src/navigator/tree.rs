@@ -12,11 +12,23 @@ use crate::navigator::judge::{
 use crate::navigator::trace::GroundStep;
 use crate::navigator::walk::{pack_listing, parent_dir, read_trimmed, repo_join, ListingFilter};
 use crate::navigator::{Answer, Arg, Demand, Navigator, Need};
-use crate::syntax::{verbalize_atom, Declare, Term};
 
 const MAX_LISTINGS: usize = 32;
 const MAX_DEPTH: usize = 8;
 const BODY_BUDGET: usize = 8192;
+
+fn render_atom(pred: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        return pred.to_string();
+    }
+    let mut out = format!("({pred}");
+    for arg in args {
+        out.push(' ');
+        out.push_str(arg);
+    }
+    out.push(')');
+    out
+}
 
 /// Goal-directed walk of a repo tree. Locate atoms share one listing request
 /// (a Choice per atom per child). Document questions on the same file share
@@ -30,7 +42,6 @@ pub struct TreeNavigator {
     pub errors: Vec<String>,
     pub trace: Vec<GroundStep>,
     log: Option<Log>,
-    declarations: HashMap<String, Declare>,
     answered: HashMap<(String, Vec<Option<String>>, Need), Answer>,
 }
 
@@ -47,7 +58,6 @@ impl TreeNavigator {
             errors: Vec::new(),
             trace: Vec::new(),
             log: None,
-            declarations: HashMap::new(),
             answered: HashMap::new(),
         }
     }
@@ -296,20 +306,18 @@ impl TreeNavigator {
     }
 
     fn verbalize(&self, pred: &str, args: &[String]) -> String {
-        let terms: Vec<Term> = args.iter().cloned().map(Term::Const).collect();
-        verbalize_atom(pred, &terms, &self.declarations)
+        render_atom(pred, args)
     }
 
     fn verbalize_demand(&self, demand: &Demand) -> String {
-        let terms: Vec<Term> = demand
+        let args: Vec<String> = demand
             .args
             .iter()
-            .map(|a| match a {
-                Arg::Bound(s) => Term::Const(s.clone()),
-                Arg::Free(v) => Term::Var(v.clone()),
+            .map(|arg| match arg {
+                Arg::Bound(value) | Arg::Free(value) => value.clone(),
             })
             .collect();
-        verbalize_atom(&demand.pred, &terms, &self.declarations)
+        render_atom(&demand.pred, &args)
     }
 
     fn locate(&mut self, demand: &Demand, store: &Store) -> LocateResult {
@@ -931,10 +939,6 @@ fn walks_tree(demand: &Demand, root: &Path) -> bool {
 }
 
 impl Navigator for TreeNavigator {
-    fn prepare(&mut self, compiled: &crate::core::Compiled) {
-        self.declarations = compiled.declarations.clone();
-    }
-
     fn answer(&mut self, demand: &Demand, store: &Store) -> Answer {
         if let Some(cached) = self.cached(demand) {
             return cached;
@@ -1141,14 +1145,6 @@ mod tests {
         ))
     }
 
-    fn knows_about_compiled() -> crate::core::Compiled {
-        let src = r#"
-(declare component "{String} is a (conceptual or concrete) component in the codebase")
-(declare knows_about "{component} knows about {component}")
-"#;
-        crate::core::compile(&crate::syntax::parse(src).unwrap()).unwrap()
-    }
-
     #[test]
     fn nary_ground_atom_walks_and_judges_verbalized_document() {
         let dir = scratch_dir("nary-locate");
@@ -1156,7 +1152,6 @@ mod tests {
         std::fs::write(dir.join("hit.py"), "Judge talks to Evaluator\n").unwrap();
         let docs = Arc::new(Mutex::new(Vec::new()));
         let mut nav = TreeNavigator::new(&dir, Box::new(CaptureDocs { docs: docs.clone() }));
-        nav.prepare(&knows_about_compiled());
         let demand = Demand {
             pred: "knows_about".into(),
             args: vec![Arg::Bound("Judge".into()), Arg::Bound("Evaluator".into())],
@@ -1183,10 +1178,7 @@ mod tests {
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].pred, "knows_about");
         assert_eq!(docs[0].args, ["Judge".to_string(), "Evaluator".to_string()]);
-        assert_eq!(
-            docs[0].verbalization,
-            "component \"Judge\" knows about component \"Evaluator\""
-        );
+        assert_eq!(docs[0].verbalization, "(knows_about Judge Evaluator)");
     }
 
     #[test]

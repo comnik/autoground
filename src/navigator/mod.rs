@@ -10,7 +10,7 @@ pub mod walk;
 
 use crate::edb::Store;
 
-pub use fixture::{FixtureFile, FixtureJudge, RequireTrace};
+pub use fixture::{FixtureFile, FixtureJudge};
 pub use heuristic::HeuristicJudge;
 pub use jev::JevJudge;
 pub use judge::{Judge, JudgeError, Transition};
@@ -57,12 +57,9 @@ pub trait Navigator {
     fn answer_many(&mut self, demands: &[Demand], store: &Store) -> Vec<Answer> {
         demands.iter().map(|d| self.answer(d, store)).collect()
     }
-
-    /// Receive declarations from the compiled model (verbalization, signatures).
-    fn prepare(&mut self, _compiled: &crate::core::Compiled) {}
 }
 
-/// Replays a dict of tuples. Used in tests of the evaluator itself.
+/// Replays a dict of tuples. Used when a test wants fixed EDB answers.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptedNavigator {
     pub tuples: std::collections::HashMap<String, Vec<Vec<String>>>,

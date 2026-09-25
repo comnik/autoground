@@ -1,24 +1,17 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use autoground::edb::Store;
-use autoground::eval::run;
 use autoground::log::Log;
 use autoground::navigator::judge::epoch_ms;
-use autoground::navigator::{FixtureJudge, JevJudge, RecordingJudge, RequireTrace, TreeNavigator};
 use autoground::oracle::{HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::read::{present_read, ReadTraceFile, Reader};
-use autoground::report::{
-    format_require_traces, format_run_body, format_run_header, jev_request_count, load_run_log,
-    require_traces, run_exit_code, RunTiming,
-};
 use autoground::search::trace::SearchStep;
 use autoground::search::trace::UsageRecord;
 use autoground::search::{
     present_search, window_lines, Search, SearchTraceFile, DEFAULT_BUDGET_BYTES,
 };
 use autoground::universe::{Filesystem, Transcript, Universe};
-use autoground::{compile, parse, verbalize_source};
+use autoground::verbalize_source;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
@@ -41,37 +34,11 @@ enum JudgeKind {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Parse a model and evaluate its requires against EDB, grounding from a
-    /// repository via the navigator (default: the current directory).
-    ///
-    /// Prints the evaluation result and grounding. On a TTY, left/right opens
-    /// the step-by-step debug view. A session log is written under
-    /// `/tmp/autoground/`.
+    /// Verbalize a model: fill each reading's holes with names.
     ///
     /// Examples:
-    ///   autoground run examples/layered.ag --repo examples/toy-layered
-    ///   autoground run --repo examples/toy-split '(require (component "Frontend"))'
-    ///   autoground run --inspect /tmp/autoground/trace-….jsonl
-    Run {
-        /// Path to a `.ag` model, or a model source string.
-        #[arg(required_unless_present = "inspect")]
-        model: Option<String>,
-        /// Repository to ground against.
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
-        #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
-        judge: JudgeKind,
-        #[arg(long)]
-        fixtures: Option<PathBuf>,
-        /// Reopen a recorded trace and render it as if the run had just completed.
-        #[arg(long, value_name = "TRACE")]
-        inspect: Option<PathBuf>,
-    },
-    /// Verbalize an atom or a model using `declare` templates.
-    ///
-    /// Examples:
-    ///   autoground verbalize '(Component "Frontend")'
-    ///   autoground verbalize examples/layered.ag
+    ///   autoground verbalize '(name Frontend) (name Backend) (sense part_of "{Name} is a part of {Name}") (part_of Frontend Backend)'
+    ///   autoground verbalize examples/diagram.ag
     Verbalize {
         /// Atom, model source, or path to a `.ag` file.
         input: String,
@@ -151,31 +118,6 @@ enum Commands {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Run {
-            model,
-            repo,
-            judge,
-            fixtures,
-            inspect,
-        } => {
-            let result = if let Some(path) = inspect {
-                inspect_trace(&path)
-            } else {
-                run_model(
-                    model.as_deref().expect("model required"),
-                    &repo,
-                    judge,
-                    fixtures.as_ref(),
-                )
-            };
-            match result {
-                Ok(code) => ExitCode::from(code as u8),
-                Err(err) => {
-                    eprintln!("{err}");
-                    ExitCode::from(3)
-                }
-            }
-        }
         Commands::Verbalize { input } => match verbalize_cmd(&input) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
@@ -472,89 +414,6 @@ fn verbalize_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_model(
-    model: &str,
-    repo: &Path,
-    judge: JudgeKind,
-    fixtures: Option<&PathBuf>,
-) -> Result<i32, Box<dyn std::error::Error>> {
-    let started_at = std::time::SystemTime::now();
-    let src = model_source(model)?;
-    let program = parse(&src)?;
-    let compiled = compile(&program)?;
-    let mut store = Store::new();
-    let repo_name = repo.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
-    let log = Log::create()?;
-
-    let mut nav = make_nav(repo, judge, fixtures, &log, model)?;
-    let result = run(&compiled, &mut store, Some(&mut nav));
-    let ended_at = std::time::SystemTime::now();
-    let judge_failed = !nav.errors.is_empty();
-    if judge_failed {
-        for e in &nav.errors {
-            eprintln!("judge error: {e}");
-        }
-    }
-    let steps = std::mem::take(&mut nav.trace);
-    let requires = require_traces(&compiled, &result);
-    log.append_event(
-        "run",
-        &RunSummary {
-            outcome: &result.outcome,
-            repo_name,
-            requires: &requires,
-            started_at_ms: epoch_ms(started_at),
-            ended_at_ms: epoch_ms(ended_at),
-        },
-    )?;
-    drop(nav);
-
-    let header = format_run_header(&result.outcome, log.path(), jev_request_count(&steps));
-    let body = format_run_body(&compiled, &result);
-    autoground::report::tui::present_run(
-        &header,
-        &body,
-        &steps,
-        repo_name,
-        RunTiming {
-            started_at,
-            ended_at,
-        },
-    )?;
-    if judge_failed {
-        Ok(3)
-    } else {
-        Ok(run_exit_code(&result.outcome))
-    }
-}
-
-fn inspect_trace(path: &Path) -> Result<i32, Box<dyn std::error::Error>> {
-    let file = load_run_log(path)?;
-    let timing = match (file.started_at_ms, file.ended_at_ms) {
-        (Some(s), Some(e)) => RunTiming::from_millis(s, e),
-        _ => {
-            let now = std::time::SystemTime::now();
-            RunTiming {
-                started_at: now,
-                ended_at: now,
-            }
-        }
-    };
-    let header = format_run_header(&file.outcome, path, jev_request_count(&file.steps));
-    let body = format_require_traces(&file.requires);
-    autoground::report::tui::present_run(&header, &body, &file.steps, &file.repo_name, timing)?;
-    Ok(run_exit_code(&file.outcome))
-}
-
-#[derive(serde::Serialize)]
-struct RunSummary<'a> {
-    outcome: &'a autoground::Outcome,
-    repo_name: &'a str,
-    requires: &'a [RequireTrace],
-    started_at_ms: u64,
-    ended_at_ms: u64,
-}
-
 /// Read `input` as a `.ag` file when it names one, otherwise treat it as source.
 fn model_source(input: &str) -> Result<String, Box<dyn std::error::Error>> {
     let path = Path::new(input);
@@ -569,28 +428,4 @@ fn model_source(input: &str) -> Result<String, Box<dyn std::error::Error>> {
         return Err(format!("model file not found: {input}").into());
     }
     Ok(input.to_string())
-}
-
-fn make_nav(
-    repo: &Path,
-    judge: JudgeKind,
-    fixtures: Option<&PathBuf>,
-    log: &Log,
-    model: &str,
-) -> Result<TreeNavigator, Box<dyn std::error::Error>> {
-    let inner: Box<dyn autoground::navigator::Judge> = if let Some(path) = fixtures {
-        Box::new(FixtureJudge::load(path)?)
-    } else {
-        match judge {
-            JudgeKind::Heuristic => Box::new(autoground::HeuristicJudge),
-            JudgeKind::Jev => Box::new(JevJudge::from_env()?),
-        }
-    };
-    let mut nav = TreeNavigator::new(repo, Box::new(RecordingJudge::new(inner, log.clone())));
-    nav.set_log(log.clone());
-    let model_path = Path::new(model);
-    if model_path.is_file() {
-        nav.hide_model(model_path);
-    }
-    Ok(nav)
 }

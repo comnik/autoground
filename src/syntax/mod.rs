@@ -4,7 +4,7 @@ pub mod print;
 pub mod template;
 pub mod verbalize;
 
-pub use ast::{Declare, Form, Formula, Program, Term};
-pub use parse::{parse, parse_atom, ParseError};
-pub use print::{print_formula, print_ground_atom, print_program, print_require};
-pub use verbalize::{verbalize_atom, verbalize_source};
+pub use ast::{Form, Formula, Program, Proposition, Reading, Sense};
+pub use parse::{parse, ParseError};
+pub use print::{print_formula, print_program};
+pub use verbalize::{verbalize_proposition, verbalize_source, VerbalizeError};

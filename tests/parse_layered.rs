@@ -1,30 +1,21 @@
 use autoground::{compile, parse, print_program, verbalize_source};
 
 #[test]
-fn layered_ag_parses_and_round_trips() {
-    let src = std::fs::read_to_string("examples/layered.ag").unwrap();
-    let program = parse(&src).expect("parse layered.ag");
-    assert_eq!(program.forms.len(), 9);
+fn diagram_parses_compiles_and_verbalizes() {
+    let src = std::fs::read_to_string("examples/diagram.ag").unwrap();
+    let program = parse(&src).expect("parse diagram.ag");
     let printed = print_program(&program);
-    let again = parse(&printed).expect("reparse pretty-printed model");
+    let again = parse(&printed).expect("reparse");
     assert_eq!(program, again);
-    let compiled = compile(&program).expect("compile");
-    assert!(compiled.idb_preds.contains("depends_on"));
-    assert_eq!(compiled.requires.len(), 4);
-}
 
-#[test]
-fn layered_ag_verbalizes_component() {
-    let src = std::fs::read_to_string("examples/layered.ag").unwrap();
-    let lines = verbalize_source(&src).expect("verbalize layered.ag");
+    let compiled = compile(&program).expect("compile");
+    assert_eq!(compiled.claims.len(), verbalize_source(&src).unwrap().len());
+    let lines = verbalize_source(&src).unwrap();
     assert!(
         lines
             .iter()
-            .any(|l| l == "\"Frontend\" is a component in the codebase"),
-        "expected component verbalization, got {lines:?}"
+            .any(|line| line == "(\"Frontend depends on Backend\")"),
+        "{lines:?}"
     );
-    assert!(
-        lines.iter().any(|l| l.contains("belongs to")),
-        "expected belongs_to verbalization, got {lines:?}"
-    );
+    assert!(lines.iter().any(|line| line.contains("not")), "{lines:?}");
 }

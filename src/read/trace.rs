@@ -3,8 +3,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::eval::Value;
 use crate::search::trace::{ExchangeRecord, UsageRecord};
+use crate::value::Value;
 
 use super::Stance;
 

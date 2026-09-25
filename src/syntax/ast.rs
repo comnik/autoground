@@ -1,121 +1,79 @@
-/// A term in an atom: a variable, a string constant, or a typed constant
-/// such as `(File "ui/app.py")`.
+/// A sense: a named reading whose `{holes}` are filled left to right.
+///
+/// Hole labels disambiguate the reading. They are not types, and two holes
+/// may share a label.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Term {
-    Var(String),
-    Const(String),
-    /// `(File "ui/app.py")` — a constant annotated with a unary predicate.
-    Typed {
-        ty: String,
-        value: String,
+pub struct Sense {
+    pub name: String,
+    pub template: String,
+    pub holes: Vec<String>,
+}
+
+/// A relation at a use site: a declared sense, or a reading written inline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reading {
+    Sense(String),
+    Inline {
+        template: String,
+        holes: Vec<String>,
     },
 }
 
-/// A formula of the modeling language.
+/// A ground claim. `and`, `or`, and `not` are left for the planner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Formula {
     And(Vec<Formula>),
     Or(Vec<Formula>),
     Not(Box<Formula>),
-    Implies(Box<Formula>, Box<Formula>),
-    Exists(Vec<String>, Box<Formula>),
-    Forall(Vec<String>, Box<Formula>),
-    Atom { pred: String, args: Vec<Term> },
+    /// A reading applied to names. Saturation fills every hole.
+    Apply {
+        reading: Reading,
+        args: Vec<String>,
+    },
 }
 
-/// A predicate declaration: name plus a verbalization template whose `{Type}`
-/// slots are the arity and signature.
+/// What a saturated formula says: boolean structure over sentences.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Declare {
-    pub name: String,
-    pub template: String,
-    pub slots: Vec<String>,
+pub enum Proposition {
+    And(Vec<Proposition>),
+    Or(Vec<Proposition>),
+    Not(Box<Proposition>),
+    Sentence(String),
 }
 
 /// A top-level form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Form {
-    Require(Formula),
-    Def {
-        name: String,
-        vars: Vec<String>,
-        body: Formula,
-    },
-    Declare(Declare),
+    Name(String),
+    Sense(Sense),
+    Claim(Formula),
 }
 
-/// An unordered bag of `require`, `def`, and `declare` forms.
+/// Names, senses, and claims, in source order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     pub forms: Vec<Form>,
 }
 
-impl Term {
-    pub fn as_var(&self) -> Option<&str> {
-        match self {
-            Term::Var(v) => Some(v),
-            Term::Const(_) | Term::Typed { .. } => None,
-        }
-    }
-
-    /// The constant payload, if this term is ground.
-    pub fn as_const(&self) -> Option<&str> {
-        match self {
-            Term::Const(c) | Term::Typed { value: c, .. } => Some(c),
-            Term::Var(_) => None,
-        }
-    }
-}
-
-impl Formula {
-    pub fn walk_atoms(&self, f: &mut impl FnMut(&str, &[Term])) {
-        match self {
-            Formula::And(xs) | Formula::Or(xs) => {
-                for x in xs {
-                    x.walk_atoms(f);
-                }
-            }
-            Formula::Not(x) | Formula::Exists(_, x) | Formula::Forall(_, x) => {
-                x.walk_atoms(f);
-            }
-            Formula::Implies(a, b) => {
-                a.walk_atoms(f);
-                b.walk_atoms(f);
-            }
-            Formula::Atom { pred, args } => f(pred, args),
-        }
-    }
-
-    pub fn constants(&self, out: &mut Vec<String>) {
-        self.walk_atoms(&mut |_, args| {
-            for arg in args {
-                if let Some(c) = arg.as_const() {
-                    out.push(c.to_string());
-                }
-            }
-        });
-    }
-}
-
 impl Program {
-    pub fn defs(&self) -> impl Iterator<Item = (&str, &[String], &Formula)> {
+    pub fn names(&self) -> impl Iterator<Item = &str> {
         self.forms.iter().filter_map(|form| match form {
-            Form::Def { name, vars, body } => Some((name.as_str(), vars.as_slice(), body)),
-            Form::Require(_) | Form::Declare(_) => None,
+            Form::Name(name) => Some(name.as_str()),
+            Form::Sense(_) | Form::Claim(_) => None,
         })
     }
 
-    pub fn requires(&self) -> impl Iterator<Item = &Formula> {
+    pub fn senses(&self) -> impl Iterator<Item = &Sense> {
         self.forms.iter().filter_map(|form| match form {
-            Form::Require(f) => Some(f),
-            Form::Def { .. } | Form::Declare(_) => None,
+            Form::Sense(sense) => Some(sense),
+            Form::Name(_) | Form::Claim(_) => None,
         })
     }
 
-    pub fn declares(&self) -> impl Iterator<Item = &Declare> {
+    pub fn claims(&self) -> impl Iterator<Item = &Formula> {
         self.forms.iter().filter_map(|form| match form {
-            Form::Declare(d) => Some(d),
-            Form::Require(_) | Form::Def { .. } => None,
+            Form::Claim(formula) => Some(formula),
+            Form::Name(_) | Form::Sense(_) => None,
         })
     }
 }

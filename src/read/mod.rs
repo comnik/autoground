@@ -20,12 +20,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 
 use crate::confidence::{FLOOR, RESOLVE, SUPPORT};
-use crate::eval::Value;
 use crate::log::Log;
 use crate::oracle::{Answer, Classification, Oracle, QuestionKind, Usage};
 use crate::search::trace::ExchangeRecord;
 use crate::search::{Decision, Search, View};
 use crate::universe::{Universe, UniverseError};
+use crate::value::Value;
 
 use trace::{ReadStep as Step, STEP_KIND};
 

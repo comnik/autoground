@@ -1,5 +1,5 @@
-use super::ast::{Declare, Form, Formula, Program, Term};
-use super::template::{parse_template, template_slots};
+use super::ast::{Form, Formula, Program, Reading, Sense};
+use super::template::hole_names;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -115,7 +115,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_string(&mut self, line: usize, col: usize) -> Result<String, ParseError> {
-        self.bump(); // opening quote
+        self.bump();
         let mut out = String::new();
         loop {
             match self.bump() {
@@ -173,7 +173,6 @@ impl<'a> Lexer<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Sexp {
     List(Vec<Sexp>),
-    Vector(Vec<Sexp>),
     Symbol(String),
     String(String),
 }
@@ -195,58 +194,30 @@ impl Parser {
     }
 
     fn sexp(&mut self) -> Result<Sexp, ParseError> {
-        let tok = self.bump().ok_or_else(|| ParseError {
-            line: 1,
-            col: 1,
-            message: "unexpected end of input".into(),
-        })?;
+        let tok = self
+            .bump()
+            .ok_or_else(|| err(1, 1, "unexpected end of input"))?;
         match tok.kind {
-            TokenKind::LParen => self.list(true, tok.line, tok.col),
-            TokenKind::LBrack => self.list(false, tok.line, tok.col),
-            TokenKind::RParen => Err(ParseError {
-                line: tok.line,
-                col: tok.col,
-                message: "unexpected ')'".into(),
-            }),
-            TokenKind::RBrack => Err(ParseError {
-                line: tok.line,
-                col: tok.col,
-                message: "unexpected ']'".into(),
-            }),
+            TokenKind::LParen => {
+                let mut xs = Vec::new();
+                loop {
+                    match self.peek() {
+                        None => return Err(err(tok.line, tok.col, "unclosed '('")),
+                        Some(t) if matches!(t.kind, TokenKind::RParen) => {
+                            self.bump();
+                            break;
+                        }
+                        Some(_) => xs.push(self.sexp()?),
+                    }
+                }
+                Ok(Sexp::List(xs))
+            }
+            TokenKind::RParen => Err(err(tok.line, tok.col, "unexpected ')'")),
+            TokenKind::LBrack | TokenKind::RBrack => {
+                Err(err(tok.line, tok.col, "brackets are not in this language"))
+            }
             TokenKind::Symbol(s) => Ok(Sexp::Symbol(s)),
             TokenKind::String(s) => Ok(Sexp::String(s)),
-        }
-    }
-
-    fn list(&mut self, paren: bool, line: usize, col: usize) -> Result<Sexp, ParseError> {
-        let mut xs = Vec::new();
-        loop {
-            match self.peek() {
-                None => {
-                    return Err(ParseError {
-                        line,
-                        col,
-                        message: if paren {
-                            "unterminated '('".into()
-                        } else {
-                            "unterminated '['".into()
-                        },
-                    });
-                }
-                Some(t)
-                    if (paren && t.kind == TokenKind::RParen)
-                        || (!paren && t.kind == TokenKind::RBrack) =>
-                {
-                    self.bump();
-                    break;
-                }
-                Some(_) => xs.push(self.sexp()?),
-            }
-        }
-        if paren {
-            Ok(Sexp::List(xs))
-        } else {
-            Ok(Sexp::Vector(xs))
         }
     }
 }
@@ -260,32 +231,8 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
     Ok(tokens)
 }
 
-/// Parse a single atom.
-/// Accepts `(component "Frontend")`, `component "Frontend"`, and
-/// `(component ?x)` / `(component x)`.
-pub fn parse_atom(src: &str) -> Result<(String, Vec<Term>), ParseError> {
-    let trimmed = src.trim();
-    let wrapped = if trimmed.starts_with('(') {
-        trimmed.to_string()
-    } else {
-        format!("({trimmed})")
-    };
-    let program = parse(&format!("(require {wrapped})"))?;
-    match program.forms.into_iter().next() {
-        Some(Form::Require(Formula::Atom { pred, args })) => {
-            let args = args.into_iter().map(strip_qmark).collect();
-            Ok((pred, args))
-        }
-        Some(Form::Require(_)) => Err(err(
-            1,
-            1,
-            "expected a single atom like (component \"Frontend\") or (component ?x)",
-        )),
-        _ => Err(err(1, 1, "expected a single atom")),
-    }
-}
-
-/// Parse a complete model from source text.
+/// Parse a model: `name` and `sense` declarations, and claims built with
+/// `and`, `or`, `not`, and relation application.
 pub fn parse(src: &str) -> Result<Program, ParseError> {
     let tokens = tokenize(src)?;
     if tokens.is_empty() {
@@ -301,149 +248,90 @@ pub fn parse(src: &str) -> Result<Program, ParseError> {
 }
 
 fn lower_form(s: &Sexp) -> Result<Form, ParseError> {
-    let Sexp::List(xs) = s else {
-        return Err(err(1, 1, "top-level form must be a list"));
-    };
+    let xs = list(s)?;
     match xs.first() {
-        Some(Sexp::Symbol(head)) if head == "require" => {
-            if xs.len() != 2 {
-                return Err(err(1, 1, "`require` takes one formula"));
-            }
-            Ok(Form::Require(lower_formula(&xs[1])?))
-        }
-        Some(Sexp::Symbol(head)) if head == "def" => {
-            if xs.len() != 4 {
-                return Err(err(1, 1, "`def` takes a name, a variable list, and a body"));
-            }
-            let name = match &xs[1] {
-                Sexp::Symbol(n) => n.clone(),
-                _ => return Err(err(1, 1, "`def` name must be a symbol")),
-            };
-            let vars = lower_varlist(&xs[2])?;
-            let body = lower_formula(&xs[3])?;
-            Ok(Form::Def { name, vars, body })
-        }
-        Some(Sexp::Symbol(head)) if head == "declare" => Ok(Form::Declare(lower_declare(xs)?)),
-        Some(Sexp::Symbol(head)) => Err(err(
-            1,
-            1,
-            format!("unknown top-level form `{head}`; expected `require`, `def`, or `declare`"),
-        )),
-        _ => Err(err(
-            1,
-            1,
-            "top-level form must start with `require`, `def`, or `declare`",
-        )),
+        Some(Sexp::Symbol(head)) if head == "name" => Ok(Form::Name(lower_name_decl(xs)?)),
+        Some(Sexp::Symbol(head)) if head == "sense" => Ok(Form::Sense(lower_sense(xs)?)),
+        _ => Ok(Form::Claim(lower_formula(s)?)),
     }
 }
 
-fn lower_declare(xs: &[Sexp]) -> Result<Declare, ParseError> {
+fn lower_name_decl(xs: &[Sexp]) -> Result<String, ParseError> {
+    if xs.len() != 2 {
+        return Err(err(1, 1, "`name` takes one name"));
+    }
+    let spelling = expect_symbol(&xs[1], "`name` takes a symbol")?;
+    reject_reserved(&spelling)?;
+    Ok(spelling)
+}
+
+fn lower_sense(xs: &[Sexp]) -> Result<Sense, ParseError> {
     if xs.len() != 3 {
         return Err(err(
             1,
             1,
-            "`declare` takes a predicate name and a verbalization template string",
+            "`sense` takes a name and a reading, e.g. (sense calls \"{caller} calls {callee}\")",
         ));
     }
-    let name = match &xs[1] {
-        Sexp::Symbol(n) => n.clone(),
-        _ => return Err(err(1, 1, "`declare` name must be a symbol")),
-    };
+    let name = expect_symbol(&xs[1], "`sense` name must be a symbol")?;
+    reject_reserved(&name)?;
     let template = match &xs[2] {
-        Sexp::String(s) => s.clone(),
+        Sexp::String(template) => template.clone(),
         _ => {
             return Err(err(
                 1,
                 1,
-                "`declare` template must be a string, e.g. \"{String} is a component\"",
+                "`sense` reading must be a string, e.g. \"{borrower} borrows from {lender}\"",
             ))
         }
     };
-    let parts = parse_template(&template).map_err(|message| err(1, 1, message))?;
-    let slots = template_slots(&parts);
-    Ok(Declare {
+    let holes = hole_names(&template).map_err(|message| err(1, 1, message))?;
+    Ok(Sense {
         name,
         template,
-        slots,
+        holes,
     })
 }
 
-fn lower_varlist(s: &Sexp) -> Result<Vec<String>, ParseError> {
-    let Sexp::Vector(xs) = s else {
-        return Err(err(
-            1,
-            1,
-            "variable list must be written in square brackets",
-        ));
-    };
-    let mut vars = Vec::new();
-    for x in xs {
-        match x {
-            Sexp::Symbol(v) => vars.push(v.clone()),
-            _ => return Err(err(1, 1, "variable list entries must be symbols")),
-        }
-    }
-    Ok(vars)
-}
-
 fn lower_formula(s: &Sexp) -> Result<Formula, ParseError> {
-    let Sexp::List(xs) = s else {
-        return Err(err(
-            1,
-            1,
-            "a formula must be a list `(and ...)`, `(not ...)`, or `(pred args...)`",
-        ));
-    };
+    let xs = list(s)?;
     if xs.is_empty() {
         return Err(err(1, 1, "empty list is not a formula"));
     }
-    let Sexp::Symbol(head) = &xs[0] else {
-        return Err(err(1, 1, "formula head must be a symbol"));
-    };
-    match head.as_str() {
-        "and" => Ok(Formula::And(lower_formulas(&xs[1..])?)),
-        "or" => Ok(Formula::Or(lower_formulas(&xs[1..])?)),
-        "not" => {
+    match &xs[0] {
+        Sexp::Symbol(head) if head == "name" || head == "sense" => Err(err(
+            1,
+            1,
+            format!("`{head}` is a declaration and cannot appear inside a formula"),
+        )),
+        Sexp::Symbol(head) if head == "and" => Ok(Formula::And(lower_formulas(&xs[1..])?)),
+        Sexp::Symbol(head) if head == "or" => Ok(Formula::Or(lower_formulas(&xs[1..])?)),
+        Sexp::Symbol(head) if head == "not" => {
             if xs.len() != 2 {
                 return Err(err(1, 1, "`not` takes one formula"));
             }
             Ok(Formula::Not(Box::new(lower_formula(&xs[1])?)))
         }
-        "implies" => {
-            if xs.len() != 3 {
-                return Err(err(1, 1, "`implies` takes two formulas"));
-            }
-            Ok(Formula::Implies(
-                Box::new(lower_formula(&xs[1])?),
-                Box::new(lower_formula(&xs[2])?),
-            ))
-        }
-        "exists" | "forall" => {
-            if xs.len() != 3 {
-                return Err(err(
-                    1,
-                    1,
-                    format!("`{head}` takes a variable list and a formula"),
-                ));
-            }
-            let vars = lower_varlist(&xs[1])?;
-            let body = Box::new(lower_formula(&xs[2])?);
-            if head == "exists" {
-                Ok(Formula::Exists(vars, body))
-            } else {
-                Ok(Formula::Forall(vars, body))
-            }
-        }
-        _ => {
-            let mut args = Vec::new();
-            for a in &xs[1..] {
-                args.push(lower_term(a)?);
-            }
-            Ok(Formula::Atom {
-                pred: head.clone(),
-                args,
+        Sexp::Symbol(head) if is_retired(head) => Err(retired(head)),
+        Sexp::Symbol(head) => Ok(Formula::Apply {
+            reading: Reading::Sense(head.clone()),
+            args: lower_args(&xs[1..])?,
+        }),
+        Sexp::String(template) => {
+            let holes = hole_names(template).map_err(|message| err(1, 1, message))?;
+            Ok(Formula::Apply {
+                reading: Reading::Inline {
+                    template: template.clone(),
+                    holes,
+                },
+                args: lower_args(&xs[1..])?,
             })
         }
+        _ => Err(err(
+            1,
+            1,
+            "a formula starts with `and`, `or`, `not`, a sense name, or a reading",
+        )),
     }
 }
 
@@ -451,120 +339,53 @@ fn lower_formulas(xs: &[Sexp]) -> Result<Vec<Formula>, ParseError> {
     xs.iter().map(lower_formula).collect()
 }
 
-fn lower_term(s: &Sexp) -> Result<Term, ParseError> {
+fn lower_args(xs: &[Sexp]) -> Result<Vec<String>, ParseError> {
+    xs.iter()
+        .map(|s| expect_symbol(s, "an argument must be a name"))
+        .collect()
+}
+
+fn list(s: &Sexp) -> Result<&[Sexp], ParseError> {
     match s {
-        Sexp::Symbol(v) => Ok(Term::Var(v.clone())),
-        Sexp::String(c) => Ok(Term::Const(c.clone())),
-        Sexp::List(xs) => {
-            if xs.len() != 2 {
-                return Err(err(
-                    1,
-                    1,
-                    "a typed term must be `(Type \"value\")`, e.g. `(File \"ui/app.py\")`",
-                ));
-            }
-            let ty = match &xs[0] {
-                Sexp::Symbol(n) => n.clone(),
-                _ => return Err(err(1, 1, "typed term head must be a symbol")),
-            };
-            match &xs[1] {
-                Sexp::String(v) => Ok(Term::Typed {
-                    ty,
-                    value: v.clone(),
-                }),
-                _ => Err(err(
-                    1,
-                    1,
-                    "typed term argument must be a string, e.g. `(File \"ui/app.py\")`",
-                )),
-            }
-        }
-        _ => Err(err(
+        Sexp::List(xs) => Ok(xs),
+        _ => Err(err(1, 1, "a form must be a list")),
+    }
+}
+
+fn expect_symbol(s: &Sexp, message: &str) -> Result<String, ParseError> {
+    match s {
+        Sexp::Symbol(name) => Ok(name.clone()),
+        _ => Err(err(1, 1, message)),
+    }
+}
+
+fn reject_reserved(spelling: &str) -> Result<(), ParseError> {
+    if matches!(spelling, "name" | "sense" | "and" | "or" | "not") {
+        Err(err(
             1,
             1,
-            "a term must be a variable, a constant, or a typed constant `(File \"path\")`",
-        )),
+            format!("`{spelling}` is reserved and cannot be declared"),
+        ))
+    } else {
+        Ok(())
     }
 }
 
-fn strip_qmark(t: Term) -> Term {
-    match t {
-        Term::Var(v) => Term::Var(v.strip_prefix('?').unwrap_or(&v).to_string()),
-        other => other,
-    }
+fn is_retired(head: &str) -> bool {
+    matches!(
+        head,
+        "require" | "def" | "declare" | "forall" | "exists" | "implies"
+    )
 }
 
-/// A `declare` catalog plus atoms to verbalize, including bare top-level atoms
-/// and atoms nested in `require` / `def`.
-#[derive(Debug, Clone, Default)]
-pub struct VerbalizeInput {
-    pub declares: Vec<Declare>,
-    pub atoms: Vec<(String, Vec<Term>)>,
-}
-
-/// Parse source for `autoground verbalize`: `declare` / `require` / `def` plus
-/// bare atoms such as `(Component "Frontend")`.
-pub fn parse_verbalize_input(src: &str) -> Result<VerbalizeInput, ParseError> {
-    let tokens = tokenize(src)?;
-    if tokens.is_empty() {
-        return Ok(VerbalizeInput::default());
-    }
-    let mut p = Parser { tokens, i: 0 };
-    let mut sexps = Vec::new();
-    while p.peek().is_some() {
-        sexps.push(p.sexp()?);
-    }
-
-    let mut declares = Vec::new();
-    for s in &sexps {
-        if let Sexp::List(xs) = s {
-            if matches!(xs.first(), Some(Sexp::Symbol(h)) if h == "declare") {
-                declares.push(lower_declare(xs)?);
-            }
-        }
-    }
-
-    let mut atoms = Vec::new();
-    for s in &sexps {
-        let Sexp::List(xs) = s else {
-            return Err(err(1, 1, "top-level form must be a list"));
-        };
-        match xs.first() {
-            Some(Sexp::Symbol(head)) if head == "declare" => {}
-            Some(Sexp::Symbol(head)) if head == "require" => {
-                if xs.len() != 2 {
-                    return Err(err(1, 1, "`require` takes one formula"));
-                }
-                collect_atoms(&lower_formula(&xs[1])?, &mut atoms);
-            }
-            Some(Sexp::Symbol(head)) if head == "def" => {
-                if xs.len() != 4 {
-                    return Err(err(1, 1, "`def` takes a name, a variable list, and a body"));
-                }
-                collect_atoms(&lower_formula(&xs[3])?, &mut atoms);
-            }
-            Some(Sexp::Symbol(_)) => match lower_formula(s)? {
-                Formula::Atom { pred, args } => atoms.push((pred, args)),
-                _ => {
-                    return Err(err(
-                        1,
-                        1,
-                        "bare top-level form must be an atom, `declare`, `require`, or `def`",
-                    ))
-                }
-            },
-            _ => {
-                return Err(err(1, 1, "top-level form must start with a symbol"));
-            }
-        }
-    }
-    Ok(VerbalizeInput { declares, atoms })
-}
-
-fn collect_atoms(f: &Formula, out: &mut Vec<(String, Vec<Term>)>) {
-    f.walk_atoms(&mut |pred, args| {
-        out.push((pred.to_string(), args.to_vec()));
-    });
+fn retired(head: &str) -> ParseError {
+    err(
+        1,
+        1,
+        format!(
+            "`{head}` is not in this language; a model is names, senses, and `and` / `or` / `not`"
+        ),
+    )
 }
 
 fn err(line: usize, col: usize, message: impl Into<String>) -> ParseError {
@@ -580,55 +401,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_unknown_toplevel() {
-        let err = parse("(foo 1)").unwrap_err();
-        assert!(err.message.contains("unknown top-level form"));
+    fn parses_declarations_and_applications() {
+        let src = r#"
+;; vocabulary
+(name aaa)
+(name bbb)
+(sense depends_on "{X} depends on {Y}")
+(sense borrowed_from "{borrower} borrows from {lender}")
+
+("{X} depends on {Y}" aaa bbb)
+("{X} is deprecated" aaa)
+("Oracle calls the TypeSafe API")
+(depends_on aaa bbb)
+(and (depends_on aaa bbb) (not (borrowed_from aaa bbb)))
+"#;
+        let program = parse(src).unwrap();
+        assert_eq!(program.names().collect::<Vec<_>>(), vec!["aaa", "bbb"]);
+        let senses: Vec<_> = program.senses().map(|s| s.name.as_str()).collect();
+        assert_eq!(senses, vec!["depends_on", "borrowed_from"]);
+        assert_eq!(
+            program.senses().nth(1).unwrap().holes,
+            vec!["borrower", "lender"]
+        );
+        assert_eq!(program.claims().count(), 5);
+    }
+
+    #[test]
+    fn repeated_hole_labels_stay_in_order() {
+        let program = parse(r#"(sense part_of "{Name} is a part of {Name}")"#).unwrap();
+        assert_eq!(program.senses().next().unwrap().holes, vec!["Name", "Name"]);
+    }
+
+    #[test]
+    fn rejects_retired_forms() {
+        for src in [
+            "(require (component \"Frontend\"))",
+            "(def depends_on [x y] (component x))",
+            "(declare component \"{String} is a component\")",
+            "(forall [x] (component x))",
+            "(exists [f] (file f))",
+            "(implies (component \"A\") (component \"B\"))",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(err.message.contains("not in this language"), "{src}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_declaration_inside_a_formula() {
+        let err = parse("(and (name aaa))").unwrap_err();
+        assert!(err.message.contains("declaration"));
     }
 
     #[test]
     fn skips_comments() {
-        let p = parse(";; hi\n(require (ok \"x\"))\n").unwrap();
-        assert_eq!(p.forms.len(), 1);
-    }
-
-    #[test]
-    fn parse_atom_const_and_var() {
-        let (pred, args) = parse_atom("(component \"Frontend\")").unwrap();
-        assert_eq!(pred, "component");
-        assert_eq!(args, vec![Term::Const("Frontend".into())]);
-        let (pred, args) = parse_atom("(component ?x)").unwrap();
-        assert_eq!(pred, "component");
-        assert_eq!(args, vec![Term::Var("x".into())]);
-        let (pred, args) = parse_atom("component x").unwrap();
-        assert_eq!(pred, "component");
-        assert_eq!(args, vec![Term::Var("x".into())]);
-    }
-
-    #[test]
-    fn parse_declare_and_typed_term() {
-        let p = parse(r#"(declare File "{String} is a file in the codebase")"#).unwrap();
-        match &p.forms[0] {
-            Form::Declare(d) => {
-                assert_eq!(d.name, "File");
-                assert_eq!(d.slots, vec!["String"]);
-            }
-            other => panic!("expected declare, got {other:?}"),
-        }
-        let (pred, args) =
-            parse_atom(r#"(defines (File "ui/app.py") (Component "Frontend"))"#).unwrap();
-        assert_eq!(pred, "defines");
-        assert_eq!(
-            args,
-            vec![
-                Term::Typed {
-                    ty: "File".into(),
-                    value: "ui/app.py".into()
-                },
-                Term::Typed {
-                    ty: "Component".into(),
-                    value: "Frontend".into()
-                }
-            ]
-        );
+        let program = parse(";; hi\n(\"Oracle calls the TypeSafe API\")\n").unwrap();
+        assert_eq!(program.forms.len(), 1);
     }
 }

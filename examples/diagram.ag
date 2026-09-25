@@ -7,7 +7,9 @@
 (sense calls "{caller} calls {callee}")
 
 (depends_on Frontend Backend)
+
 (not (depends_on Backend Frontend))
+
 (or
   (calls Oracle TypeSafe)
   ("Oracle calls the TypeSafe API"))
