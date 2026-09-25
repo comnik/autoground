@@ -23,13 +23,16 @@
 
 (name Search)
 
+(name Read)
+
 ;;
 
 (and
-  ("All major components record structured events in the unified log.")
-  (calls Oracle Log)
-  (calls Universe Log)
-  (calls Search Log))
+  ("A unified log is available to all components.")
+  (not (calls Universe Log))
+  (not (calls Oracle Log))
+  (calls Search Log)
+  (calls Read Log))
 
 (not (calls Universe Oracle))
 
