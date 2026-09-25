@@ -13,12 +13,6 @@
 
 (name Proposition)
 
-(name Database)
-("A database is serializable context that can entail or contradict propositions.")
-(or
-  (entails Database Proposition)
-  (contradicts Database Proposition))
-
 (name Universe)
 
 (name Search)
@@ -28,7 +22,7 @@
 ;;
 
 (and
-  ("A unified log is available to all components.")
+  ("autoground emits a log of structured events")
   (not (calls Universe Log))
   (not (calls Oracle Log))
   (calls Search Log)
@@ -37,8 +31,6 @@
 (not (calls Universe Oracle))
 
 (and
-  ("Search refines a Universe into a ranked view of relevant databases.")
+  ("Search prunes a Universe to a window of relevant objects along with a signal score.")
   (calls Search Universe)
   (calls Search Oracle))
-
-(contains Universe Database)
