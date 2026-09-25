@@ -1,18 +1,21 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use autoground::log::Log;
-use autoground::navigator::judge::epoch_ms;
 use autoground::oracle::{HeuristicOracle, JevOracle, Oracle, Usage};
+use autoground::plan::Plan;
 use autoground::read::{present_read, ReadTraceFile, Reader};
 use autoground::search::trace::SearchStep;
 use autoground::search::trace::UsageRecord;
 use autoground::search::{
-    present_search, window_lines, Search, SearchTraceFile, DEFAULT_BUDGET_BYTES,
+    format_usage, present_search, window_lines, Search, SearchTraceFile, DEFAULT_BUDGET_BYTES,
 };
 use autoground::universe::{Filesystem, Transcript, Universe};
-use autoground::verbalize_source;
+use autoground::{compile, parse, verbalize_proposition, verbalize_source, Proposition};
 use clap::{Parser, Subcommand, ValueEnum};
+use serde_json::json;
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +45,46 @@ enum Commands {
     Verbalize {
         /// Atom, model source, or path to a `.ag` file.
         input: String,
+    },
+    /// Decompose a model into atomic sentences.
+    ///
+    /// Each claim's readings are filled, then the distinct sentences are listed
+    /// once, in the order the claims mention them. `and`, `or`, and `not` stay
+    /// with the claim; this command does not read a repository.
+    ///
+    /// Examples:
+    ///   autoground plan examples/diagram.ag
+    ///   autoground plan '(name Frontend) (sense part_of "{Name} is a part of {Name}") (part_of Frontend Frontend)'
+    Plan {
+        /// Model source, or path to a `.ag` file.
+        input: String,
+    },
+    /// Judge each claim in a model.
+    ///
+    /// Plans the model, reads every atomic sentence against the repository, and
+    /// combines those truth values with `and`, `or`, and `not`. One line per
+    /// claim. On a terminal each claim shows a spinner and whether the run is
+    /// planning, searching, or reading. A session log is written under
+    /// `/tmp/autoground/`.
+    ///
+    /// Examples:
+    ///   autoground run examples/diagram.ag --repo .
+    ///   autoground run examples/diagram.ag --judge heuristic --repo examples/toy-layered
+    Run {
+        /// Model source, or path to a `.ag` file.
+        input: String,
+        /// Repository to read. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Coding-agent transcript (`chat_history.jsonl`, or a session directory).
+        /// When set, this is the universe instead of `--repo`.
+        #[arg(long, value_name = "PATH")]
+        transcript: Option<PathBuf>,
+        /// Render budget in bytes for one file body.
+        #[arg(long, default_value_t = DEFAULT_BUDGET_BYTES)]
+        budget: usize,
+        #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
+        judge: JudgeKind,
     },
     /// Judge a proposition against a repository, coarse to fine.
     ///
@@ -119,6 +162,26 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Commands::Verbalize { input } => match verbalize_cmd(&input) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::from(3)
+            }
+        },
+        Commands::Plan { input } => match plan_cmd(&input) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::from(3)
+            }
+        },
+        Commands::Run {
+            input,
+            repo,
+            transcript,
+            budget,
+            judge,
+        } => match run_cmd(&input, &repo, transcript.as_ref(), budget, judge) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("{err}");
@@ -231,6 +294,12 @@ struct Searched {
     bytes_before: u64,
     bytes_after: u64,
     failure: Option<String>,
+}
+
+fn epoch_ms(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn path_label(path: &Path, fallback: &str) -> String {
@@ -412,6 +481,139 @@ fn verbalize_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("{line}");
     }
     Ok(())
+}
+
+fn plan_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let planned = load_plan(input)?;
+    for atom in &planned.atoms {
+        println!(
+            "{}",
+            verbalize_proposition(&Proposition::Sentence(atom.clone()))
+        );
+    }
+    Ok(())
+}
+
+fn run_cmd(
+    input: &str,
+    repo: &Path,
+    transcript: Option<&PathBuf>,
+    budget: usize,
+    judge: JudgeKind,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let live = if std::io::stdout().is_terminal() {
+        Some(autoground::report::run::Live::open()?)
+    } else {
+        None
+    };
+    if let Some(live) = &live {
+        live.show_planning()?;
+    }
+    let planned = load_plan(input)?;
+    let log = Log::create()?;
+    if let Some(live) = &live {
+        if !planned.atoms.is_empty() {
+            live.show_plan(&planned)?;
+            let ui = live.clone();
+            log.set_hook(move |event| ui.on_event(event));
+        }
+    }
+    let judged = if planned.atoms.is_empty() {
+        Judged {
+            values: Vec::new(),
+            usage: Usage::default(),
+        }
+    } else if let Some(path) = transcript {
+        let universe = Transcript::open(path)?;
+        read_atoms(universe, judge, &planned.atoms, budget, &log)?
+    } else {
+        let mut universe = Filesystem::at_root(repo)?;
+        let model = Path::new(input);
+        if model.is_file() {
+            universe.hide_model(model);
+        }
+        read_atoms(universe, judge, &planned.atoms, budget, &log)?
+    };
+    log.clear_hook();
+    let atom_values = judged.values;
+    let usage = judged.usage;
+    let claim_values = planned.evaluate(&atom_values);
+    let claims: Vec<_> = planned
+        .claims
+        .iter()
+        .zip(&claim_values)
+        .map(|(claim, value)| {
+            json!({
+                "claim": claim.verbalized,
+                "value": value,
+            })
+        })
+        .collect();
+    log.append_event(
+        "run",
+        &json!({
+            "claims": claims,
+            "usage": UsageRecord::from_usage(&usage),
+        }),
+    )?;
+    if let Some(live) = &live {
+        live.finish(&claim_values)?;
+    } else {
+        for (claim, value) in planned.claims.iter().zip(&claim_values) {
+            println!("{:<7}  {}", value.to_string(), claim.verbalized);
+        }
+    }
+    println!("({})", format_usage(&usage));
+    println!("trace: {}", log.path().display());
+    Ok(())
+}
+
+fn load_plan(input: &str) -> Result<Plan, Box<dyn std::error::Error>> {
+    let src = model_source(input)?;
+    let program = parse(&src)?;
+    Ok(Plan::of(&compile(&program)?))
+}
+
+struct Judged {
+    values: Vec<autoground::Value>,
+    usage: Usage,
+}
+
+fn read_atoms<U: Universe + Clone>(
+    universe: U,
+    judge: JudgeKind,
+    atoms: &[String],
+    budget: usize,
+    log: &Log,
+) -> Result<Judged, Box<dyn std::error::Error>> {
+    match judge {
+        JudgeKind::Heuristic => {
+            let oracle = HeuristicOracle::new(universe.clone());
+            read_with(universe, oracle, atoms, budget, log)
+        }
+        JudgeKind::Jev => read_with(universe, JevOracle::from_env()?, atoms, budget, log),
+    }
+}
+
+fn read_with<U: Universe + Clone, O: Oracle>(
+    universe: U,
+    oracle: O,
+    atoms: &[String],
+    budget: usize,
+    log: &Log,
+) -> Result<Judged, Box<dyn std::error::Error>> {
+    let mut reader = Reader::new(universe, oracle, budget);
+    reader.set_log(log.clone());
+    let tickets: Vec<_> = atoms
+        .iter()
+        .map(|atom| reader.submit(atom.clone()))
+        .collect();
+    let mut values = Vec::with_capacity(tickets.len());
+    for result in reader.wait_many(&tickets) {
+        values.push(result?.value);
+    }
+    let usage = reader.usage();
+    Ok(Judged { values, usage })
 }
 
 /// Read `input` as a `.ag` file when it names one, otherwise treat it as source.

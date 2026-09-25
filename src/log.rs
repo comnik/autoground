@@ -38,11 +38,17 @@ pub fn allocate_unique_file(dir: &Path, ext: &str) -> std::io::Result<PathBuf> {
     ))
 }
 
+struct Shared {
+    file: Mutex<File>,
+    /// Called after each appended line, without the file lock held.
+    hook: Mutex<Option<Arc<dyn Fn(&Value) + Send + Sync>>>,
+}
+
 /// Handle for one session log. Clone shares the same file.
 #[derive(Clone)]
 pub struct Log {
     path: PathBuf,
-    file: Arc<Mutex<File>>,
+    shared: Arc<Shared>,
 }
 
 impl Log {
@@ -63,7 +69,10 @@ impl Log {
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             path,
-            file: Arc::new(Mutex::new(file)),
+            shared: Arc::new(Shared {
+                file: Mutex::new(file),
+                hook: Mutex::new(None),
+            }),
         })
     }
 
@@ -71,16 +80,51 @@ impl Log {
         &self.path
     }
 
+    /// Invoke `hook` after every later append on this log, including clones.
+    ///
+    /// The hook runs without the file lock. It must not append to this same
+    /// log: that calls the hook again.
+    pub fn set_hook<F>(&self, hook: F)
+    where
+        F: Fn(&Value) + Send + Sync + 'static,
+    {
+        *self.hook_slot() = Some(Arc::new(hook));
+    }
+
+    pub fn clear_hook(&self) {
+        *self.hook_slot() = None;
+    }
+
+    fn hook_slot(&self) -> std::sync::MutexGuard<'_, Option<Arc<dyn Fn(&Value) + Send + Sync>>> {
+        self.shared
+            .hook
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     /// Append one JSON value as a single line.
     pub fn append(&self, event: &impl Serialize) -> std::io::Result<()> {
-        let mut buf = serde_json::to_vec(event).map_err(json_io)?;
+        let value = serde_json::to_value(event).map_err(json_io)?;
+        let mut buf = serde_json::to_vec(&value).map_err(json_io)?;
         buf.push(b'\n');
-        let mut file = self
-            .file
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        file.write_all(&buf)?;
-        file.flush()
+        {
+            let mut file = self
+                .shared
+                .file
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            file.write_all(&buf)?;
+            file.flush()?;
+        }
+        self.emit(&value);
+        Ok(())
+    }
+
+    fn emit(&self, value: &Value) {
+        let hook = self.hook_slot().clone();
+        if let Some(hook) = hook {
+            hook(value);
+        }
     }
 
     /// Append `body` as one JSON object with a `"kind"` field.
@@ -182,5 +226,50 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(events[0]["kind"], "listing");
         assert_eq!(events[0]["dir"], "ui");
+    }
+
+    #[test]
+    fn hook_sees_each_appended_event() {
+        let path = std::env::temp_dir().join(format!(
+            "autoground-log-hook-{}-{}.jsonl",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let log = Log::open(&path).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let got = Arc::clone(&seen);
+        log.set_hook(move |event| {
+            got.lock()
+                .unwrap()
+                .push(event["kind"].as_str().unwrap().to_string());
+        });
+        log.append_event("search_step", &serde_json::json!({"id": "frontend"}))
+            .unwrap();
+        let other = log.clone();
+        other
+            .append_event("read_step", &serde_json::json!({"path": "a.py"}))
+            .unwrap();
+        log.clear_hook();
+        log.append_event("run", &serde_json::json!({})).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["search_step", "read_step"]
+        );
+    }
+
+    #[test]
+    fn allocate_unique_file_uses_distinct_names() {
+        let dir =
+            std::env::temp_dir().join(format!("autoground-trace-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = allocate_unique_file(&dir, "json").unwrap();
+        let b = allocate_unique_file(&dir, "json").unwrap();
+        assert_ne!(a, b);
+        assert!(a.extension().is_some_and(|ext| ext == "json"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

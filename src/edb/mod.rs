@@ -208,7 +208,7 @@ CREATE TABLE IF NOT EXISTS provenance (
     }
 }
 
-/// Group facts by predicate for a scripted navigator seed.
+/// Group stored facts by predicate.
 pub fn facts_by_pred(store: &Store) -> HashMap<String, Vec<Vec<String>>> {
     let mut m: HashMap<String, Vec<Vec<String>>> = HashMap::new();
     for t in &store.facts {

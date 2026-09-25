@@ -825,7 +825,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use super::*;
-    use crate::navigator::confidence::SUPPORT;
+    use crate::confidence::SUPPORT;
     use crate::oracle::{Answer, Oracle, OracleError, QuestionKind, Ticket as OracleTicket};
     use crate::universe::fs::Filesystem;
     use crate::universe::Transcript;

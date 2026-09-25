@@ -189,9 +189,9 @@ TBD verbalization is how we go from symbolic atoms to unstructured propositions.
 
 ### Symbolic Evaluation
 
-The planner decomposes a model into positive atomic propositions, submits them to the
-reader, applies negation itself, and combines the findings with Kleene three-valued logic.
-It does not render a file body. Not built yet.
+`autoground plan` decomposes a model into positive atomic sentences. It does not
+render a file body and does not call the reader. `autoground run` reads those
+sentences and combines the findings with Kleene `and`, `or`, and `not`.
 
 
 ## Implementation
@@ -200,7 +200,8 @@ It does not render a file body. Not built yet.
 
 - [x] `autoground search "<arbitrary verbalized proposition>"`
 - [x] `autoground read "<arbitrary verbalized proposition>"`
-- [ ] `autoground plan xyz.ag`: demonstrate the top-down demand transform + verbalization
+- [x] `autoground plan xyz.ag`: list the atomic sentences in a model
+- [x] `autoground run xyz.ag`: read those sentences and combine them per claim
 
 ### Interfaces
 

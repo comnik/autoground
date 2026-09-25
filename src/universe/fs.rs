@@ -224,6 +224,14 @@ impl Filesystem {
         })
     }
 
+    /// Drop `model` from listings when it lives inside this repo.
+    pub fn hide_model(&mut self, model: &Path) {
+        self.filter.set_model(&self.root, model);
+        if let Some(rel) = self.filter.model_rel.clone() {
+            self.databases.retain(|id| id != &rel);
+        }
+    }
+
     /// Hide every path outside `prefix`. The prefix and its ancestors remain.
     pub fn set_only(&mut self, prefix: &str) {
         self.filter.set_only(prefix);
@@ -665,6 +673,20 @@ mod tests {
         assert_eq!(text, "<binary 4 bytes>");
         assert!(summary.is_none());
         assert_eq!(size, 4);
+    }
+
+    #[test]
+    fn hide_model_drops_the_file_from_the_root_view() {
+        let root = scratch_dir("hide-model");
+        std::fs::create_dir_all(&root).unwrap();
+        let model = root.join("model.ag");
+        std::fs::write(&model, "(name X)\n").unwrap();
+        std::fs::write(root.join("keep.txt"), "yes\n").unwrap();
+        let mut fs = Filesystem::at_root(&root).unwrap();
+        fs.hide_model(&model);
+        assert_eq!(fs.databases(), &["keep.txt".to_string()]);
+        assert_eq!(fs.children("").unwrap(), vec!["keep.txt".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

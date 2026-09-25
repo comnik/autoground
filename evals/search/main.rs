@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use autoground::confidence::SUPPORT;
 use autoground::log::Log;
-use autoground::navigator::confidence::SUPPORT;
 use autoground::oracle::{HeuristicOracle, JevOracle, Oracle};
 use autoground::report::{format_duration, format_usd};
 use autoground::search::PRUNE_FLOOR;

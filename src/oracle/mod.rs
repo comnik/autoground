@@ -1,8 +1,7 @@
 //! Classification oracle: enqueue questions, batch on wait.
 //!
-//! Callers (the navigator now; search later) `submit` one classification at a
-//! time and `wait` when they need the label. The 3VL engine does not hold an
-//! oracle. Grouping is over the `state` JSON the caller passed — typically a
+//! Callers (`search` and `read`) `submit` one classification at a time and
+//! `wait` when they need the label. The planner does not hold an oracle. Grouping is over the `state` JSON the caller passed — typically a
 //! listing tree or a file body. The oracle hashes that JSON; Universe does not
 //! grow a digest method.
 
