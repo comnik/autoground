@@ -195,12 +195,35 @@ fn duration_from_nanos(nanos: u128) -> Duration {
 
 /// Classification oracle. Jev is the first implementation.
 ///
-/// `submit` only enqueues. `wait` flushes pending work: same-state questions
-/// share a POST (chunked), independent states overlap. A later Jev impl may
-/// POST from `submit` once a same-state group fills a request; not yet.
+/// `submit` only enqueues. `wait` starts pending work: same-state questions
+/// share a POST, and independent states overlap up to the in-flight cap.
+/// A finished POST frees its slot. `wait` returns when its own ticket is
+/// done, while other posts keep running.
 pub trait Oracle {
     fn submit(&mut self, req: Classification) -> Ticket;
     fn wait(&mut self, ticket: Ticket) -> Result<Answer, OracleError>;
+
+    /// Block until any of `tickets` has an answer, and return that ticket.
+    ///
+    /// Sync oracles answer the whole queued batch inside this call. A live
+    /// oracle returns when the first of them finishes and leaves the rest
+    /// running.
+    fn wait_any(&mut self, tickets: &[Ticket]) -> Result<Ticket, OracleError> {
+        let Some(ticket) = tickets.first().copied() else {
+            return Err(OracleError::Parse("no tickets to wait for".into()));
+        };
+        self.wait(ticket)?;
+        Ok(ticket)
+    }
+
+    /// Which of `tickets` already have answers.
+    ///
+    /// The default reports all of them: a sync `wait` / `wait_any` finishes
+    /// every question that was queued. A pipelined oracle reports only the
+    /// posts that have actually returned.
+    fn completed(&self, tickets: &[Ticket]) -> Vec<Ticket> {
+        tickets.to_vec()
+    }
 
     fn wait_many(&mut self, tickets: &[Ticket]) -> Vec<Result<Answer, OracleError>> {
         tickets.iter().copied().map(|t| self.wait(t)).collect()

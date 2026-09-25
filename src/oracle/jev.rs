@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
@@ -16,7 +18,7 @@ const MAX_RETRIES: u32 = 4;
 /// requests per minute; both can change without notice. A full search
 /// request is about 15k tokens, so 16 fills the token budget. The request
 /// cap is looser.
-const POST_PARALLELISM: usize = 16;
+pub const POST_PARALLELISM: usize = 16;
 /// Published Jev input price. Output tokens are unmetered.
 const INPUT_USD_PER_MILLION_TOKENS: f64 = 0.042;
 /// Hard cap on recorded Jev spend for one oracle instance.
@@ -158,6 +160,23 @@ pub struct JevOracle<T: Transport = UreqTransport> {
     questions: u64,
     latencies: Vec<Duration>,
     last_exchanges: Vec<OracleExchange>,
+    /// Production HTTP overlaps posts. Tests post inline so a flush is deterministic.
+    parallel: bool,
+    inflight: usize,
+    next_flight: u64,
+    flights: HashMap<u64, Flight>,
+    done_tx: Sender<Done>,
+    done_rx: Receiver<Done>,
+}
+
+struct Flight {
+    request: Value,
+    tickets: Vec<(Ticket, QuestionKind)>,
+}
+
+struct Done {
+    id: u64,
+    result: Result<Posted, OracleError>,
 }
 
 impl JevOracle<UreqTransport> {
@@ -170,16 +189,19 @@ impl JevOracle<UreqTransport> {
         let base = std::env::var("TYPESAFE_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE.into());
         let model =
             std::env::var("TYPESAFE_DEFAULT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
-        Ok(Self::new(
+        let mut oracle = Self::new(
             UreqTransport,
             format!("{}/v1/systemone", base.trim_end_matches('/')),
             model,
-        ))
+        );
+        oracle.parallel = true;
+        Ok(oracle)
     }
 }
 
 impl<T: Transport> JevOracle<T> {
     pub fn new(transport: T, endpoint: impl Into<String>, model: impl Into<String>) -> Self {
+        let (done_tx, done_rx) = mpsc::channel();
         Self {
             transport,
             endpoint: endpoint.into(),
@@ -194,6 +216,12 @@ impl<T: Transport> JevOracle<T> {
             questions: 0,
             latencies: Vec::new(),
             last_exchanges: Vec::new(),
+            parallel: false,
+            inflight: 0,
+            next_flight: 0,
+            flights: HashMap::new(),
+            done_tx,
+            done_rx,
         }
     }
 
@@ -241,70 +269,130 @@ impl<T: Transport> JevOracle<T> {
         self.pending.iter().any(|p| p.ticket == ticket)
     }
 
-    fn flush(&mut self) {
-        if self.pending.is_empty() {
-            return;
-        }
-        self.last_exchanges.clear();
+    fn is_inflight(&self, ticket: Ticket) -> bool {
+        self.flights
+            .values()
+            .any(|flight| flight.tickets.iter().any(|(id, _)| *id == ticket))
+    }
+
+    fn known(&self, ticket: Ticket) -> bool {
+        self.resolved.contains_key(&ticket) || self.is_pending(ticket) || self.is_inflight(ticket)
+    }
+
+    /// Start queued posts until [`POST_PARALLELISM`] are running.
+    ///
+    /// A sync transport posts inline, so the cap never stays full and every
+    /// queued chunk goes out before `wait` returns. Live HTTP leaves the
+    /// other posts running and starts the next queued one when a slot frees.
+    fn pump(&mut self) {
         if self.over_budget() {
             let err = self.budget_error();
-            for p in self.pending.drain(..) {
-                self.resolved.insert(p.ticket, Err(err.clone()));
+            for item in self.pending.drain(..) {
+                self.resolved.insert(item.ticket, Err(err.clone()));
             }
             return;
         }
-
-        let mut order: Vec<u64> = Vec::new();
-        let mut groups: HashMap<u64, Vec<Pending>> = HashMap::new();
-        for p in self.pending.drain(..) {
-            let digest = state_digest(&p.req.state);
-            groups.entry(digest).or_insert_with(|| {
-                order.push(digest);
-                Vec::new()
-            });
-            groups.get_mut(&digest).unwrap().push(p);
-        }
-
-        let mut chunks: Vec<(Value, Vec<Pending>)> = Vec::new();
-        for digest in order {
-            let items = groups.remove(&digest).unwrap_or_default();
-            for chunk in items.chunks(QUESTION_BUDGET) {
-                chunks.push((chunk[0].req.state.clone(), chunk.to_vec()));
+        while self.inflight < POST_PARALLELISM {
+            let Some(items) = self.take_chunk() else {
+                return;
+            };
+            let state = items[0].req.state.clone();
+            let request = request_body(&self.model, &state, &items);
+            let tickets = items
+                .iter()
+                .map(|item| (item.ticket, item.req.kind))
+                .collect::<Vec<_>>();
+            if self.parallel {
+                self.spawn(request, tickets);
+            } else {
+                let result = self.transport.post_json(&self.endpoint, &request);
+                self.finish(request, tickets, result);
             }
         }
+    }
 
-        let bodies: Vec<Value> = chunks
-            .iter()
-            .map(|(state, items)| request_body(&self.model, state, items))
-            .collect();
-        let responses = self.transport.post_json_all(&self.endpoint, &bodies);
+    /// One same-state batch, at most [`QUESTION_BUDGET`] questions.
+    fn take_chunk(&mut self) -> Option<Vec<Pending>> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let digest = state_digest(&self.pending[0].req.state);
+        let mut taken = Vec::new();
+        let mut kept = Vec::new();
+        for item in self.pending.drain(..) {
+            if state_digest(&item.req.state) == digest && taken.len() < QUESTION_BUDGET {
+                taken.push(item);
+            } else {
+                kept.push(item);
+            }
+        }
+        self.pending = kept;
+        Some(taken)
+    }
 
-        for ((items, request), resp) in chunks
-            .into_iter()
-            .map(|(_, items)| items)
-            .zip(bodies)
-            .zip(responses)
-        {
-            match resp {
-                Ok(posted) => {
-                    let response = posted.value.clone();
-                    let n = items.len();
-                    let ex = exchange_from_posted(request, posted);
-                    self.record_request(&ex, n);
-                    self.last_exchanges.push(ex.clone());
-                    for p in items {
-                        let key = question_key(p.ticket);
-                        let parsed = parse_answer(&response, &key, p.req.kind).map(|mut answer| {
-                            answer.exchange = Some(ex.clone());
-                            answer
-                        });
-                        self.resolved.insert(p.ticket, parsed);
-                    }
+    fn spawn(&mut self, request: Value, tickets: Vec<(Ticket, QuestionKind)>) {
+        let id = self.next_flight;
+        self.next_flight += 1;
+        let endpoint = self.endpoint.clone();
+        let body = request.clone();
+        let tx = self.done_tx.clone();
+        self.flights.insert(id, Flight { request, tickets });
+        self.inflight += 1;
+        thread::spawn(move || {
+            let result = Posted::capture(|| post_json_with_retries(&endpoint, &body));
+            let _ = tx.send(Done { id, result });
+        });
+    }
+
+    fn reap_ready(&mut self) {
+        while let Ok(done) = self.done_rx.try_recv() {
+            self.accept(done);
+        }
+    }
+
+    fn reap_one(&mut self) -> Result<(), OracleError> {
+        let done = self
+            .done_rx
+            .recv()
+            .map_err(|_| OracleError::Http("oracle post ended without a result".into()))?;
+        self.accept(done);
+        self.reap_ready();
+        Ok(())
+    }
+
+    fn accept(&mut self, done: Done) {
+        self.inflight = self.inflight.saturating_sub(1);
+        let Some(flight) = self.flights.remove(&done.id) else {
+            return;
+        };
+        self.finish(flight.request, flight.tickets, done.result);
+    }
+
+    fn finish(
+        &mut self,
+        request: Value,
+        tickets: Vec<(Ticket, QuestionKind)>,
+        result: Result<Posted, OracleError>,
+    ) {
+        match result {
+            Ok(posted) => {
+                let response = posted.value.clone();
+                let n = tickets.len();
+                let ex = exchange_from_posted(request, posted);
+                self.record_request(&ex, n);
+                self.last_exchanges.push(ex.clone());
+                for (ticket, kind) in tickets {
+                    let key = question_key(ticket);
+                    let parsed = parse_answer(&response, &key, kind).map(|mut answer| {
+                        answer.exchange = Some(ex.clone());
+                        answer
+                    });
+                    self.resolved.insert(ticket, parsed);
                 }
-                Err(e) => {
-                    for p in items {
-                        self.resolved.insert(p.ticket, Err(e.clone()));
-                    }
+            }
+            Err(error) => {
+                for (ticket, _) in tickets {
+                    self.resolved.insert(ticket, Err(error.clone()));
                 }
             }
         }
@@ -320,17 +408,44 @@ impl<T: Transport> Oracle for JevOracle<T> {
     }
 
     fn wait(&mut self, ticket: Ticket) -> Result<Answer, OracleError> {
-        if let Some(done) = self.resolved.get(&ticket) {
-            return done.clone();
-        }
-        if !self.is_pending(ticket) {
+        if !self.known(ticket) {
             return Err(OracleError::Parse(format!("unknown ticket {}", ticket.0)));
         }
-        self.flush();
-        self.resolved
-            .get(&ticket)
-            .cloned()
-            .unwrap_or_else(|| Err(OracleError::Parse(format!("missing ticket {}", ticket.0))))
+        loop {
+            self.pump();
+            if let Some(done) = self.resolved.get(&ticket) {
+                return done.clone();
+            }
+            self.reap_one()?;
+        }
+    }
+
+    fn wait_any(&mut self, tickets: &[Ticket]) -> Result<Ticket, OracleError> {
+        if tickets.is_empty() {
+            return Err(OracleError::Parse("no tickets to wait for".into()));
+        }
+        loop {
+            self.pump();
+            if let Some(ticket) = tickets
+                .iter()
+                .copied()
+                .find(|ticket| self.resolved.contains_key(ticket))
+            {
+                return Ok(ticket);
+            }
+            if tickets.iter().all(|ticket| !self.known(*ticket)) {
+                return Err(OracleError::Parse("unknown ticket".into()));
+            }
+            self.reap_one()?;
+        }
+    }
+
+    fn completed(&self, tickets: &[Ticket]) -> Vec<Ticket> {
+        tickets
+            .iter()
+            .copied()
+            .filter(|ticket| self.resolved.contains_key(ticket))
+            .collect()
     }
 
     fn usage(&self) -> Usage {

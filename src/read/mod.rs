@@ -5,6 +5,13 @@
 //! A file body is the oracle state, so every proposition still looking at
 //! that file shares a request. The proposition stays on the question.
 //!
+//! Files go out in relevance order, and every still-open proposition that
+//! contains a file is asked about it in that same request. Up to
+//! [`POST_PARALLELISM`] files stay in flight. When one finishes, the next
+//! file starts; the reader does not wait for the rest of the window. A file
+//! that finishes after an earlier one already settled the proposition does
+//! not change that decision.
+//!
 //! The search window is a closed world. A witness closes true, a refutation
 //! closes false, and exhausting the window with no witness is false. The
 //! evidence view is the databases that decision depends on.
@@ -21,6 +28,7 @@ use serde_json::{json, Value as Json};
 
 use crate::confidence::{FLOOR, RESOLVE, SUPPORT};
 use crate::log::Log;
+use crate::oracle::jev::POST_PARALLELISM;
 use crate::oracle::{Answer, Classification, Oracle, QuestionKind, Usage};
 use crate::search::trace::ExchangeRecord;
 use crate::search::{Decision, Search, View};
@@ -161,10 +169,6 @@ impl<U> Open<U> {
             .find(|id| !self.seen.contains(id.as_str()))
             .map(String::as_str)
     }
-
-    fn no_leaves_left(&self) -> bool {
-        self.leaves.iter().all(|id| self.seen.contains(id.as_str()))
-    }
 }
 
 impl<U: Universe> Open<U> {
@@ -174,6 +178,11 @@ impl<U: Universe> Open<U> {
             .binary_search_by(|item| item.as_str().cmp(id))
             .is_ok()
     }
+}
+
+struct Flying {
+    asks: Vec<Prepared>,
+    tickets: Vec<crate::oracle::Ticket>,
 }
 
 struct Prepared {
@@ -318,12 +327,14 @@ where
                 open.settle(Value::False, Vec::new(), true);
             }
         }
+        let mut flying: Vec<Flying> = Vec::new();
+        let mut blocked: HashSet<String> = HashSet::new();
         loop {
             if opens.iter().all(|open| !open.is_reading()) {
                 break;
             }
-            let nominees = nominee_paths(opens);
-            if nominees.is_empty() {
+            self.fill(opens, &mut flying, &mut blocked);
+            if flying.is_empty() {
                 self.settle_ready(opens);
                 for open in opens.iter_mut() {
                     if open.is_reading() {
@@ -332,17 +343,91 @@ where
                 }
                 break;
             }
-            let prepared = self.prepare(opens, &nominees);
-            if prepared.is_empty() {
+            let tickets: Vec<_> = flying
+                .iter()
+                .flat_map(|file| file.tickets.iter().copied())
+                .collect();
+            if let Err(error) = self.search.oracle_mut().wait_any(&tickets) {
+                let message = error.to_string();
                 for open in opens.iter_mut() {
                     if open.is_reading() {
-                        open.fail("could not read the next file");
+                        open.fail(message.clone());
                     }
                 }
                 break;
             }
-            self.judge(opens, prepared);
+            let ready: HashSet<_> = self
+                .search
+                .oracle_mut()
+                .completed(&tickets)
+                .into_iter()
+                .collect();
+            let mut still = Vec::new();
+            for file in flying.drain(..) {
+                if file.tickets.iter().all(|ticket| ready.contains(ticket)) {
+                    self.record_file(opens, file);
+                } else {
+                    still.push(file);
+                }
+            }
+            flying = still;
             self.settle_ready(opens);
+        }
+    }
+
+    /// Submit the next relevant files until [`POST_PARALLELISM`] are outstanding.
+    fn fill(
+        &mut self,
+        opens: &mut [Open<U>],
+        flying: &mut Vec<Flying>,
+        blocked: &mut HashSet<String>,
+    ) {
+        while flying.len() < POST_PARALLELISM {
+            let mut skip = blocked.clone();
+            for file in flying.iter() {
+                if let Some(ask) = file.asks.first() {
+                    skip.insert(ask.path.clone());
+                }
+            }
+            let Some(path) = next_file(opens, &skip) else {
+                break;
+            };
+            let prepared = self.prepare(opens, &[path.clone()]);
+            if prepared.is_empty() {
+                blocked.insert(path);
+                continue;
+            }
+            let tickets = prepared
+                .iter()
+                .map(|ask| {
+                    self.search
+                        .oracle_mut()
+                        .submit(document_question(&ask.state, &ask.proposition))
+                })
+                .collect();
+            flying.push(Flying {
+                asks: prepared,
+                tickets,
+            });
+        }
+    }
+
+    fn record_file(&mut self, opens: &mut [Open<U>], file: Flying) {
+        for (ask, ticket) in file.asks.into_iter().zip(file.tickets) {
+            let answer = self.search.oracle_mut().wait(ticket);
+            if !opens[ask.index].is_reading() {
+                continue;
+            }
+            match answer {
+                Ok(answer) => match parse_verdict(&answer.choice) {
+                    Ok(verdict) => {
+                        let step = self.step_for(&ask, verdict, &answer);
+                        opens[ask.index].record(step, verdict, answer.confidence, ask.excerpt);
+                    }
+                    Err(message) => opens[ask.index].fail(message),
+                },
+                Err(error) => opens[ask.index].fail(error.to_string()),
+            }
         }
     }
 
@@ -397,33 +482,6 @@ where
         prepared
     }
 
-    fn judge(&mut self, opens: &mut [Open<U>], prepared: Vec<Prepared>) {
-        let mut tickets = Vec::with_capacity(prepared.len());
-        for ask in &prepared {
-            let ticket = self
-                .search
-                .oracle_mut()
-                .submit(document_question(&ask.state, &ask.proposition));
-            tickets.push(ticket);
-        }
-        for (ask, ticket) in prepared.into_iter().zip(tickets) {
-            let answer = self.search.oracle_mut().wait(ticket);
-            if !opens[ask.index].is_reading() {
-                continue;
-            }
-            match answer {
-                Ok(answer) => match parse_verdict(&answer.choice) {
-                    Ok(verdict) => {
-                        let step = self.step_for(&ask, verdict, &answer);
-                        opens[ask.index].record(step, verdict, answer.confidence, ask.excerpt);
-                    }
-                    Err(message) => opens[ask.index].fail(message),
-                },
-                Err(error) => opens[ask.index].fail(error.to_string()),
-            }
-        }
-    }
-
     fn step_for(&self, ask: &Prepared, verdict: Verdict, answer: &Answer) -> Step {
         let step = Step {
             proposition: ask.proposition.clone(),
@@ -473,7 +531,7 @@ where
                         self.log_step(&step);
                         open.steps.push(step);
                         let ids = conflict_ids(open);
-                        let exhausted = open.no_leaves_left();
+                        let exhausted = open.decision_reached_the_end(&open.decisive_prefix());
                         open.settle(value, ids, exhausted);
                     }
                     Err(message) => open.fail(message),
@@ -512,30 +570,59 @@ impl<U: Universe> Open<U> {
     }
 
     fn action(&self) -> Action {
-        let witness = self
-            .judged
+        let judged = self.decisive_prefix();
+        let witness = judged
             .iter()
             .any(|item| is_witness(item.verdict, item.confidence));
-        let veto = self
-            .judged
+        let veto = judged
             .iter()
             .any(|item| vetoes(item.verdict, item.confidence));
-        let refutation = self
-            .judged
+        let refutation = judged
             .iter()
             .any(|item| is_refutation(item.verdict, item.confidence));
-        let remaining = self.next_leaf().is_some();
+        let exhausted = self.decision_reached_the_end(&judged);
         if witness && veto {
             Action::Escalate
         } else if witness {
-            Action::Settle(Value::True, ids_where(self, is_witness), !remaining)
+            Action::Settle(Value::True, ids_matching(&judged, is_witness), exhausted)
         } else if refutation {
-            Action::Settle(Value::False, ids_where(self, is_refutation), !remaining)
-        } else if remaining {
+            Action::Settle(
+                Value::False,
+                ids_matching(&judged, is_refutation),
+                exhausted,
+            )
+        } else if self.next_leaf().is_some() {
             Action::Continue
         } else {
             Action::Settle(Value::False, Vec::new(), true)
         }
+    }
+
+    /// Judgements in leaf order, through the first file that settles or escalates.
+    ///
+    /// A round may read later files at the same time. Those requests already
+    /// happened; they do not move the decision past the earlier file.
+    fn decisive_prefix(&self) -> Vec<&Judgement> {
+        let mut out = Vec::new();
+        for id in &self.leaves {
+            let Some(item) = self.judged.iter().find(|item| item.id == *id) else {
+                break;
+            };
+            out.push(item);
+            if stops(&out) {
+                break;
+            }
+        }
+        out
+    }
+
+    /// True when the decision used the last leaf, not when a speculative read
+    /// happened to judge files past that point.
+    fn decision_reached_the_end(&self, prefix: &[&Judgement]) -> bool {
+        let Some(last) = prefix.last() else {
+            return self.leaves.is_empty();
+        };
+        self.leaves.last().is_some_and(|id| id == &last.id)
     }
 }
 
@@ -593,16 +680,41 @@ fn read_body<U: Universe>(opens: &[Open<U>], path: &str, budget: usize) -> Resul
         .map_err(|err| err.to_string())
 }
 
-fn nominee_paths<U: Universe>(opens: &[Open<U>]) -> Vec<String> {
-    let mut nominees = Vec::new();
-    for open in opens.iter().filter(|open| open.is_reading()) {
-        if let Some(id) = open.next_leaf() {
-            if !nominees.iter().any(|path: &String| path == id) {
-                nominees.push(id.to_string());
+/// The next unread file in round-robin over each proposition's ranked leaves.
+///
+/// Heads come first, so every proposition's most relevant file is submitted
+/// before anyone's second file. `skip` is the set already in flight.
+fn next_file<U>(opens: &[Open<U>], skip: &HashSet<String>) -> Option<String> {
+    let mut cursors = vec![0usize; opens.len()];
+    loop {
+        let mut progressed = false;
+        for (open, cursor) in opens.iter().zip(cursors.iter_mut()) {
+            if !open.is_reading() {
+                continue;
+            }
+            let Some(id) = take_unseen(open, cursor) else {
+                continue;
+            };
+            progressed = true;
+            if !skip.contains(id) {
+                return Some(id.to_string());
             }
         }
+        if !progressed {
+            return None;
+        }
     }
-    nominees
+}
+
+fn take_unseen<'a, U>(open: &'a Open<U>, cursor: &mut usize) -> Option<&'a str> {
+    while *cursor < open.leaves.len() {
+        let id = open.leaves[*cursor].as_str();
+        *cursor += 1;
+        if !open.seen.contains(id) {
+            return Some(id);
+        }
+    }
+    None
 }
 
 fn document_question(state: &Json, proposition: &str) -> Classification {
@@ -640,9 +752,9 @@ fn escalation_question(proposition: &str, evidence: &[Json]) -> Classification {
     }
 }
 
-fn conflict_rows<U>(open: &Open<U>) -> Vec<Json> {
+fn conflict_rows<U: Universe>(open: &Open<U>) -> Vec<Json> {
     let mut rows = Vec::new();
-    for item in &open.judged {
+    for item in open.decisive_prefix() {
         if is_witness(item.verdict, item.confidence) || vetoes(item.verdict, item.confidence) {
             rows.push(json!({
                 "path": item.id,
@@ -655,17 +767,17 @@ fn conflict_rows<U>(open: &Open<U>) -> Vec<Json> {
     rows
 }
 
-fn conflict_ids<U>(open: &Open<U>) -> Vec<String> {
-    let mut ids = ids_where(open, is_witness);
-    ids.extend(ids_where(open, vetoes));
+fn conflict_ids<U: Universe>(open: &Open<U>) -> Vec<String> {
+    let judged = open.decisive_prefix();
+    let mut ids = ids_matching(&judged, is_witness);
+    ids.extend(ids_matching(&judged, vetoes));
     ids.sort();
     ids.dedup();
     ids
 }
 
-fn ids_where<U>(open: &Open<U>, pred: fn(Verdict, f64) -> bool) -> Vec<String> {
-    let mut ids: Vec<String> = open
-        .judged
+fn ids_matching(judged: &[&Judgement], pred: fn(Verdict, f64) -> bool) -> Vec<String> {
+    let mut ids: Vec<String> = judged
         .iter()
         .filter(|item| pred(item.verdict, item.confidence))
         .map(|item| item.id.clone())
@@ -673,6 +785,19 @@ fn ids_where<U>(open: &Open<U>, pred: fn(Verdict, f64) -> bool) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+fn stops(judged: &[&Judgement]) -> bool {
+    let witness = judged
+        .iter()
+        .any(|item| is_witness(item.verdict, item.confidence));
+    let veto = judged
+        .iter()
+        .any(|item| vetoes(item.verdict, item.confidence));
+    let refutation = judged
+        .iter()
+        .any(|item| is_refutation(item.verdict, item.confidence));
+    (witness && veto) || witness || refutation
 }
 
 fn stances_for(judged: &[Judgement], ids: &[String]) -> Vec<Stance> {
@@ -962,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn witness_stops_before_later_leaves() {
+    fn witness_ignores_a_later_file_read_in_the_same_round() {
         let (_scratch, fs) = scratch(&[("a.txt", "one"), ("b.txt", "two")]);
         let oracle = Scripted::new()
             .document("a.txt", "p", "entailed", 0.95)
@@ -973,11 +1098,14 @@ mod tests {
         assert_eq!(finding.value, Value::True);
         assert_eq!(finding.evidence.databases(), &["a.txt".to_string()]);
         assert!(!finding.exhausted);
-        assert_eq!(document_paths(&script, "p"), vec!["a.txt".to_string()]);
+        assert_eq!(
+            document_paths(&script, "p"),
+            vec!["a.txt".to_string(), "b.txt".to_string()]
+        );
     }
 
     #[test]
-    fn refutation_stops_before_later_leaves() {
+    fn refutation_ignores_a_later_witness_read_in_the_same_round() {
         let (_scratch, fs) = scratch(&[("a.txt", "one"), ("b.txt", "two")]);
         let oracle = Scripted::new()
             .document("a.txt", "p", "contradicted", 0.9)
@@ -988,7 +1116,41 @@ mod tests {
         assert_eq!(finding.value, Value::False);
         assert_eq!(finding.evidence.databases(), &["a.txt".to_string()]);
         assert!(!finding.exhausted);
-        assert_eq!(document_paths(&script, "p"), vec!["a.txt".to_string()]);
+        assert_eq!(
+            document_paths(&script, "p"),
+            vec!["a.txt".to_string(), "b.txt".to_string()]
+        );
+        assert_eq!(script.inner.borrow().escalations, 0);
+    }
+
+    #[test]
+    fn a_shared_next_file_reads_ahead_to_the_post_cap() {
+        let owned: Vec<(String, String)> = (0..20)
+            .map(|i| (format!("{i:02}.txt"), "x".to_string()))
+            .collect();
+        let pairs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(name, body)| (name.as_str(), body.as_str()))
+            .collect();
+        let (_scratch, fs) = scratch(&pairs);
+        let oracle = Scripted::new().document("00.txt", "p", "entailed", 0.95);
+        let (mut reader, script) = read_with(fs, oracle);
+        let first = reader.submit("p");
+        let second = reader.submit("p");
+        let found = reader.wait_many(&[first, second]);
+        assert!(found.iter().all(|finding| {
+            let finding = finding.as_ref().unwrap();
+            finding.value == Value::True
+                && finding.evidence.databases() == ["00.txt".to_string()]
+                && !finding.exhausted
+        }));
+        let paths = document_paths(&script, "p");
+        let mut unique = paths.clone();
+        unique.sort();
+        unique.dedup();
+        let want: Vec<String> = (0..16).map(|i| format!("{i:02}.txt")).collect();
+        assert_eq!(unique, want, "{paths:?}");
+        assert_eq!(paths.len(), 32, "{paths:?}");
     }
 
     #[test]
@@ -1100,7 +1262,7 @@ mod tests {
         assert_eq!(alpha.evidence.databases(), &["hi/a.txt".to_string()]);
         assert_eq!(
             document_paths(&script, "alpha"),
-            vec!["hi/a.txt".to_string()]
+            vec!["hi/a.txt".to_string(), "hi/shared.txt".to_string()]
         );
         assert_eq!(beta.value, Value::False);
         assert!(beta.exhausted);
