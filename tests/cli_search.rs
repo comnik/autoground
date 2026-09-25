@@ -59,3 +59,45 @@ fn heuristic_search_keeps_the_named_directory() {
     assert!(again_out.contains("backend/\n"), "{again_out}");
     assert!(!again_out.contains("api.py"), "{again_out}");
 }
+
+#[test]
+fn transcript_search_records_the_prompt() {
+    let dir =
+        std::env::temp_dir().join(format!("autoground-cli-transcript-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("chat_history.jsonl");
+    std::fs::write(
+        &path,
+        r#"{"type":"user","prompt_index":0,"content":[{"type":"text","text":"<user_query>\nWhere is the universe trait?\n</user_query>"}]}
+{"type":"assistant","content":"","tool_calls":[{"id":"c1","name":"read_file","arguments":"{\"target_file\":\"src/universe/mod.rs\"}"}]}
+{"type":"tool_result","tool_call_id":"c1","content":"pub trait Universe"}
+"#,
+    )
+    .unwrap();
+    let out = bin()
+        .args([
+            "search",
+            "universe trait",
+            "--transcript",
+            path.to_str().unwrap(),
+            "--judge",
+            "heuristic",
+        ])
+        .output()
+        .expect("run autoground");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={stderr} stdout={stdout}"
+    );
+    let trace = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("trace: "))
+        .expect("trace path");
+    let body = std::fs::read_to_string(trace).unwrap();
+    assert!(body.contains("Where is the universe trait?"), "{body}");
+    assert!(body.contains("read_file src/universe/mod.rs"), "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

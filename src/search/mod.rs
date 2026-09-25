@@ -858,6 +858,7 @@ mod tests {
     use crate::navigator::confidence::SUPPORT;
     use crate::oracle::{Answer, Oracle, OracleError, QuestionKind, Ticket as OracleTicket};
     use crate::universe::fs::Filesystem;
+    use crate::universe::Transcript;
 
     struct Script {
         labels: HashMap<String, (String, f64)>,
@@ -1091,6 +1092,51 @@ mod tests {
         assert!(filter.get("frontend/app.py").is_none());
         assert!(view.bytes_before > view.bytes_after);
         assert!(view.bytes_after > 0);
+    }
+
+    #[test]
+    fn pruning_a_loop_drops_its_calls_and_results() {
+        let jsonl = r#"
+{"type":"user","prompt_index":0,"content":[{"type":"text","text":"<user_query>\nWhere is the universe trait?\n</user_query>"}]}
+{"type":"assistant","content":"","tool_calls":[{"id":"c1","name":"read_file","arguments":"{\"target_file\":\"src/universe/mod.rs\"}"}]}
+{"type":"tool_result","tool_call_id":"c1","content":"pub trait Universe"}
+{"type":"assistant","content":"","tool_calls":[{"id":"c2","name":"list_dir","arguments":"{\"target_directory\":\"src/search\"}"}]}
+{"type":"tool_result","tool_call_id":"c2","content":"mod.rs"}
+"#;
+        let universe = Transcript::parse(jsonl).unwrap();
+        let (view, oracle) = search_one(
+            universe,
+            Script::new(vec![
+                ("p0".into(), "keep".into(), 0.95),
+                ("p0/c0".into(), "prune".into(), 0.99),
+                ("p0/c1".into(), "keep".into(), 0.95),
+            ]),
+            "universe trait",
+            DEFAULT_BUDGET_BYTES,
+        );
+        let cycle = oracle
+            .log
+            .iter()
+            .find(|classification| classification.instructions["path"] == "p0/c0")
+            .unwrap();
+        let listing = cycle.instructions["listing"].as_str().unwrap();
+        assert!(
+            listing.contains("Where is the universe trait?"),
+            "{listing}"
+        );
+        assert!(
+            listing.contains("read_file src/universe/mod.rs"),
+            "{listing}"
+        );
+        assert_eq!(
+            ids(&view),
+            vec![
+                "p0".to_string(),
+                "p0/c1".to_string(),
+                "p0/c1/00-call-list_dir".to_string(),
+                "p0/c1/01-result-list_dir".to_string(),
+            ]
+        );
     }
 
     #[test]

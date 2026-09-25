@@ -17,7 +17,7 @@ use autoground::search::trace::UsageRecord;
 use autoground::search::{
     present_search, window_lines, Search, SearchTraceFile, DEFAULT_BUDGET_BYTES,
 };
-use autoground::universe::{Filesystem, Universe};
+use autoground::universe::{Filesystem, Transcript, Universe};
 use autoground::{compile, parse, verbalize_source};
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -86,6 +86,7 @@ enum Commands {
     /// Examples:
     ///   autoground search "the codebase has a frontend" --repo examples/toy-layered
     ///   autoground search "frontend" --judge heuristic --repo examples/toy-layered
+    ///   autoground search "the agent read the universe trait" --transcript chat_history.jsonl
     ///   autoground search --inspect /tmp/autoground/trace-….jsonl
     Search {
         /// Natural-language proposition.
@@ -94,6 +95,10 @@ enum Commands {
         /// Repository to search. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// Coding-agent transcript (`chat_history.jsonl`, or a session directory).
+        /// When set, this is the universe instead of `--repo`.
+        #[arg(long, value_name = "PATH")]
+        transcript: Option<PathBuf>,
         /// Byte budget for one directory-listing state sent to the oracle.
         #[arg(long, default_value_t = DEFAULT_BUDGET_BYTES)]
         budget: usize,
@@ -116,6 +121,7 @@ enum Commands {
     /// Examples:
     ///   autoground read "the codebase has a frontend" --repo examples/toy-layered
     ///   autoground read "frontend" --judge heuristic --repo examples/toy-layered
+    ///   autoground read "the agent read the universe trait" --transcript chat_history.jsonl
     ///   autoground read --inspect /tmp/autoground/trace-….jsonl
     Read {
         /// Natural-language proposition.
@@ -124,6 +130,10 @@ enum Commands {
         /// Repository to read. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// Coding-agent transcript (`chat_history.jsonl`, or a session directory).
+        /// When set, this is the universe instead of `--repo`.
+        #[arg(long, value_name = "PATH")]
+        transcript: Option<PathBuf>,
         /// Render budget in bytes for one file body.
         #[arg(long, default_value_t = DEFAULT_BUDGET_BYTES)]
         budget: usize,
@@ -176,6 +186,7 @@ fn main() -> ExitCode {
         Commands::Search {
             proposition,
             repo,
+            transcript,
             budget,
             judge,
             full,
@@ -183,6 +194,7 @@ fn main() -> ExitCode {
         } => match search_cmd(
             proposition.as_deref(),
             &repo,
+            transcript.as_ref(),
             budget,
             judge,
             full,
@@ -197,6 +209,7 @@ fn main() -> ExitCode {
         Commands::Read {
             proposition,
             repo,
+            transcript,
             budget,
             judge,
             full,
@@ -204,6 +217,7 @@ fn main() -> ExitCode {
         } => match read_cmd(
             proposition.as_deref(),
             &repo,
+            transcript.as_ref(),
             budget,
             judge,
             full,
@@ -221,6 +235,7 @@ fn main() -> ExitCode {
 fn search_cmd(
     proposition: Option<&str>,
     repo: &Path,
+    transcript: Option<&PathBuf>,
     budget: usize,
     judge: JudgeKind,
     full: bool,
@@ -235,16 +250,16 @@ fn search_cmd(
     let proposition = proposition.expect("proposition required");
     let started_at = std::time::SystemTime::now();
     let log = Log::create()?;
-    let universe = Filesystem::at_root(repo)?;
-    let searched = match judge {
-        JudgeKind::Heuristic => {
-            let oracle = HeuristicOracle::new(universe.clone());
-            run_search(universe, oracle, proposition, budget, &log)?
-        }
-        JudgeKind::Jev => run_search(universe, JevOracle::from_env()?, proposition, budget, &log)?,
+    let (repo_name, searched) = if let Some(path) = transcript {
+        let universe = Transcript::open(path)?;
+        let searched = run_judged_search(universe, judge, proposition, budget, &log)?;
+        (path_label(path, "transcript"), searched)
+    } else {
+        let universe = Filesystem::at_root(repo)?;
+        let searched = run_judged_search(universe, judge, proposition, budget, &log)?;
+        (path_label(repo, "repo"), searched)
     };
     let ended_at = std::time::SystemTime::now();
-    let repo_name = repo.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
     let file = SearchTraceFile {
         kind: autoground::search::trace::TRACE_KIND.to_string(),
         proposition: proposition.to_string(),
@@ -276,8 +291,31 @@ struct Searched {
     failure: Option<String>,
 }
 
-fn run_search<O: Oracle>(
-    universe: Filesystem,
+fn path_label(path: &Path, fallback: &str) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn run_judged_search<U: Universe + Clone>(
+    universe: U,
+    judge: JudgeKind,
+    proposition: &str,
+    budget: usize,
+    log: &Log,
+) -> Result<Searched, Box<dyn std::error::Error>> {
+    match judge {
+        JudgeKind::Heuristic => {
+            let oracle = HeuristicOracle::new(universe.clone());
+            run_search(universe, oracle, proposition, budget, log)
+        }
+        JudgeKind::Jev => run_search(universe, JevOracle::from_env()?, proposition, budget, log),
+    }
+}
+
+fn run_search<U: Universe + Clone, O: Oracle>(
+    universe: U,
     oracle: O,
     proposition: &str,
     budget: usize,
@@ -312,6 +350,7 @@ fn run_search<O: Oracle>(
 fn read_cmd(
     proposition: Option<&str>,
     repo: &Path,
+    transcript: Option<&PathBuf>,
     budget: usize,
     judge: JudgeKind,
     full: bool,
@@ -326,16 +365,16 @@ fn read_cmd(
     let proposition = proposition.expect("proposition required");
     let started_at = std::time::SystemTime::now();
     let log = Log::create()?;
-    let universe = Filesystem::at_root(repo)?;
-    let read = match judge {
-        JudgeKind::Heuristic => {
-            let oracle = HeuristicOracle::new(universe.clone());
-            run_read(universe, oracle, proposition, budget, &log)?
-        }
-        JudgeKind::Jev => run_read(universe, JevOracle::from_env()?, proposition, budget, &log)?,
+    let (repo_name, read) = if let Some(path) = transcript {
+        let universe = Transcript::open(path)?;
+        let read = run_judged_read(universe, judge, proposition, budget, &log)?;
+        (path_label(path, "transcript"), read)
+    } else {
+        let universe = Filesystem::at_root(repo)?;
+        let read = run_judged_read(universe, judge, proposition, budget, &log)?;
+        (path_label(repo, "repo"), read)
     };
     let ended_at = std::time::SystemTime::now();
-    let repo_name = repo.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
     let file = ReadTraceFile {
         kind: autoground::read::trace::TRACE_KIND.to_string(),
         proposition: proposition.to_string(),
@@ -373,8 +412,24 @@ struct ReadOutcome {
     failure: Option<String>,
 }
 
-fn run_read<O: Oracle>(
-    universe: Filesystem,
+fn run_judged_read<U: Universe + Clone>(
+    universe: U,
+    judge: JudgeKind,
+    proposition: &str,
+    budget: usize,
+    log: &Log,
+) -> Result<ReadOutcome, Box<dyn std::error::Error>> {
+    match judge {
+        JudgeKind::Heuristic => {
+            let oracle = HeuristicOracle::new(universe.clone());
+            run_read(universe, oracle, proposition, budget, log)
+        }
+        JudgeKind::Jev => run_read(universe, JevOracle::from_env()?, proposition, budget, log),
+    }
+}
+
+fn run_read<U: Universe + Clone, O: Oracle>(
+    universe: U,
     oracle: O,
     proposition: &str,
     budget: usize,
