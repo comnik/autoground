@@ -5,9 +5,7 @@
 //! pending proposition together: summaries are built once, and each proposition
 //! adds one yes/no question for every summarizable database except the root. The
 //! question asks whether that subtree is irrelevant to the proposition. The
-//! shared state is the child-name tree. Each question also carries that
-//! database's [`Universe::summary`]: a directory listing on a repository, the
-//! prompt text on a transcript. The oracle batches questions that share a
+//! shared state is the child-name tree. The oracle batches questions that share a
 //! state. A summarizable database drops when its own answer is irrelevant at or
 //! above [`PRUNE_FLOOR`]. What remains is a clone of the universe whose window
 //! is the kept databases and the readable databases under them. Bodies are not judged.
@@ -289,26 +287,6 @@ where
                 return;
             }
         };
-        let mut listings: HashMap<String, String> = HashMap::new();
-        for name in &names {
-            if !name.summarizable {
-                continue;
-            }
-            match self.universe.summary(&name.path) {
-                Ok(Some(listing)) => {
-                    listings.insert(name.path.clone(), listing);
-                }
-                Ok(None) => {
-                    self.reject_all(pending, format!("{} has no summary", name.path));
-                    return;
-                }
-                Err(error) => {
-                    self.reject_all(pending, error.to_string());
-                    return;
-                }
-            }
-        }
-
         let mut steps: HashMap<Ticket, Vec<SearchStep>> = HashMap::new();
         let mut asks = Vec::new();
         for (index, group) in groups.iter().enumerate() {
@@ -323,12 +301,10 @@ where
                     if !name.summarizable {
                         continue;
                     }
-                    let listing = listings.get(&name.path).map(String::as_str).unwrap_or("");
                     let oracle_ticket = self.oracle.submit(irrelevant_question(
                         &group.state,
                         &name.path,
                         &item.proposition,
-                        listing,
                     ));
                     asks.push(Ask {
                         search_ticket: item.ticket,
@@ -752,19 +728,13 @@ fn group_for(groups: &[Group], name: &ListedName) -> usize {
         .unwrap_or(0)
 }
 
-fn irrelevant_question(
-    state: &Json,
-    path: &str,
-    proposition: &str,
-    listing: &str,
-) -> Classification {
+fn irrelevant_question(state: &Json, path: &str, proposition: &str) -> Classification {
     let name = path.rsplit('/').next().unwrap_or(path);
     Classification::noul(
         state.clone(),
         json!({
             "path": path,
             "name": name,
-            "listing": listing,
             "proposition": proposition,
             "question": IRRELEVANT_QUESTION,
         }),
@@ -774,7 +744,7 @@ fn irrelevant_question(
 
 /// `signal` is how likely it is that information about the proposition is
 /// under the directory: one minus that directory's own "irrelevant" answer.
-/// The listing in the question's state is already the subtree. The directory
+/// The child-name tree in the question's state is the subtree. The directory
 /// drops when that irrelevance is at least [`PRUNE_FLOOR`].
 fn decision_from_signal(id: &str, signal: f64) -> Decision {
     Decision {
@@ -1022,7 +992,6 @@ mod tests {
     #[test]
     fn kept_directory_and_its_files_are_the_window() {
         let universe = Filesystem::at_root("examples/toy-layered").unwrap();
-        let frontend_listing = universe.summary("frontend").unwrap().unwrap();
         let (view, oracle) = search_one(
             universe,
             Script::new(toy(&[("frontend", "keep", 0.95)])),
@@ -1053,11 +1022,7 @@ mod tests {
             .iter()
             .find(|classification| classification.instructions["path"] == "frontend")
             .unwrap();
-        assert_eq!(frontend.instructions["listing"], frontend_listing);
-        assert!(
-            frontend_listing.starts_with("frontend/\n"),
-            "{frontend_listing}"
-        );
+        assert!(frontend.instructions.get("listing").is_none());
         assert_eq!(
             ids(&view),
             vec![
@@ -1119,15 +1084,7 @@ mod tests {
             .iter()
             .find(|classification| classification.instructions["path"] == "p0/c0")
             .unwrap();
-        let listing = cycle.instructions["listing"].as_str().unwrap();
-        assert!(
-            listing.contains("Where is the universe trait?"),
-            "{listing}"
-        );
-        assert!(
-            listing.contains("read_file src/universe/mod.rs"),
-            "{listing}"
-        );
+        assert!(cycle.instructions.get("listing").is_none());
         assert_eq!(
             ids(&view),
             vec![

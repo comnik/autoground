@@ -1,0 +1,41 @@
+(sense calls "{caller} calls {callee}")
+(sense contains "{X} contains {Y}")
+(sense entails "{X} entails {Y}")
+(sense contradicts "{X} entails {Y}")
+(sense property "{X} has property {Y}")
+
+;;
+
+(name Log)
+
+(name Oracle)
+("An Oracle is a general classifier leveraging a system-one model like jev.")
+
+(name Proposition)
+
+(name Database)
+("A database is serializable context that can entail or contradict propositions.")
+(or
+  (entails Database Proposition)
+  (contradicts Database Proposition))
+
+(name Universe)
+
+(name Search)
+
+;;
+
+(and
+  ("All major components record structured events in the unified log.")
+  (calls Oracle Log)
+  (calls Universe Log)
+  (calls Search Log))
+
+(not (calls Universe Oracle))
+
+(and
+  ("Search refines a Universe into a ranked view of relevant databases.")
+  (calls Search Universe)
+  (calls Search Oracle))
+
+(contains Universe Database)
