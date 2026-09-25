@@ -158,7 +158,7 @@ pub struct JevOracle<T: Transport = UreqTransport> {
     requests: u64,
     token_requests: u64,
     questions: u64,
-    latencies: Vec<Duration>,
+    round_trips: Vec<super::Flight>,
     last_exchanges: Vec<OracleExchange>,
     /// Production HTTP overlaps posts. Tests post inline so a flush is deterministic.
     parallel: bool,
@@ -214,7 +214,7 @@ impl<T: Transport> JevOracle<T> {
             requests: 0,
             token_requests: 0,
             questions: 0,
-            latencies: Vec::new(),
+            round_trips: Vec::new(),
             last_exchanges: Vec::new(),
             parallel: false,
             inflight: 0,
@@ -258,9 +258,9 @@ impl<T: Transport> JevOracle<T> {
         }
         self.requests += 1;
         self.questions += questions as u64;
-        if let (Some(start), Some(end)) = (ex.started_at, ex.ended_at) {
-            if let Ok(d) = end.duration_since(start) {
-                self.latencies.push(d);
+        if let (Some(started), Some(ended)) = (ex.started_at, ex.ended_at) {
+            if ended >= started {
+                self.round_trips.push(super::Flight { started, ended });
             }
         }
     }
@@ -449,6 +449,11 @@ impl<T: Transport> Oracle for JevOracle<T> {
     }
 
     fn usage(&self) -> Usage {
+        let samples: Vec<Duration> = self
+            .round_trips
+            .iter()
+            .filter_map(|flight| flight.ended.duration_since(flight.started).ok())
+            .collect();
         Usage {
             spend_usd: self.spent_usd,
             input_tokens: self.input_tokens,
@@ -459,8 +464,16 @@ impl<T: Transport> Oracle for JevOracle<T> {
                 self.input_tokens as f64
                     / (self.token_requests as f64 * CONTEXT_TOKEN_BUDGET as f64),
             ),
-            latency: super::latency_percentiles(&self.latencies),
+            latency: super::latency_percentiles(&samples),
         }
+    }
+
+    fn flights(&self) -> &[super::Flight] {
+        &self.round_trips
+    }
+
+    fn flight_limit(&self) -> Option<usize> {
+        Some(POST_PARALLELISM)
     }
 }
 
@@ -868,6 +881,8 @@ mod tests {
             (u.fill_factor.unwrap() - 4000.0 / (2.0 * CONTEXT_TOKEN_BUDGET as f64)).abs() < 1e-12
         );
         assert!(u.latency.is_some());
+        assert_eq!(o.flights().len(), 2);
+        assert_eq!(o.flight_limit(), Some(POST_PARALLELISM));
     }
 
     #[test]

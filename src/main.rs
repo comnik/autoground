@@ -4,13 +4,14 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use autoground::log::Log;
-use autoground::oracle::{HeuristicOracle, JevOracle, Oracle, Usage};
+use autoground::oracle::{Flight, HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::plan::Plan;
 use autoground::read::{present_read, ReadTraceFile, Reader};
+use autoground::report::summary::print_run_summary;
 use autoground::search::trace::SearchStep;
 use autoground::search::trace::UsageRecord;
 use autoground::search::{
-    format_usage, present_search, window_lines, Search, SearchTraceFile, DEFAULT_BUDGET_BYTES,
+    present_search, window_lines, Search, SearchTraceFile, DEFAULT_BUDGET_BYTES,
 };
 use autoground::universe::{Filesystem, Transcript, Universe};
 use autoground::{compile, parse, verbalize_proposition, verbalize_source, Proposition};
@@ -62,10 +63,10 @@ enum Commands {
     /// Judge each claim in a model.
     ///
     /// Plans the model, reads every atomic sentence against the repository, and
-    /// combines those truth values with `and`, `or`, and `not`. One line per
-    /// claim. On a terminal each claim shows a spinner and whether the run is
-    /// planning, searching, or reading. A session log is written under
-    /// `/tmp/autoground/`.
+    /// combines those truth values with `and`, `or`, and `not`. On a terminal
+    /// each claim shows a spinner while the run is planning, searching, or
+    /// reading, and the finished view is the model file with true and false
+    /// claims marked. A session log is written under `/tmp/autoground/`.
     ///
     /// Examples:
     ///   autoground run examples/diagram.ag --repo .
@@ -501,6 +502,7 @@ fn run_cmd(
     budget: usize,
     judge: JudgeKind,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let started = std::time::Instant::now();
     let live = if std::io::stdout().is_terminal() {
         Some(autoground::report::run::Live::open()?)
     } else {
@@ -509,7 +511,10 @@ fn run_cmd(
     if let Some(live) = &live {
         live.show_planning()?;
     }
-    let planned = load_plan(input)?;
+    let src = model_source(input)?;
+    let program = parse(&src)?;
+    let planned = Plan::of(&compile(&program)?);
+    let claim_spans = program.claim_spans();
     let log = Log::create()?;
     if let Some(live) = &live {
         if !planned.atoms.is_empty() {
@@ -522,6 +527,8 @@ fn run_cmd(
         Judged {
             values: Vec::new(),
             usage: Usage::default(),
+            flights: Vec::new(),
+            flight_limit: None,
         }
     } else if let Some(path) = transcript {
         let universe = Transcript::open(path)?;
@@ -537,6 +544,8 @@ fn run_cmd(
     log.clear_hook();
     let atom_values = judged.values;
     let usage = judged.usage;
+    let flights = judged.flights;
+    let flight_limit = judged.flight_limit;
     let claim_values = planned.evaluate(&atom_values);
     let claims: Vec<_> = planned
         .claims
@@ -556,15 +565,26 @@ fn run_cmd(
             "usage": UsageRecord::from_usage(&usage),
         }),
     )?;
-    if let Some(live) = &live {
-        live.finish(&claim_values)?;
+    let true_count = claim_values
+        .iter()
+        .filter(|value| **value == autoground::Value::True)
+        .count();
+    if let Some(live) = live {
+        live.finish(&src, &claim_spans, &claim_values)?;
     } else {
         for (claim, value) in planned.claims.iter().zip(&claim_values) {
             println!("{:<7}  {}", value.to_string(), claim.verbalized);
         }
     }
-    println!("({})", format_usage(&usage));
-    println!("trace: {}", log.path().display());
+    print_run_summary(
+        &usage,
+        &flights,
+        flight_limit,
+        true_count,
+        claim_values.len(),
+        started.elapsed(),
+        log.path(),
+    )?;
     Ok(())
 }
 
@@ -577,6 +597,8 @@ fn load_plan(input: &str) -> Result<Plan, Box<dyn std::error::Error>> {
 struct Judged {
     values: Vec<autoground::Value>,
     usage: Usage,
+    flights: Vec<Flight>,
+    flight_limit: Option<usize>,
 }
 
 fn read_atoms<U: Universe + Clone>(
@@ -612,8 +634,15 @@ fn read_with<U: Universe + Clone, O: Oracle>(
     for result in reader.wait_many(&tickets) {
         values.push(result?.value);
     }
+    let flights = reader.flights().to_vec();
+    let flight_limit = reader.flight_limit();
     let usage = reader.usage();
-    Ok(Judged { values, usage })
+    Ok(Judged {
+        values,
+        usage,
+        flights,
+        flight_limit,
+    })
 }
 
 /// Read `input` as a `.ag` file when it names one, otherwise treat it as source.

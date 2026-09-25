@@ -82,7 +82,21 @@ fn heuristic_run_combines_and_or_and_not() {
         ]
     );
     assert!(lines[4].starts_with("(requests="), "{stdout}");
-    let path = lines[5].strip_prefix("trace: ").expect("trace path");
+    assert!(
+        !lines[4].contains("p50="),
+        "percentiles belong on the latency chart, got {}",
+        lines[4]
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("3/4 claims validated in ")),
+        "{stdout}"
+    );
+    let path = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("trace: "))
+        .expect("trace path");
     assert!(path.starts_with("/tmp/autoground/trace-"), "{path}");
     let body = std::fs::read_to_string(path).unwrap();
     assert!(body.contains("\"kind\":\"run\""), "{body}");

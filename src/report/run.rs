@@ -1,15 +1,18 @@
 //! Live view of `autoground run` on a terminal.
 //!
 //! The view watches the shared log. Search steps and read steps move each
-//! claim between planning, search, and read. Piped output never draws this.
+//! claim between planning, search, and read. When the run finishes, the view
+//! is the model file: true claims carry a quiet mark, false claims a red one.
+//! Piped output never draws this.
 
 use std::collections::HashMap;
 use std::io::{self, stdout, Write};
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use crossterm::{
     cursor, execute, queue,
-    style::{Color, Print, ResetColor, SetForegroundColor},
+    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType},
 };
 use serde_json::Value as Json;
@@ -43,10 +46,13 @@ enum Tone {
     Planning,
     Search,
     Read,
-    True,
-    False,
-    Unknown,
     Rule,
+    Source,
+    TrueMark,
+    FalseMark,
+    FalseText,
+    UnknownMark,
+    UnknownText,
 }
 
 struct ClaimWatch {
@@ -55,7 +61,6 @@ struct ClaimWatch {
     detail: String,
     tick: usize,
     active: bool,
-    value: Option<Value>,
 }
 
 enum Mode {
@@ -72,11 +77,41 @@ struct RunView {
     claims: Vec<ClaimWatch>,
     /// Sentence → claims that mention it.
     atom_claims: HashMap<String, Vec<usize>>,
+    done: Vec<Row>,
 }
 
-struct Row {
+#[derive(Clone)]
+struct Piece {
     text: String,
     tone: Tone,
+}
+
+#[derive(Clone)]
+struct Row {
+    pieces: Vec<Piece>,
+}
+
+impl Row {
+    #[cfg(test)]
+    fn plain(&self) -> String {
+        self.pieces
+            .iter()
+            .map(|piece| piece.text.as_str())
+            .collect()
+    }
+}
+
+fn piece(text: impl Into<String>, tone: Tone) -> Piece {
+    Piece {
+        text: text.into(),
+        tone,
+    }
+}
+
+fn row_one(text: impl Into<String>, tone: Tone) -> Row {
+    Row {
+        pieces: vec![piece(text, tone)],
+    }
 }
 
 impl RunView {
@@ -88,6 +123,7 @@ impl RunView {
             tick: 0,
             claims: Vec::new(),
             atom_claims: HashMap::new(),
+            done: Vec::new(),
         }
     }
 
@@ -101,7 +137,6 @@ impl RunView {
                 detail: String::new(),
                 tick: 0,
                 active: true,
-                value: None,
             })
             .collect();
         self.atom_claims = index_atoms(plan);
@@ -170,15 +205,11 @@ impl RunView {
         self.mode = Mode::Working;
     }
 
-    fn finish(&mut self, values: &[Value]) {
+    fn finish(&mut self, source: &str, spans: &[Range<usize>], values: &[Value]) {
         self.phase = Phase::Done;
         self.detail.clear();
         self.mode = Mode::Done;
-        for (claim, value) in self.claims.iter_mut().zip(values) {
-            claim.value = Some(*value);
-            claim.phase = Phase::Done;
-            claim.active = false;
-        }
+        self.done = source_rows(source, spans, values);
     }
 
     fn rows(&self, width: usize) -> Vec<Row> {
@@ -194,23 +225,12 @@ impl RunView {
                 rows.push(status_row(self.phase, &self.detail, width));
                 rows
             }
-            Mode::Done => self
-                .claims
-                .iter()
-                .map(|claim| claim_row(claim, width))
-                .collect(),
+            Mode::Done => self.done.clone(),
         }
     }
 }
 
 fn claim_row(claim: &ClaimWatch, width: usize) -> Row {
-    if let Some(value) = claim.value {
-        // The final frame is not redrawn, so a long claim may wrap.
-        return Row {
-            text: format!("{:<7}  {}", value.to_string(), claim.verbalized),
-            tone: tone_of_value(value),
-        };
-    }
     let mark = if claim.active {
         SPIN[claim.tick % SPIN.len()]
     } else {
@@ -228,10 +248,7 @@ fn claim_row(claim: &ClaimWatch, width: usize) -> Row {
         let pad = room - claim_text.chars().count() - detail.chars().count();
         format!("{left}{claim_text}{}{detail}", " ".repeat(pad))
     };
-    Row {
-        text,
-        tone: tone_of_phase(claim.phase),
-    }
+    row_one(text, tone_of_phase(claim.phase))
 }
 
 fn status_row(phase: Phase, detail: &str, width: usize) -> Row {
@@ -246,10 +263,7 @@ fn status_row(phase: Phase, detail: &str, width: usize) -> Row {
         tail = fit(&tail, width.saturating_sub(label_len));
     }
     let fill = width.saturating_sub(label_len + tail.chars().count());
-    Row {
-        text: format!("{label}{}{tail}", "─".repeat(fill)),
-        tone: Tone::Rule,
-    }
+    row_one(format!("{label}{}{tail}", "─".repeat(fill)), Tone::Rule)
 }
 
 fn tone_of_phase(phase: Phase) -> Tone {
@@ -261,24 +275,20 @@ fn tone_of_phase(phase: Phase) -> Tone {
     }
 }
 
-fn tone_of_value(value: Value) -> Tone {
-    match value {
-        Value::True => Tone::True,
-        Value::False => Tone::False,
-        Value::Unknown => Tone::Unknown,
-    }
-}
-
-fn tone_color(tone: Tone) -> Color {
-    match tone {
-        Tone::Planning => Color::DarkGrey,
+fn tone_color(tone: Tone) -> Option<Color> {
+    Some(match tone {
+        Tone::Planning | Tone::Rule => Color::DarkGrey,
         Tone::Search => Color::Cyan,
         Tone::Read => Color::Blue,
-        Tone::True => Color::Green,
-        Tone::False => Color::Red,
-        Tone::Unknown => Color::Yellow,
-        Tone::Rule => Color::DarkGrey,
-    }
+        Tone::TrueMark => Color::DarkGreen,
+        Tone::FalseMark | Tone::FalseText => Color::Red,
+        Tone::UnknownMark | Tone::UnknownText => Color::Yellow,
+        Tone::Source => return None,
+    })
+}
+
+fn tone_is_bold(tone: Tone) -> bool {
+    matches!(tone, Tone::FalseMark | Tone::FalseText)
 }
 
 fn search_detail(event: &Json) -> String {
@@ -340,6 +350,139 @@ fn fit(text: &str, width: usize) -> String {
     out
 }
 
+struct Mark {
+    span: Range<usize>,
+    value: Value,
+}
+
+fn source_rows(source: &str, spans: &[Range<usize>], values: &[Value]) -> Vec<Row> {
+    let marks: Vec<Mark> = spans
+        .iter()
+        .zip(values)
+        .filter(|(span, _)| span.start < span.end && span.end <= source.len())
+        .map(|(span, value)| Mark {
+            span: span.clone(),
+            value: *value,
+        })
+        .collect();
+    line_ranges(source)
+        .into_iter()
+        .map(|(lo, hi)| source_line(source, lo, hi, &marks))
+        .collect()
+}
+
+fn line_ranges(source: &str) -> Vec<(usize, usize)> {
+    if source.is_empty() {
+        return Vec::new();
+    }
+    let bytes = source.as_bytes();
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            let mut end = index;
+            if end > start && bytes[end - 1] == b'\r' {
+                end -= 1;
+            }
+            ranges.push((start, end));
+            start = index + 1;
+        }
+    }
+    if start < source.len() {
+        ranges.push((start, source.len()));
+    }
+    ranges
+}
+
+fn source_line(source: &str, lo: usize, hi: usize, marks: &[Mark]) -> Row {
+    let hit = overlapping(marks, lo, hi);
+    let mut pieces = vec![gutter(&hit, lo, hi)];
+    pieces.extend(content_pieces(source, lo, hi, &hit));
+    Row { pieces }
+}
+
+fn overlapping<'a>(marks: &'a [Mark], lo: usize, hi: usize) -> Vec<&'a Mark> {
+    marks
+        .iter()
+        .filter(|mark| mark.span.start < hi && mark.span.end > lo)
+        .collect()
+}
+
+fn rank(value: Value) -> u8 {
+    match value {
+        Value::False => 2,
+        Value::Unknown => 1,
+        Value::True => 0,
+    }
+}
+
+fn gutter(marks: &[&Mark], lo: usize, hi: usize) -> Piece {
+    let Some(strongest) = marks
+        .iter()
+        .map(|mark| mark.value)
+        .max_by_key(|value| rank(*value))
+    else {
+        return piece("  ", Tone::Source);
+    };
+    let opens = marks
+        .iter()
+        .any(|mark| mark.value == strongest && mark.span.start >= lo && mark.span.start < hi);
+    let (mark, tone) = match strongest {
+        Value::False if opens => ('✗', Tone::FalseMark),
+        Value::False => ('▌', Tone::FalseMark),
+        Value::Unknown if opens => ('?', Tone::UnknownMark),
+        Value::Unknown => ('·', Tone::UnknownMark),
+        Value::True if opens => ('✓', Tone::TrueMark),
+        Value::True => return piece("  ", Tone::Source),
+    };
+    piece(format!("{mark} "), tone)
+}
+
+fn content_pieces(source: &str, lo: usize, hi: usize, marks: &[&Mark]) -> Vec<Piece> {
+    if lo >= hi {
+        return Vec::new();
+    }
+    let mut cuts = vec![lo, hi];
+    for mark in marks {
+        if (lo..hi).contains(&mark.span.start) && source.is_char_boundary(mark.span.start) {
+            cuts.push(mark.span.start);
+        }
+        if (lo..hi).contains(&mark.span.end) && source.is_char_boundary(mark.span.end) {
+            cuts.push(mark.span.end);
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut pieces = Vec::new();
+    for pair in cuts.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        if start >= end || !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+            continue;
+        }
+        let text = &source[start..end];
+        if text.is_empty() {
+            continue;
+        }
+        let tone = marks
+            .iter()
+            .filter(|mark| mark.span.start <= start && mark.span.end >= end)
+            .map(|mark| mark.value)
+            .max_by_key(|value| rank(*value))
+            .map(text_tone)
+            .unwrap_or(Tone::Source);
+        pieces.push(piece(text, tone));
+    }
+    pieces
+}
+
+fn text_tone(value: Value) -> Tone {
+    match value {
+        Value::False => Tone::FalseText,
+        Value::Unknown => Tone::UnknownText,
+        Value::True => Tone::Source,
+    }
+}
+
 struct Body {
     view: RunView,
     drawn: u16,
@@ -354,14 +497,22 @@ impl Body {
             queue!(out, cursor::MoveToColumn(0), cursor::MoveUp(self.drawn))?;
         }
         for row in &rows {
-            queue!(
-                out,
-                Clear(ClearType::CurrentLine),
-                SetForegroundColor(tone_color(row.tone)),
-                Print(&row.text),
-                ResetColor,
-                Print("\r\n")
-            )?;
+            queue!(out, Clear(ClearType::CurrentLine))?;
+            for piece in &row.pieces {
+                if tone_is_bold(piece.tone) {
+                    queue!(out, SetAttribute(Attribute::Bold))?;
+                }
+                if let Some(color) = tone_color(piece.tone) {
+                    queue!(out, SetForegroundColor(color))?;
+                }
+                queue!(
+                    out,
+                    Print(&piece.text),
+                    ResetColor,
+                    SetAttribute(Attribute::Reset)
+                )?;
+            }
+            queue!(out, Print("\r\n"))?;
         }
         let extra = (self.drawn as usize).saturating_sub(rows.len());
         for _ in 0..extra {
@@ -415,9 +566,14 @@ impl Live {
         let _ = body.draw();
     }
 
-    pub fn finish(&self, values: &[Value]) -> io::Result<()> {
+    pub fn finish(
+        &self,
+        source: &str,
+        claim_spans: &[Range<usize>],
+        values: &[Value],
+    ) -> io::Result<()> {
         let mut body = self.lock();
-        body.view.finish(values);
+        body.view.finish(source, claim_spans, values);
         body.draw()
     }
 
@@ -452,19 +608,13 @@ mod tests {
     use crate::compile;
     use crate::syntax::parse;
 
-    fn sample() -> Plan {
-        Plan::of(
-            &compile(
-                &parse(
-                    r#"
+    const SAMPLE: &str = r#"
 (and ("Frontend is part of the system") (not ("there is a GPU compiler")))
 (not ("there is a GPU compiler"))
-"#,
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-        )
+"#;
+
+    fn sample() -> Plan {
+        Plan::of(&compile(&parse(SAMPLE).unwrap()).unwrap())
     }
 
     #[test]
@@ -473,7 +623,7 @@ mod tests {
         let lines = view
             .rows(40)
             .into_iter()
-            .map(|row| row.text)
+            .map(|row| row.plain())
             .collect::<Vec<_>>();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("planning"), "{}", lines[0]);
@@ -485,7 +635,7 @@ mod tests {
         let plan = sample();
         let mut view = RunView::planning();
         view.show_plan(&plan);
-        let searching: Vec<_> = view.rows(80).into_iter().map(|row| row.text).collect();
+        let searching: Vec<_> = view.rows(80).into_iter().map(|row| row.plain()).collect();
         assert!(searching[0].contains("search"), "{}", searching[0]);
         assert!(
             searching[0].contains("Frontend is part of the system"),
@@ -503,7 +653,7 @@ mod tests {
             "kind": "search_step",
             "classifications": [{"id": "frontend", "signal": 0.9, "applied": "keep"}]
         }));
-        let searched: Vec<_> = view.rows(80).into_iter().map(|row| row.text).collect();
+        let searched: Vec<_> = view.rows(80).into_iter().map(|row| row.plain()).collect();
         assert!(
             searched[0].contains('⠋') || searched[0].contains('⠙'),
             "{}",
@@ -520,7 +670,7 @@ mod tests {
             "path": "decoy/noise.py",
             "verdict": "neutral"
         }));
-        let reading: Vec<_> = view.rows(100).into_iter().map(|row| row.text).collect();
+        let reading: Vec<_> = view.rows(100).into_iter().map(|row| row.plain()).collect();
         assert!(reading[0].contains("read"), "{}", reading[0]);
         assert!(reading[0].contains("decoy/noise.py"), "{}", reading[0]);
         assert!(reading[1].contains("read"), "{}", reading[1]);
@@ -528,14 +678,80 @@ mod tests {
         assert!(reading[2].contains("read"), "{}", reading[2]);
         assert!(reading[2].contains("decoy/noise.py"), "{}", reading[2]);
 
-        view.finish(&[Value::False, Value::True]);
-        let done: Vec<_> = view.rows(160).into_iter().map(|row| row.text).collect();
+        let spans = parse(SAMPLE).unwrap().claim_spans();
+        view.finish(SAMPLE, &spans, &[Value::False, Value::True]);
+        let done = view.rows(160);
+        let text: Vec<_> = done.iter().map(|row| row.plain()).collect();
         assert_eq!(
-            done,
+            text,
             vec![
-                "false    (and (\"Frontend is part of the system\") (not (\"there is a GPU compiler\")))",
-                "true     (not (\"there is a GPU compiler\"))",
+                "  ".to_string(),
+                "✗ (and (\"Frontend is part of the system\") (not (\"there is a GPU compiler\")))"
+                    .to_string(),
+                "✓ (not (\"there is a GPU compiler\"))".to_string(),
             ]
         );
+        assert!(done[1]
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::FalseText));
+        assert!(done[2]
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::TrueMark));
+        assert!(done[2]
+            .pieces
+            .iter()
+            .all(|piece| piece.tone != Tone::FalseText));
+    }
+
+    #[test]
+    fn finished_view_is_the_source_file() {
+        let src = include_str!("../../examples/diagram.ag");
+        let spans = parse(src).unwrap().claim_spans();
+        let rows = source_rows(
+            src,
+            &spans,
+            &[Value::True, Value::False, Value::True, Value::False],
+        );
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert!(text.iter().any(|line| line == "  (name Frontend)"));
+        assert!(text
+            .iter()
+            .any(|line| line == "✓ (depends_on Frontend Backend)"));
+        assert!(text
+            .iter()
+            .any(|line| line == "✗ (not (depends_on Backend Frontend))"));
+        assert!(text.iter().any(|line| line == "✓ (or"));
+        assert!(text
+            .iter()
+            .any(|line| line == "    (calls Oracle TypeSafe)"));
+        let and_at = text
+            .iter()
+            .position(|line| line == "✗ (and")
+            .expect("and claim");
+        assert_eq!(
+            text[and_at + 1],
+            "▌   (\"Frontend is a component of the system\")"
+        );
+        assert!(text[and_at + 2].starts_with("▌   "));
+        assert!(text[and_at + 2].contains("\"{Name} is a component of the system\" Backend"));
+        assert!(text.iter().all(|line| !line.contains("true     ")));
+        assert!(rows[and_at]
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::FalseText));
+        let depends = rows
+            .iter()
+            .find(|row| row.plain().contains("depends_on Frontend Backend"))
+            .unwrap();
+        assert!(depends
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::TrueMark));
+        assert!(depends
+            .pieces
+            .iter()
+            .all(|piece| piece.tone != Tone::FalseText));
     }
 }

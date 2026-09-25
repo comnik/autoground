@@ -1,4 +1,5 @@
 pub mod run;
+pub mod summary;
 
 use std::time::Duration;
 

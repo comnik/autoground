@@ -234,6 +234,20 @@ impl<U, O> Reader<U, O> {
     {
         self.search.usage()
     }
+
+    pub fn flights(&self) -> &[crate::oracle::Flight]
+    where
+        O: Oracle,
+    {
+        self.search.flights()
+    }
+
+    pub fn flight_limit(&self) -> Option<usize>
+    where
+        O: Oracle,
+    {
+        self.search.flight_limit()
+    }
 }
 
 impl<U, O> Reader<U, O>

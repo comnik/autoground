@@ -129,6 +129,13 @@ impl fmt::Display for OracleError {
 
 impl std::error::Error for OracleError {}
 
+/// One timed transport round-trip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Flight {
+    pub started: SystemTime,
+    pub ended: SystemTime,
+}
+
 /// Cumulative usage for one oracle instance. Local impls stay at zero.
 ///
 /// [`Usage::batch_size`] is mean questions-per-request / the impl's max
@@ -232,6 +239,16 @@ pub trait Oracle {
     /// Usage recorded on this instance so far. Local impls stay at zero.
     fn usage(&self) -> Usage {
         Usage::default()
+    }
+
+    /// Timed round-trips so far. Empty when the oracle does not time them.
+    fn flights(&self) -> &[Flight] {
+        &[]
+    }
+
+    /// Cap on overlapping round-trips. None when this oracle does not overlap.
+    fn flight_limit(&self) -> Option<usize> {
+        None
     }
 }
 

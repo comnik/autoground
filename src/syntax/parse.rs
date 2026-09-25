@@ -29,6 +29,9 @@ enum TokenKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Token {
     kind: TokenKind,
+    /// Byte offset of the token in the source.
+    start: usize,
+    end: usize,
     line: usize,
     col: usize,
 }
@@ -88,6 +91,7 @@ impl<'a> Lexer<'a> {
         self.skip_ws_and_comments();
         let line = self.line;
         let col = self.col;
+        let start = self.i;
         let Some(c) = self.peek() else {
             return Ok(None);
         };
@@ -111,7 +115,13 @@ impl<'a> Lexer<'a> {
             b'"' => TokenKind::String(self.lex_string(line, col)?),
             _ => TokenKind::Symbol(self.lex_symbol(line, col)?),
         };
-        Ok(Some(Token { kind, line, col }))
+        Ok(Some(Token {
+            kind,
+            start,
+            end: self.i,
+            line,
+            col,
+        }))
     }
 
     fn lex_string(&mut self, line: usize, col: usize) -> Result<String, ParseError> {
@@ -236,15 +246,22 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
 pub fn parse(src: &str) -> Result<Program, ParseError> {
     let tokens = tokenize(src)?;
     if tokens.is_empty() {
-        return Ok(Program { forms: Vec::new() });
+        return Ok(Program {
+            forms: Vec::new(),
+            spans: Vec::new(),
+        });
     }
     let mut p = Parser { tokens, i: 0 };
     let mut forms = Vec::new();
+    let mut spans = Vec::new();
     while p.peek().is_some() {
+        let start = p.peek().map(|token| token.start).unwrap_or(0);
         let s = p.sexp()?;
+        let end = p.tokens[p.i - 1].end;
         forms.push(lower_form(&s)?);
+        spans.push(start..end);
     }
-    Ok(Program { forms })
+    Ok(Program { forms, spans })
 }
 
 fn lower_form(s: &Sexp) -> Result<Form, ParseError> {
@@ -457,5 +474,23 @@ mod tests {
     fn skips_comments() {
         let program = parse(";; hi\n(\"Oracle calls the TypeSafe API\")\n").unwrap();
         assert_eq!(program.forms.len(), 1);
+    }
+
+    #[test]
+    fn claim_spans_are_the_source_text() {
+        let src = include_str!("../../examples/diagram.ag");
+        let program = parse(src).unwrap();
+        let spans = program.claim_spans();
+        assert_eq!(spans.len(), 4);
+        assert_eq!(&src[spans[0].clone()], "(depends_on Frontend Backend)");
+        assert_eq!(
+            &src[spans[1].clone()],
+            "(not (depends_on Backend Frontend))"
+        );
+        assert!(src[spans[2].clone()].starts_with("(or\n"));
+        assert!(src[spans[2].clone()].contains("\"Oracle calls the TypeSafe API\""));
+        assert!(src[spans[3].clone()].starts_with("(and\n"));
+        assert!(src[spans[3].clone()].contains("\"{Name} is a component of the system\" Backend"));
+        assert!(program.spans.len() == program.forms.len());
     }
 }

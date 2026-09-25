@@ -50,10 +50,21 @@ pub enum Form {
 }
 
 /// Names, senses, and claims, in source order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Program {
     pub forms: Vec<Form>,
+    /// Byte range of each form in the source, parallel to [`Self::forms`].
+    pub spans: Vec<std::ops::Range<usize>>,
 }
+
+impl PartialEq for Program {
+    fn eq(&self, other: &Self) -> bool {
+        // Spans are positions in one source text, not part of the model.
+        self.forms == other.forms
+    }
+}
+
+impl Eq for Program {}
 
 impl Program {
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -75,5 +86,17 @@ impl Program {
             Form::Claim(formula) => Some(formula),
             Form::Name(_) | Form::Sense(_) => None,
         })
+    }
+
+    /// Byte range of each claim, in claim order.
+    pub fn claim_spans(&self) -> Vec<std::ops::Range<usize>> {
+        self.forms
+            .iter()
+            .zip(self.spans.iter())
+            .filter_map(|(form, span)| match form {
+                Form::Claim(_) => Some(span.clone()),
+                Form::Name(_) | Form::Sense(_) => None,
+            })
+            .collect()
     }
 }

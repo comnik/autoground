@@ -151,6 +151,20 @@ impl<U, O> Search<U, O> {
         self.oracle.usage()
     }
 
+    pub fn flights(&self) -> &[crate::oracle::Flight]
+    where
+        O: Oracle,
+    {
+        self.oracle.flights()
+    }
+
+    pub fn flight_limit(&self) -> Option<usize>
+    where
+        O: Oracle,
+    {
+        self.oracle.flight_limit()
+    }
+
     pub fn oracle_mut(&mut self) -> &mut O {
         &mut self.oracle
     }
@@ -778,20 +792,7 @@ pub fn format_trace(trace: &[Decision]) -> String {
 }
 
 pub fn format_usage(usage: &Usage) -> String {
-    let batch = match usage.batch_size {
-        Some(factor) => format!("{:.1}%", factor * 100.0),
-        None => "none".to_string(),
-    };
-    let fill = match usage.fill_factor {
-        Some(factor) => format!("{:.1}%", factor * 100.0),
-        None => "none".to_string(),
-    };
-    let mut line = format!(
-        "requests={} tokens={} spend={} batch={batch} fill={fill}",
-        usage.requests,
-        usage.input_tokens,
-        crate::report::format_usd(usage.spend_usd),
-    );
+    let mut line = crate::report::summary::format_usage_stats(usage);
     if let Some(latency) = usage.latency {
         line.push_str(&format!(
             " p50={} p95={} p99={}",
