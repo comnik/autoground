@@ -82,6 +82,12 @@ fn intern(sentence: &str, atoms: &mut Vec<String>, index: &mut HashMap<String, u
     id
 }
 
+impl Expr {
+    pub(crate) fn value(&self, atoms: &[Value]) -> Value {
+        eval(self, atoms)
+    }
+}
+
 fn eval(expr: &Expr, values: &[Value]) -> Value {
     match expr {
         Expr::Atom(i) => values[*i],

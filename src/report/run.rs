@@ -2,7 +2,8 @@
 //!
 //! The view watches the shared log. Search steps and read steps move each
 //! claim between planning, search, and read. When the run finishes, the view
-//! is the model file: true claims carry a quiet mark, false claims a red one.
+//! is the model file: a true claim carries a quiet mark, and a false claim
+//! carries a red mark on the clauses that failed.
 //! Piped output never draws this.
 
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ use crossterm::{
 use serde_json::Value as Json;
 
 use crate::plan::{Expr, Plan};
+use crate::syntax::ClauseSpan;
 use crate::value::Value;
 
 const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -205,11 +207,11 @@ impl RunView {
         self.mode = Mode::Working;
     }
 
-    fn finish(&mut self, source: &str, spans: &[Range<usize>], values: &[Value]) {
+    fn finish(&mut self, source: &str, clauses: &[ClauseSpan], plan: &Plan, atom_values: &[Value]) {
         self.phase = Phase::Done;
         self.detail.clear();
         self.mode = Mode::Done;
-        self.done = source_rows(source, spans, values);
+        self.done = source_rows(source, &paints(clauses, plan, atom_values));
     }
 
     fn rows(&self, width: usize) -> Vec<Row> {
@@ -355,19 +357,75 @@ struct Mark {
     value: Value,
 }
 
-fn source_rows(source: &str, spans: &[Range<usize>], values: &[Value]) -> Vec<Row> {
-    let marks: Vec<Mark> = spans
+struct ClaimPaint {
+    span: Range<usize>,
+    value: Value,
+    /// False and unknown clauses. A true clause is absent, so it stays plain.
+    regions: Vec<Mark>,
+}
+
+fn paints(clauses: &[ClauseSpan], plan: &Plan, atoms: &[Value]) -> Vec<ClaimPaint> {
+    clauses
         .iter()
-        .zip(values)
-        .filter(|(span, _)| span.start < span.end && span.end <= source.len())
-        .map(|(span, value)| Mark {
-            span: span.clone(),
-            value: *value,
+        .zip(plan.claims.iter())
+        .map(|(clause, claim)| {
+            let value = claim.expr.value(atoms);
+            let mut regions = Vec::new();
+            regions_of(&claim.expr, clause, atoms, &mut regions);
+            if regions.is_empty() && value != Value::True {
+                regions.push(Mark {
+                    span: clause.span.clone(),
+                    value,
+                });
+            }
+            ClaimPaint {
+                span: clause.span.clone(),
+                value,
+                regions,
+            }
         })
-        .collect();
+        .collect()
+}
+
+/// A compound that fails uniformly is one region, connective included.
+/// A mix keeps only the clauses that are false or unknown.
+fn regions_of(expr: &Expr, clause: &ClauseSpan, atoms: &[Value], out: &mut Vec<Mark>) {
+    let value = expr.value(atoms);
+    if value == Value::True {
+        return;
+    }
+    match expr {
+        Expr::Atom(_) | Expr::Not(_) => out.push(Mark {
+            span: clause.span.clone(),
+            value,
+        }),
+        Expr::And(xs) | Expr::Or(xs) => {
+            if xs.len() != clause.children.len() {
+                out.push(Mark {
+                    span: clause.span.clone(),
+                    value,
+                });
+                return;
+            }
+            let uniform = xs.iter().all(|child| child.value(atoms) == value);
+            if uniform {
+                out.push(Mark {
+                    span: clause.span.clone(),
+                    value,
+                });
+                return;
+            }
+            for (child, span) in xs.iter().zip(&clause.children) {
+                regions_of(child, span, atoms, out);
+            }
+        }
+    }
+}
+
+fn source_rows(source: &str, paints: &[ClaimPaint]) -> Vec<Row> {
     line_ranges(source)
         .into_iter()
-        .map(|(lo, hi)| source_line(source, lo, hi, &marks))
+        .map(|(lo, hi)| source_line(source, lo, hi, paints))
         .collect()
 }
 
@@ -394,16 +452,22 @@ fn line_ranges(source: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
-fn source_line(source: &str, lo: usize, hi: usize, marks: &[Mark]) -> Row {
-    let hit = overlapping(marks, lo, hi);
-    let mut pieces = vec![gutter(&hit, lo, hi)];
-    pieces.extend(content_pieces(source, lo, hi, &hit));
+fn source_line(source: &str, lo: usize, hi: usize, paints: &[ClaimPaint]) -> Row {
+    let opener = paints
+        .iter()
+        .filter(|paint| paint.span.start >= lo && paint.span.start < hi)
+        .max_by_key(|paint| rank(paint.value))
+        .map(|paint| paint.value);
+    let regions = overlapping(paints, lo, hi);
+    let mut pieces = vec![gutter(opener, &regions)];
+    pieces.extend(content_pieces(source, lo, hi, &regions));
     Row { pieces }
 }
 
-fn overlapping<'a>(marks: &'a [Mark], lo: usize, hi: usize) -> Vec<&'a Mark> {
-    marks
+fn overlapping<'a>(paints: &'a [ClaimPaint], lo: usize, hi: usize) -> Vec<&'a Mark> {
+    paints
         .iter()
+        .flat_map(|paint| paint.regions.iter())
         .filter(|mark| mark.span.start < hi && mark.span.end > lo)
         .collect()
 }
@@ -416,26 +480,26 @@ fn rank(value: Value) -> u8 {
     }
 }
 
-fn gutter(marks: &[&Mark], lo: usize, hi: usize) -> Piece {
-    let Some(strongest) = marks
+/// The claim's own glyph opens its first line. Later lines are barred only
+/// where a false or unknown clause sits, so a true clause stays plain.
+fn gutter(opener: Option<Value>, regions: &[&Mark]) -> Piece {
+    if let Some(value) = opener {
+        let (mark, tone) = match value {
+            Value::False => ('✗', Tone::FalseMark),
+            Value::Unknown => ('?', Tone::UnknownMark),
+            Value::True => ('✓', Tone::TrueMark),
+        };
+        return piece(format!("{mark} "), tone);
+    }
+    let strongest = regions
         .iter()
         .map(|mark| mark.value)
-        .max_by_key(|value| rank(*value))
-    else {
-        return piece("  ", Tone::Source);
-    };
-    let opens = marks
-        .iter()
-        .any(|mark| mark.value == strongest && mark.span.start >= lo && mark.span.start < hi);
-    let (mark, tone) = match strongest {
-        Value::False if opens => ('✗', Tone::FalseMark),
-        Value::False => ('▌', Tone::FalseMark),
-        Value::Unknown if opens => ('?', Tone::UnknownMark),
-        Value::Unknown => ('·', Tone::UnknownMark),
-        Value::True if opens => ('✓', Tone::TrueMark),
-        Value::True => return piece("  ", Tone::Source),
-    };
-    piece(format!("{mark} "), tone)
+        .max_by_key(|value| rank(*value));
+    match strongest {
+        Some(Value::False) => piece("▌ ", Tone::FalseMark),
+        Some(Value::Unknown) => piece("· ", Tone::UnknownMark),
+        _ => piece("  ", Tone::Source),
+    }
 }
 
 fn content_pieces(source: &str, lo: usize, hi: usize, marks: &[&Mark]) -> Vec<Piece> {
@@ -569,11 +633,12 @@ impl Live {
     pub fn finish(
         &self,
         source: &str,
-        claim_spans: &[Range<usize>],
-        values: &[Value],
+        clauses: &[ClauseSpan],
+        plan: &Plan,
+        atom_values: &[Value],
     ) -> io::Result<()> {
         let mut body = self.lock();
-        body.view.finish(source, claim_spans, values);
+        body.view.finish(source, clauses, plan, atom_values);
         body.draw()
     }
 
@@ -678,8 +743,15 @@ mod tests {
         assert!(reading[2].contains("read"), "{}", reading[2]);
         assert!(reading[2].contains("decoy/noise.py"), "{}", reading[2]);
 
-        let spans = parse(SAMPLE).unwrap().claim_spans();
-        view.finish(SAMPLE, &spans, &[Value::False, Value::True]);
+        let program = parse(SAMPLE).unwrap();
+        let plan = Plan::of(&compile(&program).unwrap());
+        // The sentence is false, so the inner `not` holds and the `and` fails on its first clause.
+        view.finish(
+            SAMPLE,
+            &program.clauses,
+            &plan,
+            &[Value::False, Value::False],
+        );
         let done = view.rows(160);
         let text: Vec<_> = done.iter().map(|row| row.plain()).collect();
         assert_eq!(
@@ -708,11 +780,17 @@ mod tests {
     #[test]
     fn finished_view_is_the_source_file() {
         let src = include_str!("../../examples/diagram.ag");
-        let spans = parse(src).unwrap().claim_spans();
-        let rows = source_rows(
+        let rows = finished(
             src,
-            &spans,
-            &[Value::True, Value::False, Value::True, Value::False],
+            &[
+                Value::True,
+                Value::True,
+                Value::True,
+                Value::False,
+                Value::False,
+                Value::False,
+                Value::False,
+            ],
         );
         let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
         assert!(text.iter().any(|line| line == "  (name Frontend)"));
@@ -753,5 +831,120 @@ mod tests {
             .pieces
             .iter()
             .all(|piece| piece.tone != Tone::FalseText));
+    }
+
+    #[test]
+    fn a_false_claim_marks_only_the_clauses_that_failed() {
+        let src = r#"(name Oracle)
+(name Universe)
+(name Search)
+(name Log)
+(sense calls "{caller} calls {callee}")
+
+(and
+  ("All major components record structured events in the unified log.")
+  (calls Oracle Log)
+  (calls Universe Log)
+  (calls Search Log))
+"#;
+        let rows = finished(
+            src,
+            &[Value::False, Value::False, Value::False, Value::True],
+        );
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        let and_at = text.iter().position(|line| line == "✗ (and").unwrap();
+        assert_eq!(
+            text[and_at + 1],
+            "▌   (\"All major components record structured events in the unified log.\")"
+        );
+        assert_eq!(text[and_at + 2], "▌   (calls Oracle Log)");
+        assert_eq!(text[and_at + 3], "▌   (calls Universe Log)");
+        assert_eq!(text[and_at + 4], "    (calls Search Log))");
+        assert!(rows[and_at]
+            .pieces
+            .iter()
+            .all(|piece| piece.tone != Tone::FalseText));
+        assert!(rows[and_at + 2]
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::FalseText));
+        assert!(rows[and_at + 4]
+            .pieces
+            .iter()
+            .all(|piece| piece.tone != Tone::FalseText && piece.tone != Tone::FalseMark));
+
+        let nested = "\
+(and
+  (not (\"Search calls Log\"))
+  (\"kept\"))
+";
+        let rows = finished(nested, &[Value::True, Value::True]);
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "✗ (and".to_string(),
+                "▌   (not (\"Search calls Log\"))".to_string(),
+                "    (\"kept\"))".to_string(),
+            ]
+        );
+        assert!(rows[1]
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::FalseText));
+        assert!(rows[2]
+            .pieces
+            .iter()
+            .all(|piece| piece.tone != Tone::FalseText));
+
+        let mixed = "\
+(and
+  (\"a\")
+  (\"b\"))
+";
+        let rows = finished(mixed, &[Value::False, Value::Unknown]);
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "✗ (and".to_string(),
+                "▌   (\"a\")".to_string(),
+                "·   (\"b\"))".to_string(),
+            ]
+        );
+        assert!(rows[2]
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::UnknownText));
+        assert!(rows[2]
+            .pieces
+            .iter()
+            .all(|piece| piece.tone != Tone::FalseText));
+
+        let held = "\
+(or
+  (\"a\")
+  (\"b\"))
+";
+        let rows = finished(held, &[Value::False, Value::True]);
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "✓ (or".to_string(),
+                "    (\"a\")".to_string(),
+                "    (\"b\"))".to_string(),
+            ]
+        );
+        assert!(rows
+            .iter()
+            .all(|row| row.pieces.iter().all(|piece| piece.tone != Tone::FalseText)));
+    }
+
+    fn finished(src: &str, atoms: &[Value]) -> Vec<Row> {
+        let program = parse(src).unwrap();
+        let plan = Plan::of(&compile(&program).unwrap());
+        let paints = paints(&program.clauses, &plan, atoms);
+        source_rows(src, &paints)
     }
 }

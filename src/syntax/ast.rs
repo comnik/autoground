@@ -49,12 +49,23 @@ pub enum Form {
     Claim(Formula),
 }
 
+/// Byte range of a formula, with one child per `and` / `or` / `not` operand.
+///
+/// An applied sentence has no children. Positions are in one source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClauseSpan {
+    pub span: std::ops::Range<usize>,
+    pub children: Vec<ClauseSpan>,
+}
+
 /// Names, senses, and claims, in source order.
 #[derive(Debug, Clone)]
 pub struct Program {
     pub forms: Vec<Form>,
     /// Byte range of each form in the source, parallel to [`Self::forms`].
     pub spans: Vec<std::ops::Range<usize>>,
+    /// Clause tree of each claim, in claim order.
+    pub clauses: Vec<ClauseSpan>,
 }
 
 impl PartialEq for Program {

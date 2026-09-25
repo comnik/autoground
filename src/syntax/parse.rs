@@ -1,4 +1,6 @@
-use super::ast::{Form, Formula, Program, Reading, Sense};
+use std::ops::Range;
+
+use super::ast::{ClauseSpan, Form, Formula, Program, Reading, Sense};
 use super::template::hole_names;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,7 +183,13 @@ impl<'a> Lexer<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Sexp {
+struct Sexp {
+    span: Range<usize>,
+    kind: SexpKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SexpKind {
     List(Vec<Sexp>),
     Symbol(String),
     String(String),
@@ -207,7 +215,7 @@ impl Parser {
         let tok = self
             .bump()
             .ok_or_else(|| err(1, 1, "unexpected end of input"))?;
-        match tok.kind {
+        let kind = match tok.kind {
             TokenKind::LParen => {
                 let mut xs = Vec::new();
                 loop {
@@ -220,15 +228,20 @@ impl Parser {
                         Some(_) => xs.push(self.sexp()?),
                     }
                 }
-                Ok(Sexp::List(xs))
+                SexpKind::List(xs)
             }
-            TokenKind::RParen => Err(err(tok.line, tok.col, "unexpected ')'")),
+            TokenKind::RParen => return Err(err(tok.line, tok.col, "unexpected ')'")),
             TokenKind::LBrack | TokenKind::RBrack => {
-                Err(err(tok.line, tok.col, "brackets are not in this language"))
+                return Err(err(tok.line, tok.col, "brackets are not in this language"))
             }
-            TokenKind::Symbol(s) => Ok(Sexp::Symbol(s)),
-            TokenKind::String(s) => Ok(Sexp::String(s)),
-        }
+            TokenKind::Symbol(s) => SexpKind::Symbol(s),
+            TokenKind::String(s) => SexpKind::String(s),
+        };
+        let end = self.tokens[self.i - 1].end;
+        Ok(Sexp {
+            span: tok.start..end,
+            kind,
+        })
     }
 }
 
@@ -249,27 +262,44 @@ pub fn parse(src: &str) -> Result<Program, ParseError> {
         return Ok(Program {
             forms: Vec::new(),
             spans: Vec::new(),
+            clauses: Vec::new(),
         });
     }
     let mut p = Parser { tokens, i: 0 };
     let mut forms = Vec::new();
     let mut spans = Vec::new();
+    let mut clauses = Vec::new();
     while p.peek().is_some() {
         let start = p.peek().map(|token| token.start).unwrap_or(0);
         let s = p.sexp()?;
         let end = p.tokens[p.i - 1].end;
-        forms.push(lower_form(&s)?);
+        let (form, clause) = lower_form(&s)?;
+        forms.push(form);
         spans.push(start..end);
+        if let Some(clause) = clause {
+            clauses.push(clause);
+        }
     }
-    Ok(Program { forms, spans })
+    Ok(Program {
+        forms,
+        spans,
+        clauses,
+    })
 }
 
-fn lower_form(s: &Sexp) -> Result<Form, ParseError> {
+fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
     let xs = list(s)?;
-    match xs.first() {
-        Some(Sexp::Symbol(head)) if head == "name" => Ok(Form::Name(lower_name_decl(xs)?)),
-        Some(Sexp::Symbol(head)) if head == "sense" => Ok(Form::Sense(lower_sense(xs)?)),
-        _ => Ok(Form::Claim(lower_formula(s)?)),
+    match xs.first().map(|item| &item.kind) {
+        Some(SexpKind::Symbol(head)) if head == "name" => {
+            Ok((Form::Name(lower_name_decl(xs)?), None))
+        }
+        Some(SexpKind::Symbol(head)) if head == "sense" => {
+            Ok((Form::Sense(lower_sense(xs)?), None))
+        }
+        _ => {
+            let (formula, clause) = lower_formula(s)?;
+            Ok((Form::Claim(formula), Some(clause)))
+        }
     }
 }
 
@@ -292,8 +322,8 @@ fn lower_sense(xs: &[Sexp]) -> Result<Sense, ParseError> {
     }
     let name = expect_symbol(&xs[1], "`sense` name must be a symbol")?;
     reject_reserved(&name)?;
-    let template = match &xs[2] {
-        Sexp::String(template) => template.clone(),
+    let template = match &xs[2].kind {
+        SexpKind::String(template) => template.clone(),
         _ => {
             return Err(err(
                 1,
@@ -310,41 +340,58 @@ fn lower_sense(xs: &[Sexp]) -> Result<Sense, ParseError> {
     })
 }
 
-fn lower_formula(s: &Sexp) -> Result<Formula, ParseError> {
+fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
     let xs = list(s)?;
     if xs.is_empty() {
         return Err(err(1, 1, "empty list is not a formula"));
     }
-    match &xs[0] {
-        Sexp::Symbol(head) if head == "name" || head == "sense" => Err(err(
+    let clause = |children: Vec<ClauseSpan>| ClauseSpan {
+        span: s.span.clone(),
+        children,
+    };
+    match &xs[0].kind {
+        SexpKind::Symbol(head) if head == "name" || head == "sense" => Err(err(
             1,
             1,
             format!("`{head}` is a declaration and cannot appear inside a formula"),
         )),
-        Sexp::Symbol(head) if head == "and" => Ok(Formula::And(lower_formulas(&xs[1..])?)),
-        Sexp::Symbol(head) if head == "or" => Ok(Formula::Or(lower_formulas(&xs[1..])?)),
-        Sexp::Symbol(head) if head == "not" => {
+        SexpKind::Symbol(head) if head == "and" => {
+            let (forms, children) = lower_formulas(&xs[1..])?;
+            Ok((Formula::And(forms), clause(children)))
+        }
+        SexpKind::Symbol(head) if head == "or" => {
+            let (forms, children) = lower_formulas(&xs[1..])?;
+            Ok((Formula::Or(forms), clause(children)))
+        }
+        SexpKind::Symbol(head) if head == "not" => {
             if xs.len() != 2 {
                 return Err(err(1, 1, "`not` takes one formula"));
             }
-            Ok(Formula::Not(Box::new(lower_formula(&xs[1])?)))
+            let (inner, child) = lower_formula(&xs[1])?;
+            Ok((Formula::Not(Box::new(inner)), clause(vec![child])))
         }
-        Sexp::Symbol(head) if is_retired(head) => Err(retired(head)),
-        Sexp::Symbol(head) => Ok(Formula::Apply {
-            reading: Reading::Sense(head.clone()),
-            args: lower_args(&xs[1..])?,
-        }),
-        Sexp::String(template) => {
-            let holes = hole_names(template).map_err(|message| err(1, 1, message))?;
-            Ok(Formula::Apply {
-                reading: Reading::Inline {
-                    template: template.clone(),
-                    holes,
-                },
+        SexpKind::Symbol(head) if is_retired(head) => Err(retired(head)),
+        SexpKind::Symbol(head) => Ok((
+            Formula::Apply {
+                reading: Reading::Sense(head.clone()),
                 args: lower_args(&xs[1..])?,
-            })
+            },
+            clause(Vec::new()),
+        )),
+        SexpKind::String(template) => {
+            let holes = hole_names(template).map_err(|message| err(1, 1, message))?;
+            Ok((
+                Formula::Apply {
+                    reading: Reading::Inline {
+                        template: template.clone(),
+                        holes,
+                    },
+                    args: lower_args(&xs[1..])?,
+                },
+                clause(Vec::new()),
+            ))
         }
-        _ => Err(err(
+        SexpKind::List(_) => Err(err(
             1,
             1,
             "a formula starts with `and`, `or`, `not`, a sense name, or a reading",
@@ -352,8 +399,15 @@ fn lower_formula(s: &Sexp) -> Result<Formula, ParseError> {
     }
 }
 
-fn lower_formulas(xs: &[Sexp]) -> Result<Vec<Formula>, ParseError> {
-    xs.iter().map(lower_formula).collect()
+fn lower_formulas(xs: &[Sexp]) -> Result<(Vec<Formula>, Vec<ClauseSpan>), ParseError> {
+    let mut forms = Vec::with_capacity(xs.len());
+    let mut spans = Vec::with_capacity(xs.len());
+    for sexp in xs {
+        let (form, span) = lower_formula(sexp)?;
+        forms.push(form);
+        spans.push(span);
+    }
+    Ok((forms, spans))
 }
 
 fn lower_args(xs: &[Sexp]) -> Result<Vec<String>, ParseError> {
@@ -363,15 +417,15 @@ fn lower_args(xs: &[Sexp]) -> Result<Vec<String>, ParseError> {
 }
 
 fn list(s: &Sexp) -> Result<&[Sexp], ParseError> {
-    match s {
-        Sexp::List(xs) => Ok(xs),
+    match &s.kind {
+        SexpKind::List(xs) => Ok(xs),
         _ => Err(err(1, 1, "a form must be a list")),
     }
 }
 
 fn expect_symbol(s: &Sexp, message: &str) -> Result<String, ParseError> {
-    match s {
-        Sexp::Symbol(name) => Ok(name.clone()),
+    match &s.kind {
+        SexpKind::Symbol(name) => Ok(name.clone()),
         _ => Err(err(1, 1, message)),
     }
 }
@@ -492,5 +546,15 @@ mod tests {
         assert!(src[spans[3].clone()].starts_with("(and\n"));
         assert!(src[spans[3].clone()].contains("\"{Name} is a component of the system\" Backend"));
         assert!(program.spans.len() == program.forms.len());
+        assert_eq!(program.clauses.len(), spans.len());
+        assert_eq!(program.clauses[3].children.len(), 3);
+        assert_eq!(
+            &src[program.clauses[3].children[0].span.clone()],
+            "(\"Frontend is a component of the system\")"
+        );
+        assert_eq!(
+            &src[program.clauses[3].children[2].span.clone()],
+            "(\"{caller} calls {callee}\" Frontend Backend)"
+        );
     }
 }

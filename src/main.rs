@@ -514,7 +514,6 @@ fn run_cmd(
     let src = model_source(input)?;
     let program = parse(&src)?;
     let planned = Plan::of(&compile(&program)?);
-    let claim_spans = program.claim_spans();
     let log = Log::create()?;
     if let Some(live) = &live {
         if !planned.atoms.is_empty() {
@@ -570,7 +569,7 @@ fn run_cmd(
         .filter(|value| **value == autoground::Value::True)
         .count();
     if let Some(live) = live {
-        live.finish(&src, &claim_spans, &claim_values)?;
+        live.finish(&src, &program.clauses, &planned, &atom_values)?;
     } else {
         for (claim, value) in planned.claims.iter().zip(&claim_values) {
             println!("{:<7}  {}", value.to_string(), claim.verbalized);
