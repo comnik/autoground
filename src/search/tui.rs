@@ -133,7 +133,7 @@ struct Pane {
     list_scroll: usize,
     ctx_scroll: usize,
     raw: bool,
-    /// Jump the context pane to the selected object on the next draw.
+    /// Jump the context pane to the selected database on the next draw.
     follow: bool,
 }
 
@@ -372,10 +372,8 @@ fn context_text(step: &SearchStep) -> String {
     }
     let mut out = String::new();
     for obj in &step.view {
-        if obj.leaf {
-            out.push_str(&format!("{}  ({} bytes)\n", obj.id, obj.bytes));
-        } else if obj.listing.is_empty() {
-            out.push_str(&entry_name_id(&obj.id, false));
+        if obj.listing.is_empty() {
+            out.push_str(&entry_name_id(&obj.id));
             out.push('\n');
         } else {
             out.push_str(&obj.listing);
@@ -406,14 +404,12 @@ fn context_anchor(step: &SearchStep, sel: usize, lines: &[String]) -> usize {
 }
 
 fn entry_name(decision: &Decision) -> String {
-    entry_name_id(&decision.id, decision.leaf)
+    entry_name_id(&decision.id)
 }
 
-fn entry_name_id(id: &str, leaf: bool) -> String {
+fn entry_name_id(id: &str) -> String {
     if id.is_empty() {
         "/".to_string()
-    } else if leaf {
-        id.to_string()
     } else {
         format!("{id}/")
     }

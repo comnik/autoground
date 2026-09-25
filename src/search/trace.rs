@@ -14,22 +14,21 @@ pub const TRACE_KIND: &str = "search";
 /// One oracle call: the universe view, then how each target was classified.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchStep {
-    pub view: Vec<ViewObject>,
+    pub view: Vec<ViewDatabase>,
     pub classifications: Vec<Decision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exchange: Option<ExchangeRecord>,
 }
 
-/// One database in the view. A leaf is path plus size; a directory keeps its listing.
+/// One summarizable database in the view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ViewObject {
+pub struct ViewDatabase {
     pub id: String,
-    pub leaf: bool,
     pub bytes: u64,
-    /// Directory listing. Empty for a leaf.
+    /// Summary text.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub listing: String,
-    /// Classified in this call. Samples are context only.
+    /// Classified in this call. The root is context only.
     pub target: bool,
 }
 
@@ -134,12 +133,12 @@ pub struct SearchTraceFile {
     pub kind: String,
     pub proposition: String,
     pub repo_name: String,
-    /// Window after pruning. Directories carry a trailing slash.
-    pub objects: Vec<String>,
-    /// [`crate::universe::Universe::estimate`] of every reachable object.
+    /// Window after pruning. Summarizable databases carry a trailing slash.
+    pub databases: Vec<String>,
+    /// [`crate::universe::Universe::size`] of every reachable database.
     #[serde(default)]
     pub bytes_before: u64,
-    /// [`crate::universe::Universe::estimate`] of the pruned window.
+    /// [`crate::universe::Universe::size`] of the pruned window.
     #[serde(default)]
     pub bytes_after: u64,
     pub usage: UsageRecord,
@@ -152,7 +151,7 @@ pub struct SearchTraceFile {
 struct SearchSummary {
     proposition: String,
     repo_name: String,
-    objects: Vec<String>,
+    databases: Vec<String>,
     #[serde(default)]
     bytes_before: u64,
     #[serde(default)]
@@ -177,7 +176,7 @@ impl SearchTraceFile {
             &SearchSummary {
                 proposition: self.proposition.clone(),
                 repo_name: self.repo_name.clone(),
-                objects: self.objects.clone(),
+                databases: self.databases.clone(),
                 bytes_before: self.bytes_before,
                 bytes_after: self.bytes_after,
                 usage: self.usage.clone(),
@@ -209,7 +208,7 @@ fn assemble(events: Vec<Json>, path: &Path) -> Result<SearchTraceFile, String> {
         kind: TRACE_KIND.to_string(),
         proposition: summary.proposition,
         repo_name: summary.repo_name,
-        objects: summary.objects,
+        databases: summary.databases,
         bytes_before: summary.bytes_before,
         bytes_after: summary.bytes_after,
         usage: summary.usage,
@@ -274,7 +273,7 @@ pub fn summary_lines(path: &Path, file: &SearchTraceFile) -> Vec<SummaryLine> {
     lines
 }
 
-/// Share of the original view that pruning removed, plus the two estimates.
+/// Share of the original view that pruning removed, plus the two sizes.
 pub fn format_reduction(before: u64, after: u64) -> Option<String> {
     if before == 0 {
         return None;
@@ -317,9 +316,9 @@ fn listing_lines(file: &SearchTraceFile) -> Vec<SummaryLine> {
 fn listing_nodes(file: &SearchTraceFile) -> Vec<Node> {
     let mut nodes = Vec::new();
     let mut kept = HashSet::new();
-    for object in &file.objects {
-        let dir = object.ends_with('/');
-        let id = object.trim_end_matches('/').to_string();
+    for database in &file.databases {
+        let dir = database.ends_with('/');
+        let id = database.trim_end_matches('/').to_string();
         if id.is_empty() {
             continue;
         }
@@ -414,7 +413,7 @@ pub fn format_step(step: &SearchStep, index: usize, total: usize) -> String {
     }
     for decision in &step.classifications {
         out.push_str("  ");
-        out.push_str(&display_id(&decision.id, decision.leaf));
+        out.push_str(&display_id(&decision.id));
         out.push('\n');
     }
     out.push_str("\n  oracle\n");
@@ -422,7 +421,7 @@ pub fn format_step(step: &SearchStep, index: usize, total: usize) -> String {
         out.push_str("    (no classifications)\n");
     }
     for decision in &step.classifications {
-        let name = display_id(&decision.id, decision.leaf);
+        let name = display_id(&decision.id);
         out.push_str(&format!(
             "  {name:<28} {:<8} {:.2}\n",
             decision.applied, decision.signal
@@ -442,11 +441,9 @@ pub fn format_exchange(step: &SearchStep) -> String {
     out
 }
 
-fn display_id(id: &str, leaf: bool) -> String {
+fn display_id(id: &str) -> String {
     if id.is_empty() {
         "/".to_string()
-    } else if leaf {
-        id.to_string()
     } else {
         format!("{id}/")
     }
@@ -477,7 +474,6 @@ mod tests {
     fn decision(id: &str, applied: Applied) -> Decision {
         Decision {
             id: id.into(),
-            leaf: false,
             signal: match applied {
                 Applied::Keep => 0.95,
                 Applied::Prune => 0.05,
@@ -486,12 +482,12 @@ mod tests {
         }
     }
 
-    fn file(objects: Vec<&str>, decisions: Vec<Decision>) -> SearchTraceFile {
+    fn file(databases: Vec<&str>, decisions: Vec<Decision>) -> SearchTraceFile {
         SearchTraceFile {
             kind: TRACE_KIND.into(),
             proposition: "p".into(),
             repo_name: "repo".into(),
-            objects: objects.into_iter().map(str::to_string).collect(),
+            databases: databases.into_iter().map(str::to_string).collect(),
             bytes_before: 0,
             bytes_after: 0,
             usage: UsageRecord {
@@ -611,7 +607,7 @@ mod tests {
         traced.write_summary(&log).unwrap();
         let loaded = SearchTraceFile::load(&path).unwrap();
         let _ = std::fs::remove_file(&path);
-        assert_eq!(loaded.objects, traced.objects);
+        assert_eq!(loaded.databases, traced.databases);
         assert_eq!(loaded.steps, traced.steps);
         assert_eq!(loaded.bytes_before, 10);
         assert_eq!(loaded.bytes_after, 4);

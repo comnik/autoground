@@ -1,7 +1,12 @@
 //! A refinable view over a tree of databases.
 //!
-//! Files and directories are the same kind of object: a serializable database.
-//! Leaves render as path plus contents; non-leaves render as a listing.
+//! Files, directories, tool call results, and other databases are all serializable.
+//! Only some (e.g. directories) have true summaries. A database with a summary
+//! is classified from that text. A database without one is read.
+//!
+//! Database ids are path-like strings, e.g. POSIX relative paths for a filesystem
+//! (`frontend/app.py`, root `""`), or synthetic ids like `p0/c0/00-call-read_file` for a
+//! tool call in an agent transcript.
 
 pub mod fs;
 
@@ -10,65 +15,40 @@ use std::io;
 
 pub use fs::Filesystem;
 
-/// A refinable view over a universe of databases.
-///
-/// Object ids are path-like strings. The filesystem uses POSIX relative paths
-/// (`frontend/app.py`, root `""`). Oracle classification is not part of this
-/// trait: callers `insert` / `remove` / `set` after the oracle labels objects.
 pub trait Universe {
-    fn objects(&self) -> &[String];
+    /// IDs of all databases in the current view.
+    fn databases(&self) -> &[String];
 
     fn parent(&self, id: &str) -> Option<String>;
     fn children(&self, id: &str) -> Result<Vec<String>, UniverseError>;
 
-    /// A leaf renders as path plus contents. A non-leaf renders as a listing.
-    fn is_leaf(&self, id: &str) -> Result<bool, UniverseError>;
+    /// Text search can classify. `Ok(None)` means this database has no summary.
+    fn summary(&self, id: &str) -> Result<Option<String>, UniverseError>;
 
-    /// Leaf byte length, or a directory listing. No file body.
-    fn summary(&self, id: &str) -> Result<ObjectSummary, UniverseError>;
-
-    /// Cheap size of the current view (objects plus samples). File bodies are
-    /// not read: files use metadata length plus header overhead.
-    fn estimate(&self) -> Result<usize, UniverseError>;
-    /// Exact size: `render()?.len()`.
-    fn size(&self) -> Result<usize, UniverseError>;
-    fn render(&self) -> Result<String, UniverseError>;
-    /// Render one object. A leaf larger than `budget` is head-and-tail trimmed.
-    fn render_capped(&self, id: &str, budget: usize) -> Result<String, UniverseError>;
-
-    /// Body of a leaf, or the listing of a directory.
+    /// Byte length of the current view.
     ///
-    /// A leaf longer than `budget` bytes is head-and-tail trimmed so the
-    /// returned string fits. `usize::MAX` reads the whole body.
+    /// A summarizable database contributes its summary's length. Any other database
+    /// contributes its content length. Bodies are not read.
+    fn size(&self) -> Result<usize, UniverseError>;
+
+    /// Full text of a database that has no summary.
+    ///
+    /// A longer body is head-and-tail trimmed to `budget`. `usize::MAX` reads the
+    /// whole body. A database that has a summary cannot be read.
     fn read(&self, id: &str, budget: usize) -> Result<String, UniverseError>;
 
-    /// Fill leftover budget with children of current objects (one level).
-    ///
-    /// Samples are extra render context. A sampled leaf is already in the
-    /// window, so search may judge it without a second render.
-    fn sample(&mut self, extra_budget: usize) -> Result<(), UniverseError>;
-
-    fn samples(&self) -> &[String];
-
+    /// The view can be refined by setting, inserting, and removing the active databases.
     fn insert(&mut self, id: String) -> Result<(), UniverseError>;
     fn remove(&mut self, id: &str);
     fn set(&mut self, ids: Vec<String>) -> Result<(), UniverseError>;
-}
-
-/// What a trace can show for one database without its body.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObjectSummary {
-    pub leaf: bool,
-    /// File length, or the listing's byte length.
-    pub bytes: u64,
-    /// Directory listing. Empty for a leaf.
-    pub listing: String,
 }
 
 #[derive(Debug)]
 pub enum UniverseError {
     Io(io::Error),
     Missing(String),
+    /// `read` was asked for a database that has a summary.
+    Summarizable(String),
 }
 
 impl fmt::Display for UniverseError {
@@ -77,9 +57,16 @@ impl fmt::Display for UniverseError {
             UniverseError::Io(e) => write!(f, "{e}"),
             UniverseError::Missing(id) => {
                 if id.is_empty() {
-                    write!(f, "no such object: /")
+                    write!(f, "no such database: /")
                 } else {
-                    write!(f, "no such object: {id}")
+                    write!(f, "no such database: {id}")
+                }
+            }
+            UniverseError::Summarizable(id) => {
+                if id.is_empty() {
+                    write!(f, "cannot read /: it has a summary")
+                } else {
+                    write!(f, "cannot read {id}: it has a summary")
                 }
             }
         }
@@ -90,7 +77,7 @@ impl std::error::Error for UniverseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             UniverseError::Io(e) => Some(e),
-            UniverseError::Missing(_) => None,
+            UniverseError::Missing(_) | UniverseError::Summarizable(_) => None,
         }
     }
 }

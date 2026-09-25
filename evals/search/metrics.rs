@@ -26,10 +26,10 @@ pub fn score_floors(
         let ids = retained_ids(universe, decisions, floor)?;
         let mut view = universe.clone();
         view.set(ids)?;
-        let bytes_after = view.estimate()? as u64;
+        let bytes_after = view.size()? as u64;
         let mut files = HashSet::new();
-        for id in view.objects() {
-            if view.is_leaf(id)? {
+        for id in view.databases() {
+            if view.summary(id)?.is_none() {
                 files.insert(id.clone());
             }
         }
@@ -79,7 +79,7 @@ pub fn ideal_pruned(
     }
     let mut view = universe.clone();
     view.set(evidence.to_vec())?;
-    let bytes_after = view.estimate()? as u64;
+    let bytes_after = view.size()? as u64;
     Ok(Some(
         (bytes_before - bytes_after) as f64 / bytes_before as f64,
     ))
@@ -100,13 +100,13 @@ fn reachable_bytes(universe: &Filesystem) -> Result<usize, UniverseError> {
     while let Some(dir) = stack.pop() {
         for child in full.children(&dir)? {
             ids.push(child.clone());
-            if !full.is_leaf(&child)? {
+            if full.summary(&child)?.is_some() {
                 stack.push(child);
             }
         }
     }
     full.set(ids)?;
-    full.estimate()
+    full.size()
 }
 
 #[cfg(test)]
@@ -116,7 +116,6 @@ mod tests {
     fn decision(id: &str, signal: f64) -> Decision {
         Decision {
             id: id.to_string(),
-            leaf: false,
             signal,
             applied: autoground::search::Applied::Keep,
         }
@@ -150,7 +149,7 @@ mod tests {
             "src/a.txt".to_string(),
         ])
         .unwrap();
-        assert_eq!(loose.bytes_after, kept.estimate().unwrap() as u64);
+        assert_eq!(loose.bytes_after, kept.size().unwrap() as u64);
         assert!(
             (loose.pruned.unwrap() - (1.0 - loose.bytes_after as f64 / loose.bytes_before as f64))
                 .abs()
@@ -163,7 +162,7 @@ mod tests {
         assert!(tight.pruned.unwrap() > loose.pruned.unwrap());
         let mut readme = universe.clone();
         readme.set(vec!["README.md".to_string()]).unwrap();
-        assert_eq!(tight.bytes_after, readme.estimate().unwrap() as u64);
+        assert_eq!(tight.bytes_after, readme.size().unwrap() as u64);
         let ideal = ideal_pruned(&universe, &["README.md".to_string()]).unwrap();
         assert!((ideal.unwrap() - tight.pruned.unwrap()).abs() < 1e-9);
         assert!(ideal.unwrap() > loose.pruned.unwrap());

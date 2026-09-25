@@ -9,7 +9,7 @@
 //!
 //! The costly act here is reporting a proposition true, or false, when the
 //! read was not actually decisive. Unsupported (unknown) is the conservative
-//! bucket; a refutation is the report that an object fights the proposition.
+//! bucket; a refutation is the report that a database fights the proposition.
 //!
 //! - [`FLOOR`] (0.5) is TypeSafe's "don't guess" band. Below it we do not
 //!   act. At or above it, a `contradicted` document is enough to *veto* a

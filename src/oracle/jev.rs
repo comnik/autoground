@@ -371,9 +371,8 @@ fn request_body(model: &str, state: &Value, items: &[Pending]) -> Value {
     })
 }
 
-/// Digest of classification `state`. Callers (navigator, later search) pass a
-/// rendered view or other JSON; the oracle hashes it and does not ask Universe
-/// for a digest.
+/// Digest of classification `state`. Callers pass that JSON; the oracle hashes
+/// it and does not ask Universe for a digest.
 fn state_digest(state: &Value) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     match serde_json::to_vec(state) {

@@ -53,7 +53,7 @@ S-expression language, without adherence to any rigid schema. `autoground` will 
 return either *entailed*, *contradicted*, or *unsupported*, indicating whether the model is
 both internally consistent and grounded in the reality of the codebase.
 
-Each response includes provenance: the objects in the codebase supporting or contradicting
+Each response includes provenance: the databases in the codebase supporting or contradicting
 base facts, and the logical deductions that were performed on top.
 
 ## Concepts
@@ -122,7 +122,7 @@ there is a conflict or the window runs out. Conflicting judgments are escalated 
 the oracle to resolve. Because search is conservative, we make a closed world assumption.
 Exhausting the candidate view with no witness is false.
 
-Returns the truth value plus the evidence view: the objects the value depends on.
+Returns the truth value plus the evidence view: the databases the value depends on.
 
 ### Symbolic Evaluation
 
@@ -150,23 +150,22 @@ keeps a log in `/tmp/autoground`. The log interface allows all other components 
 their own structured events, as JSON lines, in a thread-safe way.
 
 **Universe**: a view over the universe.
-- estimate / compute the size of the current view of the universe (e.g. total size of all reachable files from the repo root)
-- rendering the current view (e.g. rendering the current set of paths as a tree, concatenating files with header information, things like that)
+- compute the size of the current view (a summary's length, or the content length of a database that has no summary; bodies are not read)
+- read one database that has no summary
 - sampling from the next level of detail to provide additional context
-- methods to add and remove objects from the view explicitly, based on oracle classification
-- whether an object is a leaf (path plus contents) or a listing
+- methods to add and remove databases from the view explicitly, based on oracle classification
+- whether a database has a summary
 
 As the README hopefully makes clear, the universe abstraction would treat files and
 directories as the same thing — a "database". Files would be the leaf databases in the tree.
-Rendering a file would render at least the full path + its contents. Rendering a directory
-would render its listing.
+A database with a summary is classified from that text. A database without one is read.
 
 **Oracle**: a classification oracle. Jev is the first implementation.
 - submit a classification `(state, proposition, labels)` as soon as a need is known
 - wait for a ticket when the label is required; pending questions that share a `state` go in one request, independent states overlap
 - report usage on this instance so far: spend, input tokens, request count, latency percentiles, mean batch size (questions per request / max questions per request), and mean fill factor (input tokens / the 32k state-side cap)
 
-The oracle hashes the `state` it is given (a Universe render, a listing tree, a file body). Universe itself has no digest method. Search and the reader use this interface. The 3VL engine does not hold an oracle.
+The oracle hashes the `state` it is given (a listing tree, a file body). Universe itself has no digest method. Search and the reader use this interface. The 3VL engine does not hold an oracle.
 
 **Search**: takes a universe, an oracle, and a natural language proposition, returns the
 pruned universe that is relevant to answering the proposition. Same auto-batching behaviour

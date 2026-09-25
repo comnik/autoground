@@ -624,7 +624,7 @@ fn open_universe(repo: &Path, within: Option<&str>) -> Result<Filesystem, ReadFa
 }
 
 fn ran_from_finding(finding: autoground::read::Finding<Filesystem>) -> Ran {
-    let mut evidence = finding.evidence.objects().to_vec();
+    let mut evidence = finding.evidence.databases().to_vec();
     evidence.sort();
     Ran {
         value: finding.value,

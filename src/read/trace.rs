@@ -11,7 +11,7 @@ use super::Stance;
 pub const TRACE_KIND: &str = "read";
 pub const STEP_KIND: &str = "read_step";
 
-/// One judged object, or the escalation that reconciled a conflict.
+/// One judged database, or the escalation that reconciled a conflict.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadStep {
     pub proposition: String,

@@ -107,7 +107,7 @@ pub fn universe_leaves(universe: &Filesystem) -> Result<HashSet<String>, Univers
     let mut stack = vec![String::new()];
     while let Some(dir) = stack.pop() {
         for child in universe.children(&dir)? {
-            if universe.is_leaf(&child)? {
+            if universe.summary(&child)?.is_none() {
                 leaves.insert(child);
             } else {
                 stack.push(child);

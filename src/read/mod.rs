@@ -7,7 +7,7 @@
 //!
 //! The search window is a closed world. A witness closes true, a refutation
 //! closes false, and exhausting the window with no witness is false. The
-//! evidence view is the objects that decision depends on.
+//! evidence view is the databases that decision depends on.
 
 pub mod trace;
 
@@ -36,7 +36,7 @@ const ESCALATION_QUESTION: &str = "Does the proposition `proposition` hold of th
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ticket(u64);
 
-/// How one object bears on the proposition.
+/// How one database bears on the proposition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
@@ -55,7 +55,7 @@ impl Verdict {
     }
 }
 
-/// One evidence object and the stance that put it there.
+/// One evidence database and the stance that put it there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stance {
     pub id: String,
@@ -63,7 +63,7 @@ pub struct Stance {
     pub confidence: f64,
 }
 
-/// Truth value of one proposition, plus the objects that settled it.
+/// Truth value of one proposition, plus the databases that settled it.
 ///
 /// `exhausted` means every leaf of the candidate view was judged. A false
 /// with an empty evidence view is that closed world: nothing in it entailed
@@ -76,9 +76,9 @@ pub struct Finding<U> {
     pub evidence: U,
     pub stances: Vec<Stance>,
     pub exhausted: bool,
-    /// [`Universe::estimate`] of the search window.
+    /// [`Universe::size`] of the search window.
     pub candidate_bytes: usize,
-    /// [`Universe::estimate`] of the evidence view.
+    /// [`Universe::size`] of the evidence view.
     pub evidence_bytes: usize,
     pub steps: Vec<ReadStep>,
     pub usage: Usage,
@@ -170,7 +170,7 @@ impl<U> Open<U> {
 impl<U: Universe> Open<U> {
     fn contains(&self, id: &str) -> bool {
         self.candidate
-            .objects()
+            .databases()
             .binary_search_by(|item| item.as_str().cmp(id))
             .is_ok()
     }
@@ -562,7 +562,7 @@ impl<U: Universe + Clone> Open<U> {
                         }),
                     );
                 }
-                let evidence_bytes = evidence.estimate().unwrap_or(0);
+                let evidence_bytes = evidence.size().unwrap_or(0);
                 let stances = stances_for(&self.judged, &settlement.ids);
                 (
                     ticket,
@@ -729,8 +729,8 @@ fn ranked_leaves<U: Universe>(
         signals.insert(decision.id.as_str(), decision.signal);
     }
     let mut leaves = Vec::new();
-    for id in universe.objects() {
-        if !universe.is_leaf(id)? {
+    for id in universe.databases() {
+        if universe.summary(id)?.is_some() {
             continue;
         }
         let signal = match universe.parent(id) {
@@ -971,7 +971,7 @@ mod tests {
         let ticket = reader.submit("p");
         let finding = reader.wait(ticket).unwrap();
         assert_eq!(finding.value, Value::True);
-        assert_eq!(finding.evidence.objects(), &["a.txt".to_string()]);
+        assert_eq!(finding.evidence.databases(), &["a.txt".to_string()]);
         assert!(!finding.exhausted);
         assert_eq!(document_paths(&script, "p"), vec!["a.txt".to_string()]);
     }
@@ -986,7 +986,7 @@ mod tests {
         let ticket = reader.submit("p");
         let finding = reader.wait(ticket).unwrap();
         assert_eq!(finding.value, Value::False);
-        assert_eq!(finding.evidence.objects(), &["a.txt".to_string()]);
+        assert_eq!(finding.evidence.databases(), &["a.txt".to_string()]);
         assert!(!finding.exhausted);
         assert_eq!(document_paths(&script, "p"), vec!["a.txt".to_string()]);
     }
@@ -1000,7 +1000,7 @@ mod tests {
         let finding = reader.wait(ticket).unwrap();
         assert_eq!(finding.value, Value::False);
         assert!(finding.exhausted);
-        assert!(finding.evidence.objects().is_empty());
+        assert!(finding.evidence.databases().is_empty());
         assert!(finding.stances.is_empty());
         assert_eq!(document_paths(&script, "p"), vec!["a.txt".to_string()]);
         assert_eq!(finding.steps[0].verdict, "entailed");
@@ -1017,7 +1017,7 @@ mod tests {
         let finding = reader.wait(ticket).unwrap();
         assert_eq!(finding.value, Value::False);
         assert!(finding.exhausted);
-        assert!(finding.evidence.objects().is_empty());
+        assert!(finding.evidence.databases().is_empty());
         assert_eq!(
             document_paths(&script, "p"),
             vec!["a.txt".to_string(), "b.txt".to_string()]
@@ -1038,7 +1038,7 @@ mod tests {
         assert_eq!(finding.value, Value::True);
         assert_eq!(script.inner.borrow().escalations, 1);
         assert_eq!(
-            finding.evidence.objects(),
+            finding.evidence.databases(),
             &["veto.txt".to_string(), "witness.txt".to_string()]
         );
         assert!(finding.steps.iter().any(|step| step.escalation));
@@ -1071,7 +1071,7 @@ mod tests {
         let finding = reader.wait(ticket).unwrap();
         assert_eq!(finding.value, Value::Unknown);
         assert_eq!(script.inner.borrow().escalations, 1);
-        assert_eq!(finding.evidence.objects().len(), 2);
+        assert_eq!(finding.evidence.databases().len(), 2);
     }
 
     #[test]
@@ -1097,14 +1097,14 @@ mod tests {
         let alpha = found[0].as_ref().unwrap();
         let beta = found[1].as_ref().unwrap();
         assert_eq!(alpha.value, Value::True);
-        assert_eq!(alpha.evidence.objects(), &["hi/a.txt".to_string()]);
+        assert_eq!(alpha.evidence.databases(), &["hi/a.txt".to_string()]);
         assert_eq!(
             document_paths(&script, "alpha"),
             vec!["hi/a.txt".to_string()]
         );
         assert_eq!(beta.value, Value::False);
         assert!(beta.exhausted);
-        assert!(beta.evidence.objects().is_empty());
+        assert!(beta.evidence.databases().is_empty());
 
         let shared: Vec<Classification> = script
             .inner
@@ -1144,7 +1144,7 @@ mod tests {
         let finding = reader.wait(ticket).unwrap();
         assert_eq!(finding.value, Value::False);
         assert!(finding.exhausted);
-        assert!(finding.evidence.objects().is_empty());
+        assert!(finding.evidence.databases().is_empty());
         assert!(document_paths(&script, "quiet").is_empty());
     }
 
@@ -1163,20 +1163,20 @@ mod tests {
         assert!(!frontend.exhausted);
         assert!(frontend
             .evidence
-            .objects()
+            .databases()
             .iter()
             .all(|id| id.starts_with("frontend/")));
         assert!(frontend
             .evidence
-            .objects()
+            .databases()
             .contains(&"frontend/__init__.py".into()));
         assert!(!frontend
             .evidence
-            .objects()
+            .databases()
             .iter()
             .any(|id| id.contains("app.py")));
         assert_eq!(absent.value, Value::False);
         assert!(absent.exhausted);
-        assert!(absent.evidence.objects().is_empty());
+        assert!(absent.evidence.databases().is_empty());
     }
 }

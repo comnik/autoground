@@ -4,7 +4,7 @@ Each proposition is one atomic claim about this repository. Search is scored on 
 
 Two numbers:
 
-- **Pruned** — share of universe bytes (`Universe::estimate`) dropped from the window.
+- **Pruned** — share of universe bytes (`Universe::size`) dropped from the window.
 - **Evidence selected** — share of evidence files still in the window.
 
 Evidence is the files a Grok session opened with `read_file` while looking at that proposition on its own. Those sessions are stored under `baseline/` and reused. `baseline --refresh` replaces them. Grep and directory listings are navigation, recorded on the baseline and left out of the evidence set.

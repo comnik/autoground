@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -194,20 +193,18 @@ pub fn read_trimmed(root: &Path, rel: &str, budget: usize) -> io::Result<(String
 pub struct Filesystem {
     root: PathBuf,
     filter: ListingFilter,
-    objects: Vec<String>,
-    samples: Vec<String>,
+    databases: Vec<String>,
 }
 
 impl Filesystem {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, UniverseError> {
         let root = root.into();
         let filter = ListingFilter::from_repo(&root);
-        let objects = list_files_recursive(&root, "", &filter)?;
+        let databases = list_files_recursive(&root, "", &filter)?;
         Ok(Self {
             root,
             filter,
-            objects,
-            samples: Vec::new(),
+            databases,
         })
     }
 
@@ -215,27 +212,22 @@ impl Filesystem {
     pub fn at_root(root: impl Into<PathBuf>) -> Result<Self, UniverseError> {
         let root = root.into();
         let filter = ListingFilter::from_repo(&root);
-        let mut objects: Vec<String> = list_entries(&root, "", &filter)?
+        let mut databases: Vec<String> = list_entries(&root, "", &filter)?
             .into_iter()
             .map(|entry| entry.rel_path)
             .collect();
-        objects.sort();
+        databases.sort();
         Ok(Self {
             root,
             filter,
-            objects,
-            samples: Vec::new(),
+            databases,
         })
     }
 
     /// Hide every path outside `prefix`. The prefix and its ancestors remain.
     pub fn set_only(&mut self, prefix: &str) {
         self.filter.set_only(prefix);
-        self.objects.retain(|id| !self.filter.outside(id));
-    }
-
-    pub fn samples(&self) -> &[String] {
-        &self.samples
+        self.databases.retain(|id| !self.filter.outside(id));
     }
 
     fn lookup(&self, id: &str) -> Result<Entry, UniverseError> {
@@ -273,70 +265,21 @@ impl Filesystem {
         })
     }
 
-    fn render_one(&self, id: &str) -> Result<String, UniverseError> {
-        let entry = self.lookup(id)?;
-        if entry.is_dir {
-            Ok(render_listing(
-                id,
-                &list_entries(&self.root, id, &self.filter)?,
-            ))
-        } else {
-            Ok(render_leaf(id, &read_leaf(&repo_join(&self.root, id))?))
-        }
-    }
-
-    fn estimate_one(&self, id: &str) -> Result<usize, UniverseError> {
-        let entry = self.lookup(id)?;
-        if entry.is_dir {
-            Ok(render_listing(id, &list_entries(&self.root, id, &self.filter)?).len())
-        } else {
-            let len = fs::metadata(repo_join(&self.root, id))?.len() as usize;
-            Ok(leaf_header(id).len() + len)
-        }
-    }
-
-    fn estimate_blocks(&self, ids: &[String]) -> Result<usize, UniverseError> {
-        if ids.is_empty() {
-            return Ok(0);
-        }
-        let mut n = 0;
-        for (i, id) in ids.iter().enumerate() {
-            if i > 0 {
-                n += 2;
-            }
-            n += self.estimate_one(id)?;
-        }
-        Ok(n)
-    }
-
-    fn view_ids(&self) -> Vec<String> {
-        let mut ids = self.objects.clone();
-        for s in &self.samples {
-            if !ids.iter().any(|o| o == s) {
-                ids.push(s.clone());
-            }
-        }
-        ids
-    }
-
     fn insert_sorted(vec: &mut Vec<String>, id: String) {
         if let Err(i) = vec.binary_search(&id) {
             vec.insert(i, id);
         }
     }
-}
 
-fn leaf_header(id: &str) -> String {
-    format!("=== {id} ===\n")
-}
-
-fn render_leaf(id: &str, body: &LeafBody) -> String {
-    let mut s = leaf_header(id);
-    match body {
-        LeafBody::Text(text) => s.push_str(text),
-        LeafBody::Binary(n) => s.push_str(&format!("<binary {n} bytes>")),
+    /// Summary length of a directory, or the metadata length of a file.
+    fn measured_len(&self, id: &str) -> Result<usize, UniverseError> {
+        let entry = self.lookup(id)?;
+        if entry.is_dir {
+            Ok(render_listing(id, &list_entries(&self.root, id, &self.filter)?).len())
+        } else {
+            Ok(fs::metadata(repo_join(&self.root, id))?.len() as usize)
+        }
     }
-    s
 }
 
 fn listing_title(id: &str) -> String {
@@ -427,8 +370,8 @@ fn ceil_boundary(text: &str, mut index: usize) -> usize {
 }
 
 impl Universe for Filesystem {
-    fn objects(&self) -> &[String] {
-        &self.objects
+    fn databases(&self) -> &[String] {
+        &self.databases
     }
 
     fn parent(&self, id: &str) -> Option<String> {
@@ -446,131 +389,47 @@ impl Universe for Filesystem {
             .collect())
     }
 
-    fn is_leaf(&self, id: &str) -> Result<bool, UniverseError> {
-        Ok(!self.lookup(id)?.is_dir)
-    }
-
-    fn summary(&self, id: &str) -> Result<super::ObjectSummary, UniverseError> {
+    fn summary(&self, id: &str) -> Result<Option<String>, UniverseError> {
         let entry = self.lookup(id)?;
         if entry.is_dir {
-            let listing = render_listing(id, &list_entries(&self.root, id, &self.filter)?);
-            Ok(super::ObjectSummary {
-                leaf: false,
-                bytes: listing.len() as u64,
-                listing,
-            })
+            Ok(Some(render_listing(
+                id,
+                &list_entries(&self.root, id, &self.filter)?,
+            )))
         } else {
-            let bytes = fs::metadata(repo_join(&self.root, id))?.len();
-            Ok(super::ObjectSummary {
-                leaf: true,
-                bytes,
-                listing: String::new(),
-            })
+            Ok(None)
         }
-    }
-
-    fn estimate(&self) -> Result<usize, UniverseError> {
-        self.estimate_blocks(&self.view_ids())
     }
 
     fn size(&self) -> Result<usize, UniverseError> {
-        Ok(self.render()?.len())
-    }
-
-    fn render(&self) -> Result<String, UniverseError> {
-        let ids = self.view_ids();
-        if ids.is_empty() {
-            return Ok(String::new());
+        let mut total = 0usize;
+        for id in &self.databases {
+            total += self.measured_len(id)?;
         }
-        let mut blocks = Vec::with_capacity(ids.len());
-        for id in &ids {
-            blocks.push(self.render_one(id)?);
-        }
-        Ok(blocks.join("\n\n"))
+        Ok(total)
     }
 
     fn read(&self, id: &str, budget: usize) -> Result<String, UniverseError> {
-        let text = if self.is_leaf(id)? {
-            match read_leaf(&repo_join(&self.root, id))? {
-                LeafBody::Text(text) => text,
-                LeafBody::Binary(n) => format!("<binary {n} bytes>"),
-            }
-        } else {
-            render_listing(id, &list_entries(&self.root, id, &self.filter)?)
+        let entry = self.lookup(id)?;
+        if entry.is_dir {
+            return Err(UniverseError::Summarizable(id.to_string()));
+        }
+        let text = match read_leaf(&repo_join(&self.root, id))? {
+            LeafBody::Text(text) => text,
+            LeafBody::Binary(n) => format!("<binary {n} bytes>"),
         };
         Ok(trim_text(&text, budget))
     }
 
-    fn render_capped(&self, id: &str, budget: usize) -> Result<String, UniverseError> {
-        let rendered = self.render_one(id)?;
-        if rendered.len() <= budget || !self.is_leaf(id)? {
-            return Ok(rendered);
-        }
-        let header = leaf_header(id);
-        let marker_len = "\n…\n".len();
-        let body_budget = budget
-            .saturating_sub(header.len())
-            .saturating_sub(marker_len);
-        match read_trimmed(&self.root, id, body_budget.max(1)) {
-            Ok((body, _)) => Ok(render_leaf(id, &LeafBody::Text(body))),
-            Err(_) => Ok(rendered),
-        }
-    }
-
-    fn samples(&self) -> &[String] {
-        &self.samples
-    }
-
-    fn sample(&mut self, extra_budget: usize) -> Result<(), UniverseError> {
-        if extra_budget == 0 || self.objects.is_empty() {
-            return Ok(());
-        }
-        let base = self.estimate_blocks(&self.objects)?;
-        let cap = base.saturating_add(extra_budget);
-        let mut queues: Vec<VecDeque<String>> = Vec::new();
-        for parent in &self.objects {
-            queues.push(self.children(parent)?.into());
-        }
-        loop {
-            let mut added = false;
-            for queue in &mut queues {
-                while let Some(child) = queue.pop_front() {
-                    if self.objects.binary_search(&child).is_ok()
-                        || self.samples.binary_search(&child).is_ok()
-                    {
-                        continue;
-                    }
-                    let candidate = child.clone();
-                    Self::insert_sorted(&mut self.samples, child);
-                    if self.estimate()? > cap {
-                        if let Ok(i) = self.samples.binary_search(&candidate) {
-                            self.samples.remove(i);
-                        }
-                        continue;
-                    }
-                    added = true;
-                    break;
-                }
-            }
-            if !added {
-                break;
-            }
-        }
-        Ok(())
-    }
-
     fn insert(&mut self, id: String) -> Result<(), UniverseError> {
         let _ = self.lookup(&id)?;
-        if let Ok(i) = self.samples.binary_search(&id) {
-            self.samples.remove(i);
-        }
-        Self::insert_sorted(&mut self.objects, id);
+        Self::insert_sorted(&mut self.databases, id);
         Ok(())
     }
 
     fn remove(&mut self, id: &str) {
-        if let Ok(i) = self.objects.binary_search(&id.to_string()) {
-            self.objects.remove(i);
+        if let Ok(i) = self.databases.binary_search(&id.to_string()) {
+            self.databases.remove(i);
         }
     }
 
@@ -581,8 +440,7 @@ impl Universe for Filesystem {
         for id in &next {
             let _ = self.lookup(id)?;
         }
-        self.objects = next;
-        self.samples.clear();
+        self.databases = next;
         Ok(())
     }
 }
@@ -670,7 +528,7 @@ mod tests {
     fn toy_layered_opens_on_leaf_files() {
         let fs = Filesystem::open("examples/toy-layered").unwrap();
         assert_eq!(
-            fs.objects(),
+            fs.databases(),
             &[
                 "backend/__init__.py",
                 "backend/api.py",
@@ -682,25 +540,30 @@ mod tests {
     }
 
     #[test]
-    fn leaf_render_includes_path_and_body() {
+    fn leaf_read_is_the_body_and_size_is_its_length() {
         let mut fs = Filesystem::open("examples/toy-layered").unwrap();
         fs.set(vec!["frontend/app.py".into()]).unwrap();
-        let text = fs.render().unwrap();
-        assert!(text.starts_with("=== frontend/app.py ===\n"), "{text}");
+        let text = fs.read("frontend/app.py", usize::MAX).unwrap();
         assert!(text.contains("from backend import api"), "{text}");
-        assert!(!text.contains("frontend/\n"), "{text}");
+        assert!(!text.contains("==="), "{text}");
+        assert!(fs.summary("frontend/app.py").unwrap().is_none());
+        assert_eq!(fs.size().unwrap(), text.len());
     }
 
     #[test]
-    fn dir_render_is_a_listing_not_file_bodies() {
+    fn directory_summary_is_a_listing_not_file_bodies() {
         let mut fs = Filesystem::open("examples/toy-layered").unwrap();
         fs.set(vec!["frontend".into()]).unwrap();
-        let text = fs.render().unwrap();
+        let text = fs.summary("frontend").unwrap().unwrap();
         assert!(text.starts_with("frontend/\n"), "{text}");
         assert!(text.contains("  __init__.py"), "{text}");
         assert!(text.contains("  app.py"), "{text}");
         assert!(!text.contains("from backend import api"), "{text}");
-        assert!(!text.contains("==="), "{text}");
+        assert!(matches!(
+            fs.read("frontend", usize::MAX),
+            Err(UniverseError::Summarizable(_))
+        ));
+        assert_eq!(fs.size().unwrap(), text.len());
     }
 
     fn top_dirs(fs: &mut Filesystem) {
@@ -731,7 +594,7 @@ mod tests {
     fn at_root_opens_on_children() {
         let fs = Filesystem::at_root("examples/toy-layered").unwrap();
         assert_eq!(
-            fs.objects(),
+            fs.databases(),
             &[
                 "backend".to_string(),
                 "decoy".to_string(),
@@ -743,46 +606,13 @@ mod tests {
     #[test]
     fn directory_view_is_smaller_than_leaves() {
         let mut fs = Filesystem::open("examples/toy-layered").unwrap();
-        let leaf_est = fs.estimate().unwrap();
         let leaf_size = fs.size().unwrap();
-        assert_eq!(leaf_size, fs.render().unwrap().len());
         top_dirs(&mut fs);
-        let dir_est = fs.estimate().unwrap();
         let dir_size = fs.size().unwrap();
-        assert_eq!(dir_size, fs.render().unwrap().len());
-        assert_eq!(dir_est, dir_size, "directory listings are exact");
-        assert!(dir_est < leaf_est, "dirs {dir_est} vs leaves {leaf_est}");
         assert!(
             dir_size < leaf_size,
             "dirs {dir_size} vs leaves {leaf_size}"
         );
-    }
-
-    #[test]
-    fn sample_adds_context_not_candidates() {
-        let mut fs = Filesystem::open("examples/toy-layered").unwrap();
-        top_dirs(&mut fs);
-        let dirs = fs.objects().to_vec();
-        fs.sample(4096).unwrap();
-        assert_eq!(fs.objects(), dirs);
-        assert!(!fs.samples().is_empty(), "expected sampled children");
-        let text = fs.render().unwrap();
-        assert!(text.contains("==="), "{text}");
-        assert!(
-            text.contains("def handle():")
-                || text.contains("from backend import api")
-                || text.contains("Not part of the layered architecture"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn sample_zero_budget_is_noop() {
-        let mut fs = Filesystem::open("examples/toy-layered").unwrap();
-        top_dirs(&mut fs);
-        fs.sample(0).unwrap();
-        assert!(fs.samples().is_empty());
-        assert!(!fs.render().unwrap().contains("==="));
     }
 
     #[test]
@@ -791,32 +621,26 @@ mod tests {
         top_dirs(&mut fs);
         fs.remove("decoy");
         assert_eq!(
-            fs.objects(),
+            fs.databases(),
             &["backend".to_string(), "frontend".to_string()]
         );
-        let text = fs.render().unwrap();
-        assert!(!text.contains("decoy"), "{text}");
         fs.insert("decoy".into()).unwrap();
         assert_eq!(
-            fs.objects(),
+            fs.databases(),
             &[
                 "backend".to_string(),
                 "decoy".to_string(),
                 "frontend".to_string()
             ]
         );
-        assert!(fs.render().unwrap().contains("decoy/"));
     }
 
     #[test]
-    fn set_replaces_view_and_drops_samples() {
+    fn set_replaces_the_view() {
         let mut fs = Filesystem::open("examples/toy-layered").unwrap();
         top_dirs(&mut fs);
-        fs.sample(4096).unwrap();
-        assert!(!fs.samples().is_empty());
         fs.set(vec!["frontend/app.py".into()]).unwrap();
-        assert_eq!(fs.objects(), &["frontend/app.py".to_string()]);
-        assert!(fs.samples().is_empty());
+        assert_eq!(fs.databases(), &["frontend/app.py".to_string()]);
     }
 
     #[test]
@@ -827,17 +651,20 @@ mod tests {
     }
 
     #[test]
-    fn binary_leaf_renders_placeholder() {
+    fn binary_leaf_reads_as_a_placeholder() {
         let root = scratch_dir("binary");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("ok.txt"), "hello\n").unwrap();
         std::fs::write(root.join("blob.bin"), [0u8, 159, 146, 150]).unwrap();
         let mut fs = Filesystem::open(&root).unwrap();
         fs.set(vec!["blob.bin".into()]).unwrap();
-        let text = fs.render().unwrap();
+        let text = fs.read("blob.bin", usize::MAX).unwrap();
+        let summary = fs.summary("blob.bin").unwrap();
+        let size = fs.size().unwrap();
         let _ = std::fs::remove_dir_all(&root);
-        assert!(text.contains("=== blob.bin ==="), "{text}");
-        assert!(text.contains("<binary 4 bytes>"), "{text}");
+        assert_eq!(text, "<binary 4 bytes>");
+        assert!(summary.is_none());
+        assert_eq!(size, 4);
     }
 
     #[test]

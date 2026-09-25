@@ -94,7 +94,7 @@ enum Commands {
         /// Repository to search. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
-        /// Render budget in bytes. Leftover room is filled with one level of samples.
+        /// Byte budget for one directory-listing state sent to the oracle.
         #[arg(long, default_value_t = DEFAULT_BUDGET_BYTES)]
         budget: usize,
         #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
@@ -129,7 +129,7 @@ enum Commands {
         budget: usize,
         #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
         judge: JudgeKind,
-        /// Also print every judged object as text.
+        /// Also print every judged database as text.
         #[arg(long)]
         full: bool,
         /// Reopen a recorded read trace.
@@ -249,7 +249,7 @@ fn search_cmd(
         kind: autoground::search::trace::TRACE_KIND.to_string(),
         proposition: proposition.to_string(),
         repo_name: repo_name.to_string(),
-        objects: searched.objects,
+        databases: searched.databases,
         bytes_before: searched.bytes_before,
         bytes_after: searched.bytes_after,
         usage: UsageRecord::from_usage(&searched.usage),
@@ -268,7 +268,7 @@ fn search_cmd(
 }
 
 struct Searched {
-    objects: Vec<String>,
+    databases: Vec<String>,
     steps: Vec<SearchStep>,
     usage: Usage,
     bytes_before: u64,
@@ -288,7 +288,7 @@ fn run_search<O: Oracle>(
     let ticket = session.submit(proposition);
     match session.wait(ticket) {
         Ok(view) => Ok(Searched {
-            objects: window_lines(&view.universe)?,
+            databases: window_lines(&view.universe)?,
             steps: view.steps,
             usage: view.usage,
             bytes_before: view.bytes_before as u64,
@@ -298,7 +298,7 @@ fn run_search<O: Oracle>(
         Err(error) => {
             let message = error.to_string();
             Ok(Searched {
-                objects: Vec::new(),
+                databases: Vec::new(),
                 steps: error.steps,
                 usage: error.usage,
                 bytes_before: 0,
@@ -386,7 +386,7 @@ fn run_read<O: Oracle>(
     match session.wait(ticket) {
         Ok(finding) => Ok(ReadOutcome {
             value: finding.value,
-            evidence: finding.evidence.objects().to_vec(),
+            evidence: finding.evidence.databases().to_vec(),
             exhausted: finding.exhausted,
             candidate_bytes: finding.candidate_bytes,
             evidence_bytes: finding.evidence_bytes,

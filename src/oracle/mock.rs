@@ -43,7 +43,7 @@ impl<U: Universe> HeuristicOracle<U> {
     fn noul(&self, req: &Classification) -> Answer {
         let proposition = field(&req.instructions, "proposition");
         let path = field(&req.instructions, "path");
-        let known = self.universe.is_leaf(path).is_ok();
+        let known = self.universe.summary(path).is_ok();
         let noul = if known && path_matches(path, &tokens(proposition)) {
             0.05
         } else {
@@ -60,7 +60,7 @@ impl<U: Universe> HeuristicOracle<U> {
     fn choice(&self, req: &Classification) -> Answer {
         let proposition = field(&req.instructions, "proposition");
         let path = asked_path(req);
-        let known = self.universe.is_leaf(path).is_ok();
+        let known = self.universe.summary(path).is_ok();
         let choice = if req.criteria.get("entailed").is_some()
             && known
             && path_matches(path, &tokens(proposition))

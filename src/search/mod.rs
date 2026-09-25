@@ -2,14 +2,15 @@
 //! to be found.
 //!
 //! [`Search::submit`] enqueues a proposition. [`Search::wait`] flushes every
-//! pending proposition together: directory listings are built once, and each
-//! proposition adds one yes/no question for every directory. The question
-//! asks whether that subtree is irrelevant to the proposition, and
-//! the listing in the state is the subtree the question judges. The oracle
-//! batches questions that share a state. A directory drops when its own
-//! answer is irrelevant at or above [`PRUNE_FLOOR`]. What remains is a
-//! clone of the universe whose window is the kept directories and the files
-//! under them. File bodies are not judged.
+//! pending proposition together: summaries are built once, and each proposition
+//! adds one yes/no question for every summarizable database except the root. The
+//! question asks whether that subtree is irrelevant to the proposition. The
+//! shared state is the child-name tree. Each question also carries that
+//! database's [`Universe::summary`]: a directory listing on a repository, the
+//! prompt text on a transcript. The oracle batches questions that share a
+//! state. A summarizable database drops when its own answer is irrelevant at or
+//! above [`PRUNE_FLOOR`]. What remains is a clone of the universe whose window
+//! is the kept databases and the readable databases under them. Bodies are not judged.
 
 mod tui;
 
@@ -28,9 +29,9 @@ use crate::oracle::jev::QUESTION_BUDGET;
 use crate::oracle::{Classification, Oracle, Ticket as OracleTicket, Usage};
 use crate::universe::{Universe, UniverseError};
 
-use trace::{ExchangeRecord, SearchStep, ViewObject};
+use trace::{ExchangeRecord, SearchStep, ViewDatabase};
 
-/// Default render budget for one directory-listing state. About 12k tokens at
+/// Default byte budget for one directory-listing state. About 12k tokens at
 /// 4 bytes each, under Jev's 32k state-side cap.
 pub const DEFAULT_BUDGET_BYTES: usize = 48 * 1024;
 
@@ -67,9 +68,8 @@ impl fmt::Display for Applied {
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct Decision {
     pub id: String,
-    pub leaf: bool,
     /// `1 - P(irrelevant)`. Higher means information about the proposition is
-    /// more likely under this directory. Keep and prune are derived from this
+    /// more likely under this database. Keep and prune are derived from this
     /// and a floor; the number does not change meaning with the label.
     pub signal: f64,
     pub applied: Applied,
@@ -84,9 +84,9 @@ pub struct View<U> {
     pub trace: Vec<Decision>,
     pub steps: Vec<SearchStep>,
     pub usage: Usage,
-    /// [`Universe::estimate`] of every reachable object, before pruning.
+    /// [`Universe::size`] of every reachable database, before pruning.
     pub bytes_before: usize,
-    /// [`Universe::estimate`] of the pruned window.
+    /// [`Universe::size`] of the pruned window.
     pub bytes_after: usize,
 }
 
@@ -114,7 +114,7 @@ struct Pending {
 struct Group {
     state: Json,
     ids: Vec<String>,
-    view: Vec<ViewObject>,
+    view: Vec<ViewDatabase>,
 }
 
 /// A universe and an oracle shared by every proposition submitted to this
@@ -238,14 +238,14 @@ where
         if pending.is_empty() {
             return;
         }
-        let directories = match directories_under(&self.universe, "") {
-            Ok(directories) => directories,
+        let summarizable = match summarizable_under(&self.universe, "") {
+            Ok(summarizable) => summarizable,
             Err(error) => {
                 self.reject_all(pending, error.to_string());
                 return;
             }
         };
-        let chunks = match pack_directories(&self.universe, &directories, self.budget) {
+        let chunks = match pack_summarizable(&self.universe, &summarizable, self.budget) {
             Ok(chunks) => chunks,
             Err(error) => {
                 self.reject_all(pending, error.to_string());
@@ -254,7 +254,7 @@ where
         };
         let mut groups = Vec::new();
         for chunk in chunks {
-            let state = match directory_state(&self.universe, &chunk) {
+            let state = match child_tree(&self.universe, &chunk) {
                 Ok(state) => state,
                 Err(error) => {
                     self.reject_all(pending, error.to_string());
@@ -289,6 +289,25 @@ where
                 return;
             }
         };
+        let mut listings: HashMap<String, String> = HashMap::new();
+        for name in &names {
+            if !name.summarizable {
+                continue;
+            }
+            match self.universe.summary(&name.path) {
+                Ok(Some(listing)) => {
+                    listings.insert(name.path.clone(), listing);
+                }
+                Ok(None) => {
+                    self.reject_all(pending, format!("{} has no summary", name.path));
+                    return;
+                }
+                Err(error) => {
+                    self.reject_all(pending, error.to_string());
+                    return;
+                }
+            }
+        }
 
         let mut steps: HashMap<Ticket, Vec<SearchStep>> = HashMap::new();
         let mut asks = Vec::new();
@@ -301,13 +320,15 @@ where
                     exchange: None,
                 });
                 for name in names_in_group(&groups, index, &names) {
-                    if !name.directory {
+                    if !name.summarizable {
                         continue;
                     }
+                    let listing = listings.get(&name.path).map(String::as_str).unwrap_or("");
                     let oracle_ticket = self.oracle.submit(irrelevant_question(
                         &group.state,
                         &name.path,
                         &item.proposition,
+                        listing,
                     ));
                     asks.push(Ask {
                         search_ticket: item.ticket,
@@ -375,7 +396,7 @@ where
         }
 
         let usage = self.oracle.usage();
-        let bytes_before = reachable_estimate(&self.universe).unwrap_or(0);
+        let bytes_before = reachable_size(&self.universe).unwrap_or(0);
         for item in pending {
             let prop_steps = steps.remove(&item.ticket).unwrap_or_default();
             self.log_steps(&prop_steps);
@@ -423,7 +444,7 @@ where
                 );
                 continue;
             }
-            let bytes_after = universe.estimate().unwrap_or(0);
+            let bytes_after = universe.size().unwrap_or(0);
             self.resolved.insert(
                 item.ticket,
                 Ok(View {
@@ -440,38 +461,42 @@ where
     }
 }
 
-/// [`Universe::estimate`] of every reachable file and directory.
-fn reachable_estimate<U: Universe + Clone>(universe: &U) -> Result<usize, UniverseError> {
+/// [`Universe::size`] of every reachable file and directory.
+fn reachable_size<U: Universe + Clone>(universe: &U) -> Result<usize, UniverseError> {
     let mut full = universe.clone();
     let mut ids = Vec::new();
     let mut stack = vec![String::new()];
     while let Some(dir) = stack.pop() {
         for child in full.children(&dir)? {
             ids.push(child.clone());
-            if !full.is_leaf(&child)? {
+            if summarized(&full, &child)? {
                 stack.push(child);
             }
         }
     }
     full.set(ids)?;
-    full.estimate()
+    full.size()
 }
 
 /// Paths in the window, directories with a trailing slash.
 pub fn window_lines<U: Universe>(universe: &U) -> Result<Vec<String>, UniverseError> {
     let mut lines = Vec::new();
-    for id in universe.objects() {
-        lines.push(display_path(id, universe.is_leaf(id)?));
+    for id in universe.databases() {
+        lines.push(display_path(id, summarized(universe, id)?));
     }
     Ok(lines)
 }
 
-fn directories_under<U: Universe>(universe: &U, root: &str) -> Result<Vec<String>, UniverseError> {
+fn summarized<U: Universe>(universe: &U, id: &str) -> Result<bool, UniverseError> {
+    Ok(universe.summary(id)?.is_some())
+}
+
+fn summarizable_under<U: Universe>(universe: &U, root: &str) -> Result<Vec<String>, UniverseError> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_string()];
     while let Some(dir) = stack.pop() {
         for child in universe.children(&dir)? {
-            if universe.is_leaf(&child)? {
+            if !summarized(universe, &child)? {
                 continue;
             }
             out.push(child.clone());
@@ -482,7 +507,7 @@ fn directories_under<U: Universe>(universe: &U, root: &str) -> Result<Vec<String
     Ok(out)
 }
 
-fn candidate_files<U: Universe>(
+fn readable_under<U: Universe>(
     universe: &U,
     pruned: &HashSet<String>,
 ) -> Result<Vec<String>, UniverseError> {
@@ -493,10 +518,12 @@ fn candidate_files<U: Universe>(
             continue;
         }
         for child in universe.children(&dir)? {
-            if universe.is_leaf(&child)? {
+            if summarized(universe, &child)? {
+                if !pruned.contains(&child) {
+                    stack.push(child);
+                }
+            } else {
                 out.push(child);
-            } else if !pruned.contains(&child) {
-                stack.push(child);
             }
         }
     }
@@ -508,19 +535,19 @@ fn candidate_ids<U: Universe>(
     universe: &U,
     decisions: &[Decision],
 ) -> Result<Vec<String>, UniverseError> {
-    let pruned = pruned_directories(universe, decisions);
+    let pruned = pruned_ids(universe, decisions);
     let mut ids: Vec<String> = decisions
         .iter()
         .filter(|decision| !pruned.contains(&decision.id))
         .map(|decision| decision.id.clone())
         .collect();
-    ids.extend(candidate_files(universe, &pruned)?);
+    ids.extend(readable_under(universe, &pruned)?);
     ids.sort();
     ids.dedup();
     Ok(ids)
 }
 
-fn pruned_directories<U: Universe>(universe: &U, decisions: &[Decision]) -> HashSet<String> {
+fn pruned_ids<U: Universe>(universe: &U, decisions: &[Decision]) -> HashSet<String> {
     let mut ids: Vec<&str> = decisions
         .iter()
         .map(|decision| decision.id.as_str())
@@ -548,17 +575,17 @@ fn ancestor_pruned<U: Universe>(universe: &U, id: &str, pruned: &HashSet<String>
     false
 }
 
-fn pack_directories<U: Universe>(
+fn pack_summarizable<U: Universe>(
     universe: &U,
     ids: &[String],
     budget: usize,
 ) -> Result<Vec<Vec<String>>, UniverseError> {
     pack_by(ids, budget, |chunk| {
-        directory_state(universe, chunk).map(|state| json_len(&state))
+        child_tree(universe, chunk).map(|state| json_len(&state))
     })
 }
 
-fn directory_state<U: Universe>(universe: &U, ids: &[String]) -> Result<Json, UniverseError> {
+fn child_tree<U: Universe>(universe: &U, ids: &[String]) -> Result<Json, UniverseError> {
     let mut keys = vec![String::new()];
     keys.extend(ids.iter().cloned());
     keys.sort();
@@ -568,10 +595,10 @@ fn directory_state<U: Universe>(universe: &U, ids: &[String]) -> Result<Json, Un
         let mut names = Vec::new();
         for child in universe.children(&id)? {
             let name = child.rsplit('/').next().unwrap_or(&child);
-            if universe.is_leaf(&child)? {
-                names.push(Json::String(name.to_string()));
-            } else {
+            if summarized(universe, &child)? {
                 names.push(Json::String(format!("{name}/")));
+            } else {
+                names.push(Json::String(name.to_string()));
             }
         }
         map.insert(id, Json::Array(names));
@@ -613,24 +640,22 @@ where
     Ok(chunks)
 }
 
-fn capture<U: Universe>(universe: &U, ids: &[String]) -> Result<Vec<ViewObject>, UniverseError> {
+fn capture<U: Universe>(universe: &U, ids: &[String]) -> Result<Vec<ViewDatabase>, UniverseError> {
     let mut view = Vec::new();
-    let summary = universe.summary("")?;
-    view.push(ViewObject {
+    let root = universe.summary("")?.unwrap_or_default();
+    view.push(ViewDatabase {
         target: false,
         id: String::new(),
-        leaf: false,
-        bytes: summary.bytes,
-        listing: summary.listing,
+        bytes: root.len() as u64,
+        listing: root,
     });
     for id in ids {
-        let summary = universe.summary(id)?;
-        view.push(ViewObject {
+        let listing = universe.summary(id)?.unwrap_or_default();
+        view.push(ViewDatabase {
             target: true,
             id: id.clone(),
-            leaf: summary.leaf,
-            bytes: summary.bytes,
-            listing: summary.listing,
+            bytes: listing.len() as u64,
+            listing,
         });
     }
     Ok(view)
@@ -646,7 +671,7 @@ fn apply_signal(signal: f64, floor: f64) -> Applied {
     }
 }
 
-/// Object ids kept when each directory's irrelevance is compared with `floor`.
+/// Database ids kept when each directory's irrelevance is compared with `floor`.
 ///
 /// `universe` is the full tree. `children` is read from disk, so a universe
 /// whose window is already narrowed still yields the same ids.
@@ -677,7 +702,7 @@ fn irrelevant_criteria() -> Json {
 
 struct ListedName {
     path: String,
-    directory: bool,
+    summarizable: bool,
     parent: String,
 }
 
@@ -686,13 +711,13 @@ fn listing_names<U: Universe>(universe: &U) -> Result<Vec<ListedName>, UniverseE
     let mut stack = vec![String::new()];
     while let Some(dir) = stack.pop() {
         for child in universe.children(&dir)? {
-            let directory = !universe.is_leaf(&child)?;
+            let summarizable = summarized(universe, &child)?;
             out.push(ListedName {
                 path: child.clone(),
-                directory,
+                summarizable,
                 parent: dir.clone(),
             });
-            if directory {
+            if summarizable {
                 stack.push(child);
             }
         }
@@ -713,7 +738,7 @@ fn names_in_group<'a>(
 }
 
 fn group_for(groups: &[Group], name: &ListedName) -> usize {
-    let key = if name.directory {
+    let key = if name.summarizable {
         name.path.as_str()
     } else {
         name.parent.as_str()
@@ -727,13 +752,19 @@ fn group_for(groups: &[Group], name: &ListedName) -> usize {
         .unwrap_or(0)
 }
 
-fn irrelevant_question(state: &Json, path: &str, proposition: &str) -> Classification {
+fn irrelevant_question(
+    state: &Json,
+    path: &str,
+    proposition: &str,
+    listing: &str,
+) -> Classification {
     let name = path.rsplit('/').next().unwrap_or(path);
     Classification::noul(
         state.clone(),
         json!({
             "path": path,
             "name": name,
+            "listing": listing,
             "proposition": proposition,
             "question": IRRELEVANT_QUESTION,
         }),
@@ -748,19 +779,18 @@ fn irrelevant_question(state: &Json, path: &str, proposition: &str) -> Classific
 fn decision_from_signal(id: &str, signal: f64) -> Decision {
     Decision {
         id: id.to_string(),
-        leaf: false,
         signal,
         applied: apply_signal(signal, PRUNE_FLOOR),
     }
 }
 
-fn display_path(id: &str, leaf: bool) -> String {
+fn display_path(id: &str, summarized: bool) -> String {
     if id.is_empty() {
         "/".to_string()
-    } else if leaf {
-        id.to_string()
-    } else {
+    } else if summarized {
         format!("{id}/")
+    } else {
+        id.to_string()
     }
 }
 
@@ -770,7 +800,7 @@ pub fn format_trace(trace: &[Decision]) -> String {
         out.push_str(&format!(
             "{:<8}{}  signal={:.2}\n",
             decision.applied.as_str(),
-            display_path(&decision.id, decision.leaf),
+            display_path(&decision.id, true),
             decision.signal
         ));
     }
@@ -972,25 +1002,26 @@ mod tests {
         root
     }
 
-    fn search_one(
-        universe: Filesystem,
+    fn search_one<U: Universe + Clone>(
+        universe: U,
         oracle: Script,
         proposition: &str,
         budget: usize,
-    ) -> (View<Filesystem>, Script) {
+    ) -> (View<U>, Script) {
         let mut session = Search::new(universe, oracle, budget);
         let ticket = session.submit(proposition);
         let view = session.wait(ticket).unwrap();
         (view, session.oracle)
     }
 
-    fn ids(view: &View<Filesystem>) -> Vec<String> {
-        view.universe.objects().to_vec()
+    fn ids<U: Universe>(view: &View<U>) -> Vec<String> {
+        view.universe.databases().to_vec()
     }
 
     #[test]
     fn kept_directory_and_its_files_are_the_window() {
         let universe = Filesystem::at_root("examples/toy-layered").unwrap();
+        let frontend_listing = universe.summary("frontend").unwrap().unwrap();
         let (view, oracle) = search_one(
             universe,
             Script::new(toy(&[("frontend", "keep", 0.95)])),
@@ -1016,6 +1047,16 @@ mod tests {
         assert!(sample.instructions["proposition"].is_string());
         assert!(sample.criteria["true"].is_string());
         assert!(sample.criteria.get("keep").is_none());
+        let frontend = oracle
+            .log
+            .iter()
+            .find(|classification| classification.instructions["path"] == "frontend")
+            .unwrap();
+        assert_eq!(frontend.instructions["listing"], frontend_listing);
+        assert!(
+            frontend_listing.starts_with("frontend/\n"),
+            "{frontend_listing}"
+        );
         assert_eq!(
             ids(&view),
             vec![
