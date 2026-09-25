@@ -124,15 +124,78 @@ Exhausting the candidate view with no witness is false.
 
 Returns the truth value plus the evidence view: the databases the value depends on.
 
+### Language
+
+`autoground` is ultimately a tool for (re-)establishing shared context between the author
+and the reader of a codebase. Shared context is:
+
+1. Shared ontology. (<- our current focus)
+2. Shared definitions.
+3. Shared constraints.
+4. Shared motivation.
+
+Aligning ontologies means using the same name for things that relate in the same way.
+Consistent naming is the biggest lever for keeping complexity in check. This is what the
+`autoground` modeling language is meant to help with.
+
+A model consists of *names*, *senses*, and *claims*:
+
+```clojure
+;; Names
+(name X)
+(name Y)
+
+;; Senses are readings of a relationship, potentially with holes.
+(“X has an identifier”)                             ;; nullary, unnamed
+(“{Name} has an identifier” X)                      ;; unary, unnamed
+(“{Name} has a {Name}” X foo)                       ;; binary, unnamed
+(sense component “{Name} is a part of the system”)  ;; unary, named
+(sense part_of “{Name} is a part of {Name}”)        ;; binary, named
+
+;; Roles name the holes on a sense, to disambiguate.
+(sense property "{object} has a {property}” X foo)
+(sense borrowed_from “{borrower} borrowed from {lender}”)
+
+;; Claims are logical propositions without quantifiers.
+(component X)
+(part_of X Y)
+
+(and
+  (component X)
+  (component Y)
+  (depends_on X Y))
+
+(or
+  (part_of X Y)
+  (part_of Y X))
+
+(not (depends_on X Y))
+```
+
+### Verbalization
+
+TBD verbalization is how we go from symbolic atoms to unstructured propositions.
+
+```clojure
+;; Names verbalize as themselves.
+(name X) ;; => “X”
+(name Y) ;; => “Y”
+
+;; Fully ground senses verbalize as themselves.
+(“X has an identifier”) ;; => "X has an identifier"
+
+(sense component “{Name} is a part of the system”)
+(sense part_of “{Name} is a part of {Name}”)
+
+(component X) ;; => "X is a part of the system"
+(part_of X Y) ;; => (“{Name} is a part of {Name}” X Y) => “X is a part of Y”
+```
+
 ### Symbolic Evaluation
 
 The planner decomposes a model into positive atomic propositions, submits them to the
 reader, applies negation itself, and combines the findings with Kleene three-valued logic.
 It does not render a file body. Not built yet.
-
-### Verbalization
-
-TBD verbalization is how we go from symbolic atoms to unstructured propositions.
 
 
 ## Implementation
