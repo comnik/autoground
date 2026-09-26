@@ -124,7 +124,7 @@ Exhausting the candidate view with no witness is false.
 
 Returns the truth value plus the evidence view: the databases the value depends on.
 
-### Language
+### The `lect` Language
 
 `autoground` is ultimately a tool for (re-)establishing shared context between the author
 and the reader of a codebase. Shared context is:
@@ -136,25 +136,32 @@ and the reader of a codebase. Shared context is:
 
 Aligning ontologies means using the same name for things that relate in the same way.
 Consistent naming is the biggest lever for keeping complexity in check. This is what the
-`autoground` modeling language is meant to help with.
+`lect` modeling language is meant to help with.
 
 A model consists of *names*, *senses*, and *claims*:
 
-```clojure
+```lect
+;; A namespace is the name declared here. This file can live anywhere
+;; in the repository.
+(ns autoground.examples
+  (:require [autoground.core :as core]
+            [autoground.names :refer [Oracle]]
+            [autoground.api :refer :all]))
+
 ;; Names
 (name X)
 (name Y)
 
 ;; Senses are readings of a relationship, potentially with holes.
-(“X has an identifier”)                             ;; nullary, unnamed
-(“{Name} has an identifier” X)                      ;; unary, unnamed
-(“{Name} has a {Name}” X foo)                       ;; binary, unnamed
-(sense component “{Name} is a part of the system”)  ;; unary, named
-(sense part_of “{Name} is a part of {Name}”)        ;; binary, named
+("X has an identifier")                             ;; nullary, unnamed
+("{Name} has an identifier" X)                      ;; unary, unnamed
+("{Name} has a {Name}" X foo)                       ;; binary, unnamed
+(sense component "{Name} is a part of the system")  ;; unary, named
+(sense part_of "{Name} is a part of {Name}")        ;; binary, named
 
 ;; Roles name the holes on a sense, to disambiguate.
-(sense property "{object} has a {property}” X foo)
-(sense borrowed_from “{borrower} borrowed from {lender}”)
+(sense property "{object} has a {property}")
+(sense borrowed_from "{borrower} borrowed from {lender}")
 
 ;; Claims are logical propositions without quantifiers.
 (component X)
@@ -173,7 +180,11 @@ A model consists of *names*, *senses*, and *claims*:
 ```
 
 Wherever a `.lect` file is accepted, a `.md` file is too: every fenced `lect` block is
-taken, in order, and the rest of the document is left out.
+taken, in order, and the rest of the document is left out. `(:require ...)` finds another
+namespace by the name it declares. A `.lect` file can sit anywhere in the repository.
+
+The filesystem universe implementation filters out `.lect` files to make sure unvalidated
+claims are never treated as evidence.
 
 ### Verbalization
 
@@ -181,13 +192,13 @@ TBD verbalization is how we go from symbolic atoms to unstructured propositions.
 
 ```clojure
 ;; Fully ground senses verbalize as themselves.
-(“X has an identifier”) ;; => "X has an identifier"
+("X has an identifier") ;; => "X has an identifier"
 
-(sense component “{Name} is a part of the system”)
-(sense part_of “{Name} is a part of {Name}”)
+(sense component "{Name} is a part of the system")
+(sense part_of "{Name} is a part of {Name}")
 
 (component X) ;; => "X is a part of the system"
-(part_of X Y) ;; => (“{Name} is a part of {Name}” X Y) => “X is a part of Y”
+(part_of X Y) ;; => ("{Name} is a part of {Name}" X Y) => "X is a part of Y"
 ```
 
 ### Symbolic Evaluation
