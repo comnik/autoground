@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use autoground::log::Log;
 use autoground::oracle::{Flight, HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::plan::Plan;
-use autoground::read::{present_read, Finding, ReadTraceFile, Reader, Verdict};
+use autoground::read::{present_read, Finding, ReadTraceFile, Reader, Stance, Verdict};
+use autoground::report::map::write_context;
 use autoground::report::run::{Explain, Ground};
 use autoground::report::summary::print_run_summary;
 use autoground::search::trace::SearchStep;
@@ -553,6 +554,7 @@ fn run_cmd(
         Judged {
             values: Vec::new(),
             grounds: Vec::new(),
+            stances: Vec::new(),
             usage: Usage::default(),
             flights: Vec::new(),
             flight_limit: None,
@@ -571,6 +573,7 @@ fn run_cmd(
     log.clear_hook();
     let atom_values = judged.values;
     let grounds = judged.grounds;
+    let stances = judged.stances;
     let usage = judged.usage;
     let flights = judged.flights;
     let flight_limit = judged.flight_limit;
@@ -593,6 +596,7 @@ fn run_cmd(
             "usage": UsageRecord::from_usage(&usage),
         }),
     )?;
+    write_context(log.path(), &planned, &claim_values, &stances)?;
     let true_count = claim_values
         .iter()
         .filter(|value| **value == autoground::Value::True)
@@ -632,6 +636,7 @@ fn load_plan(input: &str) -> Result<Plan, Box<dyn std::error::Error>> {
 struct Judged {
     values: Vec<autoground::Value>,
     grounds: Vec<Ground>,
+    stances: Vec<Vec<Stance>>,
     usage: Usage,
     flights: Vec<Flight>,
     flight_limit: Option<usize>,
@@ -668,10 +673,12 @@ fn read_with<U: Universe + Clone, O: Oracle>(
         .collect();
     let mut values = Vec::with_capacity(tickets.len());
     let mut grounds = Vec::with_capacity(tickets.len());
+    let mut stances = Vec::with_capacity(tickets.len());
     for result in reader.wait_many(&tickets) {
         let finding = result?;
         values.push(finding.value);
         grounds.push(ground_of(&finding));
+        stances.push(finding.stances);
     }
     let flights = reader.flights().to_vec();
     let flight_limit = reader.flight_limit();
@@ -679,6 +686,7 @@ fn read_with<U: Universe + Clone, O: Oracle>(
     Ok(Judged {
         values,
         grounds,
+        stances,
         usage,
         flights,
         flight_limit,

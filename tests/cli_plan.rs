@@ -168,4 +168,27 @@ fn heuristic_run_combines_and_or_and_not() {
     let body = std::fs::read_to_string(path).unwrap();
     assert!(body.contains("\"kind\":\"run\""), "{body}");
     assert!(body.contains("there is a GPU compiler"), "{body}");
+    let map_path = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("context available at "))
+        .expect("context path");
+    assert!(
+        map_path.starts_with("/tmp/autoground/context-") && map_path.ends_with(".md"),
+        "{map_path}"
+    );
+    let map = std::fs::read_to_string(map_path).unwrap();
+    assert_eq!(
+        map,
+        "\
+NOT: there is a GPU compiler
+
+Frontend is part of the system
+AND: NOT: there is a GPU compiler
+(see frontend/__init__.py)
+
+there is a GPU compiler
+OR: Backend is part of the system
+(see backend/__init__.py)
+"
+    );
 }
