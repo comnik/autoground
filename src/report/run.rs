@@ -1011,7 +1011,7 @@ mod tests {
 
     #[test]
     fn finished_view_is_the_source_file() {
-        let src = include_str!("../../examples/diagram.ag");
+        let src = include_str!("../../examples/diagram.lect");
         let rows = finished(
             src,
             &[

@@ -520,16 +520,16 @@ mod tests {
     fn model_file_in_repo_is_hidden() {
         let root = scratch_dir("model");
         std::fs::create_dir_all(&root).unwrap();
-        let model = root.join("model.ag");
+        let model = root.join("model.lect");
         std::fs::write(&model, "(require (component \"X\"))\n").unwrap();
-        std::fs::write(root.join("keep.ag"), "(component \"X\")\n").unwrap();
+        std::fs::write(root.join("keep.lect"), "(component \"X\")\n").unwrap();
         let mut filter = ListingFilter::from_repo(&root);
         filter.set_model(&root, &model);
         let kids = list_entries(&root, "", &filter).unwrap();
         let names = names(&kids);
         let _ = std::fs::remove_dir_all(&root);
-        assert!(names.contains(&"keep.ag"), "{names:?}");
-        assert!(!names.contains(&"model.ag"), "{names:?}");
+        assert!(names.contains(&"keep.lect"), "{names:?}");
+        assert!(!names.contains(&"model.lect"), "{names:?}");
     }
 
     #[test]
@@ -679,7 +679,7 @@ mod tests {
     fn hide_model_drops_the_file_from_the_root_view() {
         let root = scratch_dir("hide-model");
         std::fs::create_dir_all(&root).unwrap();
-        let model = root.join("model.ag");
+        let model = root.join("model.lect");
         std::fs::write(&model, "(name X)\n").unwrap();
         std::fs::write(root.join("keep.txt"), "yes\n").unwrap();
         let mut fs = Filesystem::at_root(&root).unwrap();

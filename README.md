@@ -172,6 +172,9 @@ A model consists of *names*, *senses*, and *claims*:
 (not (depends_on X Y))
 ```
 
+Wherever a `.lect` file is accepted, a `.md` file is too: every fenced `lect` block is
+taken, in order, and the rest of the document is left out.
+
 ### Verbalization
 
 TBD verbalization is how we go from symbolic atoms to unstructured propositions.
@@ -200,8 +203,8 @@ sentences and combines the findings with Kleene `and`, `or`, and `not`.
 
 - [x] `autoground search "<arbitrary verbalized proposition>"`
 - [x] `autoground read "<arbitrary verbalized proposition>"`
-- [x] `autoground plan xyz.ag`: list the atomic sentences in a model
-- [x] `autoground run xyz.ag`: read those sentences and combine them per claim
+- [x] `autoground plan xyz.lect`: list the atomic sentences in a model
+- [x] `autoground run xyz.lect`: read those sentences and combine them per claim
 
 ### Interfaces
 

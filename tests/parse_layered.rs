@@ -2,8 +2,8 @@ use autoground::{compile, parse, print_program, verbalize_source};
 
 #[test]
 fn diagram_parses_compiles_and_verbalizes() {
-    let src = std::fs::read_to_string("examples/diagram.ag").unwrap();
-    let program = parse(&src).expect("parse diagram.ag");
+    let src = std::fs::read_to_string("examples/diagram.lect").unwrap();
+    let program = parse(&src).expect("parse diagram.lect");
     let printed = print_program(&program);
     let again = parse(&printed).expect("reparse");
     assert_eq!(program, again);

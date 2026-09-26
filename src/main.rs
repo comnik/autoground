@@ -15,7 +15,9 @@ use autoground::search::{
     present_search, window_lines, Search, SearchTraceFile, DEFAULT_BUDGET_BYTES,
 };
 use autoground::universe::{Filesystem, Transcript, Universe};
-use autoground::{compile, parse, verbalize_proposition, verbalize_source, Proposition};
+use autoground::{
+    compile, lect_source, parse, verbalize_proposition, verbalize_source, Proposition,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
@@ -60,9 +62,9 @@ enum Commands {
     ///
     /// Examples:
     ///   autoground verbalize '(name Frontend) (name Backend) (sense part_of "{Name} is a part of {Name}") (part_of Frontend Backend)'
-    ///   autoground verbalize examples/diagram.ag
+    ///   autoground verbalize examples/diagram.lect
     Verbalize {
-        /// Atom, model source, or path to a `.ag` file.
+        /// Atom, model source, a `.lect` file, or a Markdown file of `lect` blocks.
         input: String,
     },
     /// Decompose a model into atomic sentences.
@@ -72,10 +74,10 @@ enum Commands {
     /// with the claim; this command does not read a repository.
     ///
     /// Examples:
-    ///   autoground plan examples/diagram.ag
+    ///   autoground plan examples/diagram.lect
     ///   autoground plan '(name Frontend) (sense part_of "{Name} is a part of {Name}") (part_of Frontend Frontend)'
     Plan {
-        /// Model source, or path to a `.ag` file.
+        /// Model source, a `.lect` file, or a Markdown file of `lect` blocks.
         input: String,
     },
     /// Judge each claim in a model.
@@ -89,10 +91,10 @@ enum Commands {
     /// log is written under `/tmp/autoground/`.
     ///
     /// Examples:
-    ///   autoground run examples/diagram.ag --repo .
-    ///   autoground run examples/diagram.ag --judge heuristic --repo examples/toy-layered
+    ///   autoground run examples/diagram.lect --repo .
+    ///   autoground run examples/diagram.lect --judge heuristic --repo examples/toy-layered
     Run {
-        /// Model source, or path to a `.ag` file.
+        /// Model source, a `.lect` file, or a Markdown file of `lect` blocks.
         input: String,
         /// Repository to read. Defaults to the current directory.
         #[arg(long, default_value = ".")]
@@ -701,18 +703,30 @@ fn ground_of<U>(finding: &Finding<U>) -> Ground {
     }
 }
 
-/// Read `input` as a `.ag` file when it names one, otherwise treat it as source.
+/// Read `input` as a model file when it names one, otherwise treat it as source.
+///
+/// A `.lect` file is the model. A Markdown file contributes every fenced `lect` block.
 fn model_source(input: &str) -> Result<String, Box<dyn std::error::Error>> {
     let path = Path::new(input);
     if path.is_file() {
-        return Ok(std::fs::read_to_string(path)?);
+        let text = std::fs::read_to_string(path)?;
+        if has_ext(path, "md") {
+            return Ok(lect_source(&text).map_err(|err| format!("{err} in {input}"))?);
+        }
+        return Ok(text);
     }
     let trimmed = input.trim_start();
     if trimmed.starts_with('(') {
         return Ok(input.to_string());
     }
-    if input.ends_with(".ag") || path.exists() {
+    if has_ext(path, "lect") || has_ext(path, "md") || path.exists() {
         return Err(format!("model file not found: {input}").into());
     }
     Ok(input.to_string())
+}
+
+fn has_ext(path: &Path, ext: &str) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(ext))
 }

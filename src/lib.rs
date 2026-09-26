@@ -16,7 +16,8 @@ pub use edb::Store;
 pub use log::Log;
 pub use plan::Plan;
 pub use syntax::{
-    parse, print_formula, print_program, verbalize_proposition, verbalize_source, Form, Formula,
-    ParseError, Program, Proposition, Reading, Sense, VerbalizeError,
+    extract_lects, lect_source, parse, print_formula, print_program, verbalize_proposition,
+    verbalize_source, Form, Formula, MarkdownError, ParseError, Program, Proposition, Reading,
+    Sense, VerbalizeError,
 };
 pub use value::Value;

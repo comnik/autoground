@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn diagram_example_lists_each_sentence_once() {
-        let plan = planned(include_str!("../../examples/diagram.ag"));
+        let plan = planned(include_str!("../../examples/diagram.lect"));
         assert_eq!(
             plan.atoms,
             vec![

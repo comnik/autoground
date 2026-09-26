@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn claim_spans_are_the_source_text() {
-        let src = include_str!("../../examples/diagram.ag");
+        let src = include_str!("../../examples/diagram.lect");
         let program = parse(src).unwrap();
         let spans = program.claim_spans();
         assert_eq!(spans.len(), 4);

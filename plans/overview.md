@@ -25,15 +25,15 @@ The logic nucleus and the grounding navigator are running. Live Jev is wired as 
 **What works today**
 
 ```
-autoground run examples/layered.ag
-autoground run examples/layered.ag --repo examples/toy-layered
-autoground run examples/layered.ag --repo examples/toy-cycle
-autoground run examples/layered.ag --repo examples/toy-split
-autoground run examples/layered.ag --repo examples/toy-file
-autoground run examples/layered.ag --repo examples/toy-unknown
-autoground run examples/layered.ag --repo PATH --judge jev
-autoground run examples/layered.ag --repo PATH --fixtures tests/fixtures/toy-layered.json
-autoground run examples/layered.ag --repo PATH --judge jev --record /tmp/trace.json
+autoground run examples/layered.lect
+autoground run examples/layered.lect --repo examples/toy-layered
+autoground run examples/layered.lect --repo examples/toy-cycle
+autoground run examples/layered.lect --repo examples/toy-split
+autoground run examples/layered.lect --repo examples/toy-file
+autoground run examples/layered.lect --repo examples/toy-unknown
+autoground run examples/layered.lect --repo PATH --judge jev
+autoground run examples/layered.lect --repo PATH --fixtures tests/fixtures/toy-layered.json
+autoground run examples/layered.lect --repo PATH --judge jev --record /tmp/trace.json
 autoground ground --repo examples/toy-split '(component "Frontend")'
 autoground ground --repo examples/toy-split '(component ?x)' --plain
 ```
@@ -49,7 +49,7 @@ Outcomes on the README model: layered / split / file → GROUNDED; cycle → VIO
 - `src/eval/` — Kleene 3VL, tabling, generator `includes` (not `file`/`defines`)
 - `src/edb/` — in-memory store
 - `src/navigator/` — `TreeNavigator` + `Judge` (`heuristic`, `fixture`, `jev`, `record`)
-- `examples/layered.ag` + five toy worlds
+- `examples/layered.lect` + five toy worlds
 - `tests/fixtures/toy-layered.json`
 
 **Jev protocol (implemented)**
@@ -229,7 +229,7 @@ If the Jev-only path cannot ground the northstar model, no amount of grep will s
 ## Architecture
 
 ```
-model.ag  ──► parser/AST ──► demand-driven 3VL evaluator
+model.lect  ──► parser/AST ──► demand-driven 3VL evaluator
                                     │
                                     │ demand: atom + bound args + need (truth | closed)
                                     ▼
@@ -435,7 +435,7 @@ Revision-level invalidation in v0. Two CLIs on the same SHA with a warm cache do
 Two slices, in this order:
 
 1. **Logic nucleus (no repo).** README rules over a handmade EDB. Empty EDB ⇒ acyclicity **unknown**. Closed empty ⇒ true. Cycle ⇒ false.
-2. **Grounding nucleus (Jev navigator, recorded fixtures).** Same `layered.ag` against `toy-layered/`, `toy-cycle/`, `toy-unknown/`, `toy-split/`, and `toy-file/` (`src/app.js` as Frontend). Outcomes GROUNDED / VIOLATED / UNGROUNDED. `decoy/` file bodies never enter a document Noul.
+2. **Grounding nucleus (Jev navigator, recorded fixtures).** Same `layered.lect` against `toy-layered/`, `toy-cycle/`, `toy-unknown/`, `toy-split/`, and `toy-file/` (`src/app.js` as Frontend). Outcomes GROUNDED / VIOLATED / UNGROUNDED. `decoy/` file bodies never enter a document Noul.
 
 No live API in CI. A scripted navigator replays fixtures so Phase 2–4 tests do not depend on Jev.
 
@@ -515,7 +515,7 @@ autoground/
     proposers/       # dir-name, grep, imports — later
     report/
   examples/
-    layered.ag
+    layered.lect
     toy-layered/
     toy-cycle/
     toy-unknown/
@@ -571,7 +571,7 @@ Do not block remaining work.
 
 1. **Low-confidence `true`/`false`.** Leave the atom open (current), or ask a follow-up? `unknown` as a named Choice already covers “cannot tell.” `τ_c` still gates API confidence.
 2. **Tightest vs outermost `whole`.** Inner is better for reporting; outer is sometimes the intended component (`src/frontend/` vs `src/frontend/src/`).
-3. **CLI / extension.** `.ag`, single `run`.
+3. **CLI / extension.** `.lect`, single `run`.
 4. **Second *model*** (not second world). A “service owns schema” program would really exercise `defines`.
 5. **Batching demands.** One listing pass that asks Frontend *and* Backend questions against the same state. Nucleus is per-atom; batching is an obvious later win.
 

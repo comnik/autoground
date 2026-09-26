@@ -7,7 +7,7 @@ fn bin() -> Command {
 #[test]
 fn plan_lists_each_sentence_in_diagram() {
     let out = bin()
-        .args(["plan", "examples/diagram.ag"])
+        .args(["plan", "examples/diagram.lect"])
         .output()
         .expect("run autoground");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -29,6 +29,71 @@ fn plan_lists_each_sentence_in_diagram() {
             "(\"Frontend calls Backend\")",
         ]
     );
+}
+
+#[test]
+fn plan_reads_lect_blocks_from_markdown() {
+    let dir = std::env::temp_dir().join(format!("autoground-md-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("notes.md");
+    std::fs::write(
+        &path,
+        r#"
+# notes
+
+```rust
+fn main() {}
+```
+
+```lect
+(name Frontend)
+("Frontend is a component")
+```
+
+```lect
+(name Backend)
+("Backend is a component")
+```
+"#,
+    )
+    .unwrap();
+    let out = bin()
+        .args(["plan", path.to_str().unwrap()])
+        .output()
+        .expect("run autoground");
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={stderr} stdout={stdout}"
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec![
+            "(\"Frontend is a component\")",
+            "(\"Backend is a component\")",
+        ]
+    );
+}
+
+#[test]
+fn plan_rejects_markdown_without_lect_blocks() {
+    let dir = std::env::temp_dir().join(format!("autoground-md-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("notes.md");
+    std::fs::write(&path, "# notes\n\n```rust\nfn main() {}\n```\n").unwrap();
+    let out = bin()
+        .args(["plan", path.to_str().unwrap()])
+        .output()
+        .expect("run autoground");
+    let _ = std::fs::remove_dir_all(&dir);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("no lect blocks"), "{stderr}");
 }
 
 #[test]
