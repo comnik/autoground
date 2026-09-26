@@ -1,5 +1,5 @@
 pub mod confidence;
-pub mod core;
+pub mod compiler;
 pub mod edb;
 pub mod log;
 pub mod oracle;
@@ -11,7 +11,7 @@ pub mod syntax;
 pub mod universe;
 pub mod value;
 
-pub use core::{compile, CompileError, Compiled};
+pub use compiler::{compile, CompileError, Compiled};
 pub use edb::Store;
 pub use log::Log;
 pub use plan::Plan;

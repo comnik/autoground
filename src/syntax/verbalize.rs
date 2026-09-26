@@ -1,7 +1,7 @@
 use super::ast::Proposition;
 use super::parse::{parse, ParseError};
 use super::template::quote_const;
-use crate::core::{compile, CompileError};
+use crate::compiler::{compile, CompileError};
 
 #[derive(Debug)]
 pub enum VerbalizeError {
