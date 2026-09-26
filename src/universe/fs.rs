@@ -6,8 +6,8 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use super::{Universe, UniverseError};
 
-/// Gitignored paths, `.git` / `.gitignore`, plus the model file when it lives
-/// inside the repo.
+/// Gitignored paths, `.git` / `.gitignore`, `.lect` files, plus the model file
+/// when it lives inside the repo.
 #[derive(Default, Clone)]
 pub struct ListingFilter {
     gitignore: Option<Gitignore>,
@@ -38,7 +38,7 @@ impl ListingFilter {
         if self.outside(rel) {
             return true;
         }
-        if is_git_meta(rel) {
+        if is_git_meta(rel) || (!is_dir && is_lect(rel)) {
             return true;
         }
         if self.model_rel.as_deref() == Some(rel) {
@@ -67,6 +67,14 @@ impl ListingFilter {
 fn is_git_meta(rel: &str) -> bool {
     rel.split('/')
         .any(|part| part == ".git" || part == ".gitignore")
+}
+
+/// A `.lect` file is a model, not evidence. The namespace scan still reads these.
+fn is_lect(rel: &str) -> bool {
+    rel.rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(rel)
+        .ends_with(".lect")
 }
 
 fn load_gitignore(root: &Path) -> Option<Gitignore> {
@@ -517,19 +525,42 @@ mod tests {
     }
 
     #[test]
+    fn lect_files_are_hidden() {
+        let root = scratch_dir("lect");
+        std::fs::create_dir_all(root.join("models")).unwrap();
+        std::fs::write(root.join("models/map.lect"), "(name X)\n").unwrap();
+        std::fs::write(root.join("keep.txt"), "yes\n").unwrap();
+        std::fs::write(root.join("notes.md"), "# hi\n").unwrap();
+        let filter = ListingFilter::from_repo(&root);
+        let kids = list_entries(&root, "", &filter).unwrap();
+        let names = names(&kids);
+        let nested = list_entries(&root, "models", &filter).unwrap();
+        let leaves = list_files_recursive(&root, "", &filter).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(names.contains(&"keep.txt"), "{names:?}");
+        assert!(names.contains(&"notes.md"), "{names:?}");
+        assert!(names.contains(&"models"), "{names:?}");
+        assert!(nested.is_empty(), "{nested:?}");
+        assert!(
+            !leaves.iter().any(|path| path.ends_with(".lect")),
+            "{leaves:?}"
+        );
+    }
+
+    #[test]
     fn model_file_in_repo_is_hidden() {
         let root = scratch_dir("model");
         std::fs::create_dir_all(&root).unwrap();
-        let model = root.join("model.lect");
-        std::fs::write(&model, "(require (component \"X\"))\n").unwrap();
-        std::fs::write(root.join("keep.lect"), "(component \"X\")\n").unwrap();
+        let model = root.join("README.md");
+        std::fs::write(&model, "# model\n").unwrap();
+        std::fs::write(root.join("notes.md"), "# other\n").unwrap();
         let mut filter = ListingFilter::from_repo(&root);
         filter.set_model(&root, &model);
         let kids = list_entries(&root, "", &filter).unwrap();
         let names = names(&kids);
         let _ = std::fs::remove_dir_all(&root);
-        assert!(names.contains(&"keep.lect"), "{names:?}");
-        assert!(!names.contains(&"model.lect"), "{names:?}");
+        assert!(names.contains(&"notes.md"), "{names:?}");
+        assert!(!names.contains(&"README.md"), "{names:?}");
     }
 
     #[test]
@@ -679,10 +710,13 @@ mod tests {
     fn hide_model_drops_the_file_from_the_root_view() {
         let root = scratch_dir("hide-model");
         std::fs::create_dir_all(&root).unwrap();
-        let model = root.join("model.lect");
-        std::fs::write(&model, "(name X)\n").unwrap();
+        let model = root.join("model.md");
+        std::fs::write(&model, "# model\n").unwrap();
         std::fs::write(root.join("keep.txt"), "yes\n").unwrap();
+        std::fs::write(root.join("claims.lect"), "(name X)\n").unwrap();
         let mut fs = Filesystem::at_root(&root).unwrap();
+        assert!(fs.databases().contains(&"model.md".to_string()));
+        assert!(!fs.databases().iter().any(|id| id.ends_with(".lect")));
         fs.hide_model(&model);
         assert_eq!(fs.databases(), &["keep.txt".to_string()]);
         assert_eq!(fs.children("").unwrap(), vec!["keep.txt".to_string()]);
