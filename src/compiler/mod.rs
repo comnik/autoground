@@ -1,7 +1,38 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::syntax::template::{apply, holes_word, names_word};
-use crate::syntax::{Form, Formula, Program, Proposition, Reading, Sense};
+use crate::syntax::{Arg, Form, Formula, Ident, Program, Proposition, Reading, Sense};
+
+mod link;
+mod scan;
+
+pub use link::link;
+pub use scan::{display_path, scan_namespaces, LoadError, Loaded};
+
+/// Names and senses visible through `:as` and `:refer`.
+pub(crate) struct Opened {
+    names: HashSet<String>,
+    senses: HashMap<String, Sense>,
+}
+
+pub(crate) struct Imports {
+    names: HashSet<String>,
+    senses: HashMap<String, Sense>,
+    /// Alias or required namespace name, mapped to that namespace.
+    qualifiers: HashMap<String, String>,
+    opened: HashMap<String, Opened>,
+}
+
+impl Imports {
+    pub(crate) fn none() -> Self {
+        Self {
+            names: HashSet::new(),
+            senses: HashMap::new(),
+            qualifiers: HashMap::new(),
+            opened: HashMap::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
@@ -25,7 +56,22 @@ pub struct Compiled {
 }
 
 /// Resolve senses and check that every claim is a saturated ground sentence.
+///
+/// A program with `:require` clauses needs [`link`], which supplies the
+/// imported names. On its own, `compile` reports the first required namespace
+/// as missing.
 pub fn compile(program: &Program) -> Result<Compiled, CompileError> {
+    if let Some(ns) = &program.namespace {
+        if let Some(require) = ns.requires.first() {
+            return Err(CompileError {
+                message: format!("namespace `{}` is not declared", require.namespace),
+            });
+        }
+    }
+    compile_with(program, &Imports::none())
+}
+
+pub(crate) fn compile_with(program: &Program, imports: &Imports) -> Result<Compiled, CompileError> {
     let mut names = Vec::new();
     let mut name_seen = HashSet::new();
     let mut senses = Vec::new();
@@ -61,15 +107,21 @@ pub fn compile(program: &Program) -> Result<Compiled, CompileError> {
         }
     }
 
-    let sense_by_name: HashMap<&str, &Sense> = senses
+    let mut sense_by_name: HashMap<String, Sense> = senses
         .iter()
-        .map(|sense| (sense.name.as_str(), sense))
+        .map(|sense| (sense.name.clone(), sense.clone()))
         .collect();
-    let declared: HashSet<&str> = names.iter().map(String::as_str).collect();
+    for (name, sense) in &imports.senses {
+        sense_by_name
+            .entry(name.clone())
+            .or_insert_with(|| sense.clone());
+    }
+    let mut declared: HashSet<String> = names.iter().cloned().collect();
+    declared.extend(imports.names.iter().cloned());
 
     let mut claims = Vec::new();
     for formula in program.claims() {
-        claims.push(resolve(formula, &declared, &sense_by_name)?);
+        claims.push(resolve(formula, &declared, &sense_by_name, imports)?);
     }
 
     Ok(Compiled {
@@ -81,44 +133,39 @@ pub fn compile(program: &Program) -> Result<Compiled, CompileError> {
 
 fn resolve(
     formula: &Formula,
-    names: &HashSet<&str>,
-    senses: &HashMap<&str, &Sense>,
+    names: &HashSet<String>,
+    senses: &HashMap<String, Sense>,
+    imports: &Imports,
 ) -> Result<Proposition, CompileError> {
     match formula {
-        Formula::And(xs) => Ok(Proposition::And(resolve_all(xs, names, senses)?)),
-        Formula::Or(xs) => Ok(Proposition::Or(resolve_all(xs, names, senses)?)),
-        Formula::Not(x) => Ok(Proposition::Not(Box::new(resolve(x, names, senses)?))),
+        Formula::And(xs) => Ok(Proposition::And(resolve_all(xs, names, senses, imports)?)),
+        Formula::Or(xs) => Ok(Proposition::Or(resolve_all(xs, names, senses, imports)?)),
+        Formula::Not(x) => Ok(Proposition::Not(Box::new(resolve(
+            x, names, senses, imports,
+        )?))),
         Formula::Apply { reading, args } => {
+            let mut spellings = Vec::with_capacity(args.len());
             for arg in args {
-                if !names.contains(arg.as_str()) {
-                    return Err(CompileError {
-                        message: format!("`{arg}` is not a declared name"),
-                    });
-                }
+                spellings.push(resolve_arg(arg, names, imports)?);
             }
             let (what, template, holes) = match reading {
-                Reading::Sense(name) => {
-                    let Some(sense) = senses.get(name.as_str()) else {
-                        return Err(CompileError {
-                            message: format!("`{name}` is not a declared sense"),
-                        });
-                    };
+                Reading::Sense(ident) => {
+                    let sense = resolve_sense(ident, senses, imports)?;
                     (
-                        format!("`{name}`"),
-                        sense.template.as_str(),
-                        sense.holes.as_slice(),
+                        format!("`{}`", ident.display()),
+                        sense.template,
+                        sense.holes,
                     )
                 }
-                Reading::Inline { template, holes } => (
-                    format!("\"{template}\""),
-                    template.as_str(),
-                    holes.as_slice(),
-                ),
+                Reading::Inline { template, holes } => {
+                    (format!("\"{template}\""), template.clone(), holes.clone())
+                }
             };
-            if args.len() != holes.len() {
-                return Err(arity_error(&what, holes, args.len()));
+            if spellings.len() != holes.len() {
+                return Err(arity_error(&what, &holes, spellings.len()));
             }
-            let sentence = apply(template, args).map_err(|message| CompileError { message })?;
+            let sentence =
+                apply(&template, &spellings).map_err(|message| CompileError { message })?;
             Ok(Proposition::Sentence(sentence))
         }
     }
@@ -126,13 +173,79 @@ fn resolve(
 
 fn resolve_all(
     formulas: &[Formula],
-    names: &HashSet<&str>,
-    senses: &HashMap<&str, &Sense>,
+    names: &HashSet<String>,
+    senses: &HashMap<String, Sense>,
+    imports: &Imports,
 ) -> Result<Vec<Proposition>, CompileError> {
     formulas
         .iter()
-        .map(|formula| resolve(formula, names, senses))
+        .map(|formula| resolve(formula, names, senses, imports))
         .collect()
+}
+
+fn resolve_arg(
+    arg: &Arg,
+    names: &HashSet<String>,
+    imports: &Imports,
+) -> Result<String, CompileError> {
+    match arg {
+        Arg::Literal(text) => Ok(text.clone()),
+        Arg::Name(ident) => resolve_name(ident, names, imports),
+    }
+}
+
+fn resolve_name(
+    ident: &Ident,
+    names: &HashSet<String>,
+    imports: &Imports,
+) -> Result<String, CompileError> {
+    if let Some(qualifier) = &ident.qualifier {
+        let namespace = required(qualifier, imports)?;
+        if !imports.opened[&namespace].names.contains(&ident.name) {
+            return Err(CompileError {
+                message: format!("`{}` is not a name in `{namespace}`", ident.name),
+            });
+        }
+        return Ok(ident.name.clone());
+    }
+    if names.contains(&ident.name) {
+        return Ok(ident.name.clone());
+    }
+    Err(CompileError {
+        message: format!("`{}` is not a declared name", ident.name),
+    })
+}
+
+fn resolve_sense(
+    ident: &Ident,
+    senses: &HashMap<String, Sense>,
+    imports: &Imports,
+) -> Result<Sense, CompileError> {
+    if let Some(qualifier) = &ident.qualifier {
+        let namespace = required(qualifier, imports)?;
+        let Some(sense) = imports.opened[&namespace].senses.get(&ident.name) else {
+            return Err(CompileError {
+                message: format!("`{}` is not a sense in `{namespace}`", ident.name),
+            });
+        };
+        return Ok(sense.clone());
+    }
+    senses
+        .get(&ident.name)
+        .cloned()
+        .ok_or_else(|| CompileError {
+            message: format!("`{}` is not a declared sense", ident.name),
+        })
+}
+
+fn required(qualifier: &str, imports: &Imports) -> Result<String, CompileError> {
+    imports
+        .qualifiers
+        .get(qualifier)
+        .cloned()
+        .ok_or_else(|| CompileError {
+            message: format!("`{qualifier}` is not a required namespace"),
+        })
 }
 
 fn arity_error(what: &str, holes: &[String], nargs: usize) -> CompileError {
@@ -218,6 +331,23 @@ mod tests {
         assert_eq!(
             c.claims,
             vec![Proposition::Sentence("Frontend depends on Backend".into())]
+        );
+    }
+
+    #[test]
+    fn a_string_argument_is_its_own_spelling() {
+        let c = compiled(
+            r#"
+(name Universe)
+(sense source "{component} is implemented at {path}")
+(source Universe "src/universe")
+"#,
+        );
+        assert_eq!(
+            c.claims,
+            vec![Proposition::Sentence(
+                "Universe is implemented at src/universe".into()
+            )]
         );
     }
 

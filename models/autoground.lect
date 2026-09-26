@@ -1,3 +1,5 @@
+(ns autoground)
+
 (sense calls "{caller} calls {callee}")
 (sense contains "{X} contains {Y}")
 (sense entails "{X} entails {Y}")

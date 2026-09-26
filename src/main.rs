@@ -17,7 +17,8 @@ use autoground::search::{
 };
 use autoground::universe::{Filesystem, Transcript, Universe};
 use autoground::{
-    compile, lect_source, parse, verbalize_proposition, verbalize_source, Proposition,
+    compile, display_path, lect_source, link, parse, scan_namespaces, verbalize_proposition,
+    Proposition,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
@@ -67,6 +68,9 @@ enum Commands {
     Verbalize {
         /// Atom, model source, a `.lect` file, or a Markdown file of `lect` blocks.
         input: String,
+        /// Where required namespaces are found. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
     },
     /// Decompose a model into atomic sentences.
     ///
@@ -80,6 +84,9 @@ enum Commands {
     Plan {
         /// Model source, a `.lect` file, or a Markdown file of `lect` blocks.
         input: String,
+        /// Where required namespaces are found. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
     },
     /// Judge each claim in a model.
     ///
@@ -188,14 +195,14 @@ enum Commands {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Verbalize { input } => match verbalize_cmd(&input) {
+        Commands::Verbalize { input, repo } => match verbalize_cmd(&input, &repo) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("{err}");
                 ExitCode::from(3)
             }
         },
-        Commands::Plan { input } => match plan_cmd(&input) {
+        Commands::Plan { input, repo } => match plan_cmd(&input, &repo) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("{err}");
@@ -503,16 +510,17 @@ fn run_read<U: Universe + Clone, O: Oracle>(
     }
 }
 
-fn verbalize_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let src = model_source(input)?;
-    for line in verbalize_source(&src)? {
-        println!("{line}");
+fn verbalize_cmd(input: &str, repo: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let (_src, _program, compiled) = load_compiled(input, repo)?;
+    for claim in &compiled.claims {
+        println!("{}", verbalize_proposition(claim));
     }
     Ok(())
 }
 
-fn plan_cmd(input: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let planned = load_plan(input)?;
+fn plan_cmd(input: &str, repo: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let (_src, _program, compiled) = load_compiled(input, repo)?;
+    let planned = Plan::of(&compiled);
     for atom in &planned.atoms {
         println!(
             "{}",
@@ -539,9 +547,8 @@ fn run_cmd(
     if let Some(live) = &live {
         live.show_planning()?;
     }
-    let src = model_source(input)?;
-    let program = parse(&src)?;
-    let planned = Plan::of(&compile(&program)?);
+    let (src, program, compiled) = load_compiled(input, repo)?;
+    let planned = Plan::of(&compiled);
     let log = Log::create()?;
     if let Some(live) = &live {
         if !planned.atoms.is_empty() {
@@ -627,10 +634,25 @@ fn run_cmd(
     Ok(())
 }
 
-fn load_plan(input: &str) -> Result<Plan, Box<dyn std::error::Error>> {
+fn load_compiled(
+    input: &str,
+    repo: &Path,
+) -> Result<(String, autoground::Program, autoground::Compiled), Box<dyn std::error::Error>> {
     let src = model_source(input)?;
     let program = parse(&src)?;
-    Ok(Plan::of(&compile(&program)?))
+    let compiled = if program
+        .namespace
+        .as_ref()
+        .is_some_and(|ns| !ns.requires.is_empty())
+    {
+        let files = scan_namespaces(repo)?;
+        let entry = Path::new(input);
+        let entry_path = entry.is_file().then(|| display_path(repo, entry));
+        link(&program, entry_path.as_deref(), &files)?
+    } else {
+        compile(&program)?
+    };
+    Ok((src, program, compiled))
 }
 
 struct Judged {

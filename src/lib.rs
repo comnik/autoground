@@ -11,7 +11,9 @@ pub mod syntax;
 pub mod universe;
 pub mod value;
 
-pub use compiler::{compile, CompileError, Compiled};
+pub use compiler::{
+    compile, display_path, link, scan_namespaces, CompileError, Compiled, LoadError, Loaded,
+};
 pub use edb::Store;
 pub use log::Log;
 pub use plan::Plan;

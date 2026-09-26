@@ -1,9 +1,15 @@
-use super::ast::{Form, Formula, Program, Reading};
+use super::ast::{Arg, Form, Formula, Ident, Ns, Program, Reading, Refer};
 use super::template::quote_const;
 
 /// Pretty-print a program. Comments are not reconstructed.
 pub fn print_program(program: &Program) -> String {
     let mut out = String::new();
+    if let Some(ns) = &program.namespace {
+        print_ns(ns, &mut out);
+        if !program.forms.is_empty() {
+            out.push('\n');
+        }
+    }
     for (i, form) in program.forms.iter().enumerate() {
         if i > 0 {
             out.push('\n');
@@ -12,6 +18,38 @@ pub fn print_program(program: &Program) -> String {
         out.push('\n');
     }
     out
+}
+
+fn print_ns(ns: &Ns, out: &mut String) {
+    out.push_str("(ns ");
+    out.push_str(&ns.name);
+    if ns.requires.is_empty() {
+        out.push(')');
+        out.push('\n');
+        return;
+    }
+    out.push('\n');
+    out.push_str("  (:require");
+    for require in &ns.requires {
+        out.push('\n');
+        out.push_str("    [");
+        out.push_str(&require.namespace);
+        if let Some(alias) = &require.alias {
+            out.push_str(" :as ");
+            out.push_str(alias);
+        }
+        match &require.refer {
+            Refer::Nothing => {}
+            Refer::All => out.push_str(" :refer :all"),
+            Refer::Only(names) => {
+                out.push_str(" :refer [");
+                out.push_str(&names.join(" "));
+                out.push(']');
+            }
+        }
+        out.push(']');
+    }
+    out.push_str("))\n");
 }
 
 /// Pretty-print a formula at indent 0.
@@ -51,12 +89,15 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
         Formula::Apply { reading, args } => {
             out.push('(');
             match reading {
-                Reading::Sense(name) => out.push_str(name),
+                Reading::Sense(name) => push_ident(name, out),
                 Reading::Inline { template, holes: _ } => out.push_str(&quote_const(template)),
             }
             for arg in args {
                 out.push(' ');
-                out.push_str(arg);
+                match arg {
+                    Arg::Name(ident) => push_ident(ident, out),
+                    Arg::Literal(text) => out.push_str(&quote_const(text)),
+                }
             }
             out.push(')');
         }
@@ -82,6 +123,14 @@ fn print_nary(head: &str, xs: &[Formula], indent: usize, out: &mut String) {
         write_formula(x, indent + 1, out);
     }
     out.push(')');
+}
+
+fn push_ident(ident: &Ident, out: &mut String) {
+    if let Some(qualifier) = &ident.qualifier {
+        out.push_str(qualifier);
+        out.push('/');
+    }
+    out.push_str(&ident.name);
 }
 
 fn write_indent(n: usize, out: &mut String) {
@@ -112,6 +161,30 @@ mod tests {
         let program = parse(src).unwrap();
         let printed = print_program(&program);
         let again = parse(&printed).unwrap();
+        assert_eq!(program, again);
+    }
+
+    #[test]
+    fn round_trip_keeps_the_namespace() {
+        let src = r#"(ns com.acme.client
+  (:require
+    [com.acme.product :as product]
+    [com.acme.names :refer [Frontend]]
+    [com.acme.api :refer :all]))
+(name Backend)
+(product/part_of product/Frontend Backend)
+"#;
+        let program = parse(src).unwrap();
+        let printed = print_program(&program);
+        let again = parse(&printed).unwrap();
+        assert_eq!(program, again);
+    }
+
+    #[test]
+    fn round_trip_keeps_a_string_argument() {
+        let src = "(source Universe \"src/universe\")\n";
+        let program = parse(src).unwrap();
+        let again = parse(&print_program(&program)).unwrap();
         assert_eq!(program, again);
     }
 }

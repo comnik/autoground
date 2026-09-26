@@ -9,14 +9,41 @@ pub struct Sense {
     pub holes: Vec<String>,
 }
 
+/// A name at a use site. `product/Frontend` is a qualifier plus a spelling.
+///
+/// The qualifier is an `:as` alias or the full name of a required namespace.
+/// The spelling is what a sentence says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ident {
+    pub qualifier: Option<String>,
+    pub name: String,
+}
+
+impl Ident {
+    pub fn display(&self) -> String {
+        match &self.qualifier {
+            Some(qualifier) => format!("{qualifier}/{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
 /// A relation at a use site: a declared sense, or a reading written inline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reading {
-    Sense(String),
+    Sense(Ident),
     Inline {
         template: String,
         holes: Vec<String>,
     },
+}
+
+/// An argument. A name is a declared symbol. A literal is a spelling written
+/// where it is used: the text is the name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Arg {
+    Name(Ident),
+    Literal(String),
 }
 
 /// A ground claim. `and`, `or`, and `not` are left for the planner.
@@ -25,11 +52,37 @@ pub enum Formula {
     And(Vec<Formula>),
     Or(Vec<Formula>),
     Not(Box<Formula>),
-    /// A reading applied to names. Saturation fills every hole.
+    /// A reading applied to arguments. Saturation fills every hole.
     Apply {
         reading: Reading,
-        args: Vec<String>,
+        args: Vec<Arg>,
     },
+}
+
+/// What `(:require ...)` pulls in from one namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refer {
+    /// Link the namespace and import nothing.
+    Nothing,
+    /// Import every name and sense it declares.
+    All,
+    /// Import these names and senses.
+    Only(Vec<String>),
+}
+
+/// One libspec: `[namespace]`, optionally `:as` and `:refer`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Require {
+    pub namespace: String,
+    pub alias: Option<String>,
+    pub refer: Refer,
+}
+
+/// The namespace a file declares, and the namespaces it requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ns {
+    pub name: String,
+    pub requires: Vec<Require>,
 }
 
 /// What a saturated formula says: boolean structure over sentences.
@@ -58,11 +111,13 @@ pub struct ClauseSpan {
     pub children: Vec<ClauseSpan>,
 }
 
-/// Names, senses, and claims, in source order.
+/// A namespace, then names, senses, and claims, in source order.
 #[derive(Debug, Clone)]
 pub struct Program {
+    pub namespace: Option<Ns>,
     pub forms: Vec<Form>,
     /// Byte range of each form in the source, parallel to [`Self::forms`].
+    /// The `ns` form has no span here.
     pub spans: Vec<std::ops::Range<usize>>,
     /// Clause tree of each claim, in claim order.
     pub clauses: Vec<ClauseSpan>,
@@ -71,7 +126,7 @@ pub struct Program {
 impl PartialEq for Program {
     fn eq(&self, other: &Self) -> bool {
         // Spans are positions in one source text, not part of the model.
-        self.forms == other.forms
+        self.namespace == other.namespace && self.forms == other.forms
     }
 }
 
