@@ -14,7 +14,7 @@ use crossterm::{
 
 use crate::oracle::{Flight, Usage};
 
-use super::map::context_path;
+use super::context::context_path;
 
 const FLIGHT_BUCKETS: usize = 24;
 const HIST_BINS: usize = 16;

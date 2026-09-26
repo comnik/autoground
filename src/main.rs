@@ -7,7 +7,7 @@ use autoground::log::Log;
 use autoground::oracle::{Flight, HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::plan::Plan;
 use autoground::read::{present_read, Finding, ReadTraceFile, Reader, Stance, Verdict};
-use autoground::report::map::write_context;
+use autoground::report::context::write_context;
 use autoground::report::run::{Explain, Ground};
 use autoground::report::summary::print_run_summary;
 use autoground::search::trace::SearchStep;
