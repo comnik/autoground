@@ -1,4 +1,4 @@
-# autoground
+# ⏚ autoground
 
 `autoground` compiles and runs *neurosymbolic*, *self-validating* mental models of a
 codebase.
