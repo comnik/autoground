@@ -1,5 +1,5 @@
-pub mod confidence;
 pub mod compiler;
+pub mod confidence;
 pub mod edb;
 pub mod log;
 pub mod oracle;

@@ -1,12 +1,17 @@
 //! Live view of `autoground run` on a terminal.
 //!
 //! The view watches the shared log. Search steps and read steps move each
-//! claim between planning, search, and read. When the run finishes, the view
-//! is the model file: a true claim carries a quiet mark, and a false claim
-//! carries a red mark on the clauses that failed. Just above a false clause
-//! is a comment naming the file that contradicted it, or noting that no file
-//! supported it. `--explain all` adds the same kind of comment to true clauses.
-//! Piped output never draws this.
+//! claim between planning, search, and read. The working frame stays inside
+//! the terminal: each line stops short of the last column, and the list keeps
+//! the last row free, following the claim being read when the model is taller
+//! than the screen. A frame that fills the width wraps, and a frame that fills
+//! the height scrolls; the next move-up then starts below the previous frame,
+//! so every step prints another copy. When the run finishes, the view is the
+//! model file, printed once: a true claim carries a quiet mark, and a false
+//! claim carries a red mark on the clauses that failed. Just above a false
+//! clause is a comment naming the file that contradicted it, or noting that
+//! no file supported it. `--explain all` adds the same kind of comment to
+//! true clauses. Piped output never draws this.
 
 use std::collections::HashMap;
 use std::io::{self, stdout, Write};
@@ -230,21 +235,79 @@ impl RunView {
         self.done = source_rows(source, &paints, &notes);
     }
 
+    #[cfg(test)]
     fn rows(&self, width: usize) -> Vec<Row> {
-        let width = width.max(20);
+        self.frame(width.max(20), usize::MAX)
+    }
+
+    /// `max_rows` bounds the working list. The finished model ignores it and
+    /// is printed once, so a long file may scroll.
+    fn frame(&self, width: usize, max_rows: usize) -> Vec<Row> {
+        let width = width.max(1);
         match self.mode {
-            Mode::Banner(phase) => vec![status_row(phase, "", width)],
-            Mode::Working => {
-                let mut rows: Vec<_> = self
-                    .claims
-                    .iter()
-                    .map(|claim| claim_row(claim, width))
-                    .collect();
-                rows.push(status_row(self.phase, &self.detail, width));
-                rows
-            }
+            Mode::Banner(phase) => vec![status_row(phase, "", "", width)],
+            Mode::Working => self.working_rows(width, max_rows.max(1)),
             Mode::Done => self.done.clone(),
         }
+    }
+
+    fn focus(&self) -> usize {
+        if self.phase == Phase::Read {
+            self.claims
+                .iter()
+                .position(|claim| claim.active)
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    fn working_rows(&self, width: usize, max_rows: usize) -> Vec<Row> {
+        let total = self.claims.len();
+        let slots = max_rows.saturating_sub(1);
+        let (start, shown) = if slots == 0 || total == 0 {
+            (0, 0)
+        } else {
+            window_bounds(total, slots, self.focus())
+        };
+        let place = place_label(start, shown, total);
+        let mut rows: Vec<_> = self.claims[start..start + shown]
+            .iter()
+            .map(|claim| claim_row(claim, width))
+            .collect();
+        rows.push(status_row(self.phase, &self.detail, &place, width));
+        rows
+    }
+}
+
+/// Columns and rows a working frame may occupy. The finished model is not
+/// limited: it is drawn once.
+fn viewport(cols: usize, rows: usize, done: bool) -> (usize, usize) {
+    let width = cols.saturating_sub(1).max(1);
+    let max_rows = if done {
+        usize::MAX
+    } else {
+        rows.saturating_sub(1).max(1)
+    };
+    (width, max_rows)
+}
+
+fn window_bounds(total: usize, slots: usize, focus: usize) -> (usize, usize) {
+    if total <= slots {
+        return (0, total);
+    }
+    let focus = focus.min(total - 1);
+    let start = focus.saturating_sub(slots / 2).min(total - slots);
+    (start, slots)
+}
+
+fn place_label(start: usize, shown: usize, total: usize) -> String {
+    if shown >= total {
+        String::new()
+    } else if shown == 0 {
+        format!("0/{total}")
+    } else {
+        format!("{}-{}/{}", start + 1, start + shown, total)
     }
 }
 
@@ -256,32 +319,54 @@ fn claim_row(claim: &ClaimWatch, width: usize) -> Row {
     };
     let phase = claim.phase.label();
     let left = format!("  {mark}  {phase:<8}  ");
-    let room = width.saturating_sub(left.chars().count());
-    let detail = claim.detail.as_str();
-    let text = if detail.is_empty() || room <= detail.chars().count() + 2 {
-        format!("{left}{}", fit(&claim.verbalized, room))
+    let left_len = left.chars().count();
+    let text = if width <= left_len {
+        fit(&left, width)
     } else {
-        let claim_room = room - detail.chars().count() - 2;
-        let claim_text = fit(&claim.verbalized, claim_room);
-        let pad = room - claim_text.chars().count() - detail.chars().count();
-        format!("{left}{claim_text}{}{detail}", " ".repeat(pad))
+        let room = width - left_len;
+        let detail = claim.detail.as_str();
+        if detail.is_empty() || room <= detail.chars().count() + 2 {
+            format!("{left}{}", fit(&claim.verbalized, room))
+        } else {
+            let claim_room = room - detail.chars().count() - 2;
+            let claim_text = fit(&claim.verbalized, claim_room);
+            let pad = room - claim_text.chars().count() - detail.chars().count();
+            format!("{left}{claim_text}{}{detail}", " ".repeat(pad))
+        }
     };
     row_one(text, tone_of_phase(claim.phase))
 }
 
-fn status_row(phase: Phase, detail: &str, width: usize) -> Row {
+fn status_row(phase: Phase, detail: &str, place: &str, width: usize) -> Row {
+    let width = width.max(1);
     let label = format!(" {} ", phase.label());
+    let label_len = label.chars().count();
+    if label_len >= width {
+        return row_one(fit(&label, width), Tone::Rule);
+    }
+    let mut place = if place.is_empty() {
+        String::new()
+    } else {
+        format!(" {place} ")
+    };
+    if label_len + place.chars().count() > width {
+        place = fit(&place, width - label_len);
+    }
+    let place_len = place.chars().count();
     let mut tail = if detail.is_empty() {
         String::new()
     } else {
         format!(" {detail} ")
     };
-    let label_len = label.chars().count();
-    if label_len + tail.chars().count() > width {
-        tail = fit(&tail, width.saturating_sub(label_len));
+    let budget = width - label_len - place_len;
+    if tail.chars().count() > budget {
+        tail = fit(&tail, budget);
     }
-    let fill = width.saturating_sub(label_len + tail.chars().count());
-    row_one(format!("{label}{}{tail}", "─".repeat(fill)), Tone::Rule)
+    let fill = budget - tail.chars().count();
+    row_one(
+        format!("{label}{}{tail}{place}", "─".repeat(fill)),
+        Tone::Rule,
+    )
 }
 
 fn tone_of_phase(phase: Phase) -> Tone {
@@ -781,8 +866,12 @@ struct Body {
 
 impl Body {
     fn draw(&mut self) -> io::Result<()> {
-        let width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80);
-        let rows = self.view.rows(width);
+        let (cols, term_rows) = terminal::size()
+            .map(|(w, h)| (w as usize, h as usize))
+            .unwrap_or((80, 24));
+        let done = matches!(self.view.mode, Mode::Done);
+        let (width, max_rows) = viewport(cols, term_rows, done);
+        let rows = self.view.frame(width, max_rows);
         let mut out = stdout();
         if self.drawn > 0 {
             queue!(out, cursor::MoveToColumn(0), cursor::MoveUp(self.drawn))?;
@@ -1007,6 +1096,73 @@ mod tests {
             .pieces
             .iter()
             .all(|piece| piece.tone != Tone::FalseText));
+    }
+
+    #[test]
+    fn a_working_frame_stays_inside_the_terminal() {
+        assert_eq!(viewport(120, 40, false), (119, 39));
+        assert_eq!(viewport(120, 40, true), (119, usize::MAX));
+        assert_eq!(viewport(1, 1, false), (1, 1));
+
+        let src: String = (0..30)
+            .map(|i| format!("(\"{i} is recorded\")\n"))
+            .collect();
+        let program = parse(&src).unwrap();
+        let plan = Plan::of(&compile(&program).unwrap());
+        let mut view = RunView::planning();
+        view.show_plan(&plan);
+
+        let full = view.rows(80);
+        assert_eq!(full.len(), 31);
+        assert!(!full.last().unwrap().plain().contains('/'));
+
+        view.on_event(&serde_json::json!({
+            "kind": "search_step",
+            "classifications": [{"id": "src", "signal": 0.9, "applied": "keep"}]
+        }));
+        let searching = view.frame(60, 8);
+        assert_eq!(searching.len(), 8);
+        assert!(searching[0].plain().contains("\"0 is recorded\""));
+        assert!(searching[6].plain().contains("\"6 is recorded\""));
+        assert!(searching[7].plain().contains("1-7/30"));
+        assert!(searching
+            .iter()
+            .all(|row| row.plain().chars().count() <= 60));
+
+        view.on_event(&serde_json::json!({
+            "kind": "read_step",
+            "proposition": "20 is recorded",
+            "path": "src/store.py",
+            "verdict": "entailed"
+        }));
+        let reading = view.frame(40, 8);
+        assert_eq!(reading.len(), 8);
+        assert!(
+            reading
+                .iter()
+                .any(|row| row.plain().contains("\"20 is") && row.plain().contains("src/store.py")),
+            "{:?}",
+            reading.iter().map(|row| row.plain()).collect::<Vec<_>>()
+        );
+        assert!(
+            reading[7].plain().contains("18-24/30"),
+            "{}",
+            reading[7].plain()
+        );
+        assert!(reading.iter().all(|row| row.plain().chars().count() <= 40));
+
+        let narrow = view.frame(8, 3);
+        assert!(narrow.iter().all(|row| row.plain().chars().count() <= 8));
+
+        view.finish(
+            &src,
+            &program.clauses,
+            &plan,
+            &vec![Value::True; 30],
+            &[],
+            Explain::Contradictions,
+        );
+        assert!(view.frame(40, 8).len() > 8);
     }
 
     #[test]
