@@ -9,42 +9,30 @@ fixed schema, can reference abstract concepts, be imprecise or qualitative, and 
 don't need to be aware of any specifics about _how_ the codebase is implemented:
 
 ```
-(require
-  (and
-    (component "Frontend")
-    (component "Backend")))
+(sense calls "{caller} calls {callee}")
+(sense contains "{X} contains {Y}")
 
-;; A derivation rule defining the relationship `depends_on`.
-;; Note how `file` and `includes` are undefined atoms.
-(def depends_on [x y]
-  (and
-    (component x)
-    (component y)
-    (or
-      (exists [f]
-        (and
-          (file f)
-          (includes x f)
-          (defines f y))))))
+(name Oracle)
+(name Universe)
+(name Search)
+(name Read)
 
-;; A relationship `depends_on` connecting the two components.
-(require
-  (depends_on "Frontend" "Backend"))
+;; Claims
 
-;; An integrity constraint asserting that the architectural layering must not be violated.
-(require
-  (not (depends_on "Backend" "Frontend")))
+("An Oracle is a general classifier leveraging a system-one model like jev.")
 
-;; An integrity constraint asserting that there should be no circular dependencies.
-(require
-  (forall [x y]
-    (implies
-      (depends_on x y)
-      (not (depends_on y x)))))
+("autoground emits a log of structured events")
+
+(not (calls Universe Oracle))
+
+(and
+  ("Search prunes a Universe to a window of relevant objects along with a signal score.")
+  (calls Search Universe)
+  (calls Search Oracle))
 ```
 
-**Self-validating** simply means that all assertions in the model are evaluated and so can
-catch misconceptions and violated assumptions.
+**Self-validating** simply means that all claims in the model are evaluated and so can catch
+misconceptions and violated assumptions.
 
 ## North Star
 
