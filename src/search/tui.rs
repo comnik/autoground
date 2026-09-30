@@ -9,9 +9,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
-use super::trace::{
-    format_exchange, format_steps, summary_lines, SearchStep, SearchTraceFile, SummaryLine,
-};
+use super::trace::{format_steps, summary_lines, SearchStep, SearchTraceFile, SummaryLine};
 use super::{Applied, Decision};
 
 struct RawMode;
@@ -132,7 +130,6 @@ struct Pane {
     sel: usize,
     list_scroll: usize,
     ctx_scroll: usize,
-    raw: bool,
     /// Jump the context pane to the selected database on the next draw.
     follow: bool,
 }
@@ -144,7 +141,6 @@ fn page(out: &mut impl Write, steps: &[SearchStep]) -> std::io::Result<()> {
         sel: 0,
         list_scroll: 0,
         ctx_scroll: 0,
-        raw: false,
         follow: true,
     };
     loop {
@@ -186,11 +182,6 @@ fn page(out: &mut impl Write, steps: &[SearchStep]) -> std::io::Result<()> {
                     pane.follow = false;
                     pane.ctx_scroll = pane.ctx_scroll.saturating_add(body_rows());
                 }
-                KeyCode::Char('v') | KeyCode::Char('V') => {
-                    pane.raw = !pane.raw;
-                    pane.ctx_scroll = 0;
-                    pane.follow = !pane.raw;
-                }
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 _ => {}
             },
@@ -228,9 +219,9 @@ fn draw(out: &mut impl Write, steps: &[SearchStep], pane: &mut Pane) -> std::io:
 
     let col1 = column_width(step, cols);
     let col2 = cols.saturating_sub(col1 + 3);
-    let right = right_lines(step, pane.sel, pane.raw, col2);
+    let right = right_lines(step, pane.sel, col2);
     let max_ctx = right.len().saturating_sub(body);
-    if pane.follow && !pane.raw {
+    if pane.follow {
         pane.ctx_scroll = context_anchor(step, pane.sel, &right)
             .saturating_sub(2)
             .min(max_ctx);
@@ -263,23 +254,11 @@ fn draw(out: &mut impl Write, steps: &[SearchStep], pane: &mut Pane) -> std::io:
         )?;
         let line = right_row(&right, pane.ctx_scroll, row);
         let shown = fit(&line, col2);
-        if pane.raw {
-            queue!(
-                out,
-                SetForegroundColor(Color::DarkGrey),
-                Print(&shown),
-                ResetColor
-            )?;
-        } else if row == 0 {
-            queue!(out, Print(&shown))?;
-        } else {
-            queue!(out, Print(&shown))?;
-        }
+        queue!(out, Print(&shown))?;
         queue!(out, Clear(ClearType::UntilNewLine))?;
     }
 
-    let v_hint = if pane.raw { "v  context" } else { "v  request" };
-    let help = format!("  ← →  steps    ↑↓  select    {v_hint}    pgup/pgdn  context    q  back");
+    let help = "  ← →  steps    ↑↓  select    pgup/pgdn  context    q  back";
     queue!(
         out,
         cursor::MoveTo(0, rows.saturating_sub(1) as u16),
@@ -327,7 +306,7 @@ fn paint_entry(
     Ok(())
 }
 
-fn right_lines(step: &SearchStep, sel: usize, raw: bool, width: usize) -> Vec<String> {
+fn right_lines(step: &SearchStep, sel: usize, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(decision) = step.classifications.get(sel) {
         lines.push(format!("{}  {:.2}", decision.applied, decision.signal));
@@ -335,12 +314,10 @@ fn right_lines(step: &SearchStep, sel: usize, raw: bool, width: usize) -> Vec<St
         lines.push(String::new());
     }
     lines.push(String::new());
-    let body = if raw {
-        format_exchange(step)
-    } else {
-        context_text(step)
-    };
-    lines.extend(wrap_lines(body.trim_start_matches('\n'), width.max(1)));
+    lines.extend(wrap_lines(
+        context_text(step).trim_start_matches('\n'),
+        width.max(1),
+    ));
     lines
 }
 
@@ -356,20 +333,6 @@ fn right_row(lines: &[String], scroll: usize, row: usize) -> String {
 }
 
 fn context_text(step: &SearchStep) -> String {
-    if let Some(state) = step
-        .exchange
-        .as_ref()
-        .and_then(|ex| ex.request.get("state"))
-    {
-        if let Some(view) = state.get("view").and_then(|view| view.as_str()) {
-            return view.to_string();
-        }
-        if state.as_object().is_some() {
-            if let Ok(pretty) = serde_json::to_string_pretty(state) {
-                return pretty;
-            }
-        }
-    }
     let mut out = String::new();
     for obj in &step.view {
         if obj.listing.is_empty() {

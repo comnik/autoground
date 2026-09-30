@@ -30,7 +30,6 @@ use crate::confidence::{FLOOR, RESOLVE, SUPPORT};
 use crate::log::Log;
 use crate::oracle::jev::POST_PARALLELISM;
 use crate::oracle::{Answer, Classification, Oracle, QuestionKind, State, Usage};
-use crate::search::trace::ExchangeRecord;
 use crate::search::{Decision, Search, View};
 use crate::universe::{Universe, UniverseError};
 use crate::value::Value;
@@ -212,20 +211,15 @@ pub struct Reader<U, O> {
 }
 
 impl<U, O> Reader<U, O> {
-    pub fn new(universe: U, oracle: O, budget: usize) -> Self {
+    pub fn new(universe: U, oracle: O, budget: usize, log: Option<Log>) -> Self {
         Self {
-            search: Search::new(universe, oracle, budget),
+            search: Search::new(universe, oracle, budget, log.clone()),
             budget,
             next: 0,
             pending: Vec::new(),
             resolved: HashMap::new(),
-            log: None,
+            log,
         }
-    }
-
-    pub fn set_log(&mut self, log: Log) {
-        self.search.set_log(log.clone());
-        self.log = Some(log);
     }
 
     pub fn usage(&self) -> Usage
@@ -435,7 +429,7 @@ where
             match answer {
                 Ok(answer) => match parse_verdict(&answer.choice) {
                     Ok(verdict) => {
-                        let step = self.step_for(&ask, verdict, &answer);
+                        let step = self.step_for(&ask, verdict, &answer, ticket);
                         opens[ask.index].record(step, verdict, answer.confidence, ask.excerpt);
                     }
                     Err(message) => opens[ask.index].fail(message),
@@ -496,7 +490,13 @@ where
         prepared
     }
 
-    fn step_for(&self, ask: &Prepared, verdict: Verdict, answer: &Answer) -> Step {
+    fn step_for(
+        &self,
+        ask: &Prepared,
+        verdict: Verdict,
+        answer: &Answer,
+        ticket: crate::oracle::Ticket,
+    ) -> Step {
         let step = Step {
             proposition: ask.proposition.clone(),
             path: ask.path.clone(),
@@ -504,7 +504,7 @@ where
             confidence: answer.confidence,
             rendered_bytes: ask.rendered_bytes,
             escalation: false,
-            exchange: answer.exchange.as_ref().map(ExchangeRecord::from_oracle),
+            ticket: ticket.0,
         };
         self.log_step(&step);
         step
@@ -540,7 +540,7 @@ where
                             confidence: answer.confidence,
                             rendered_bytes: 0,
                             escalation: true,
-                            exchange: answer.exchange.as_ref().map(ExchangeRecord::from_oracle),
+                            ticket: ticket.0,
                         };
                         self.log_step(&step);
                         open.steps.push(step);
@@ -1027,7 +1027,6 @@ mod tests {
                     choice: String::new(),
                     confidence: noul,
                     noul: Some(noul),
-                    exchange: None,
                 }
             }
             QuestionKind::Choice if req.criteria.get("entailed").is_some() => {
@@ -1040,14 +1039,12 @@ mod tests {
                     choice,
                     confidence,
                     noul: None,
-                    exchange: None,
                 }
             }
             QuestionKind::Choice => Answer {
                 choice: inner.escalation.0.clone(),
                 confidence: inner.escalation.1,
                 noul: None,
-                exchange: None,
             },
         }
     }
@@ -1067,7 +1064,7 @@ mod tests {
 
     fn read_with(fs: Filesystem, oracle: Scripted) -> (Reader<Filesystem, Scripted>, Scripted) {
         let shared = oracle.clone();
-        let reader = Reader::new(fs, oracle, DEFAULT_BUDGET_BYTES);
+        let reader = Reader::new(fs, oracle, DEFAULT_BUDGET_BYTES, None);
         (reader, shared)
     }
 
@@ -1329,7 +1326,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/toy-layered");
         let universe = Filesystem::at_root(&root).unwrap();
         let oracle = HeuristicOracle::new(universe.clone());
-        let mut reader = Reader::new(universe, oracle, DEFAULT_BUDGET_BYTES);
+        let mut reader = Reader::new(universe, oracle, DEFAULT_BUDGET_BYTES, None);
         let frontend = reader.submit("frontend");
         let absent = reader.submit("zzzz-not-a-path");
         let found = reader.wait_many(&[frontend, absent]);

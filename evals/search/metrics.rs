@@ -118,6 +118,7 @@ mod tests {
             id: id.to_string(),
             signal,
             applied: autoground::search::Applied::Keep,
+            ticket: 0,
         }
     }
 

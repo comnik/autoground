@@ -211,7 +211,7 @@ fn score(repo: &Path, dir: &Path, judge: JudgeKind) -> Result<(), Box<dyn std::e
     let propositions = load_propositions(&dir.join("propositions.json"))?;
     let baselines = load_baselines(dir, &propositions)?;
     if judge == JudgeKind::Jev {
-        JevOracle::from_env().map_err(|err| err.to_string())?;
+        JevOracle::require_api_key().map_err(|err| err.to_string())?;
     }
     let each = pass(repo, &propositions, &baselines, judge, false)?;
     let batch = pass(repo, &propositions, &baselines, judge, true)?;
@@ -473,7 +473,7 @@ fn search_one(repo: &Path, proposition: &str, judge: JudgeKind) -> Result<Ran, S
             let oracle = HeuristicOracle::new(universe.clone());
             wait(universe, oracle, proposition, &log)
         }
-        JudgeKind::Jev => match JevOracle::from_env() {
+        JudgeKind::Jev => match JevOracle::from_env(log.clone()) {
             Ok(oracle) => wait(universe, oracle, proposition, &log),
             Err(err) => Err(SearchFailure {
                 spend: 0.0,
@@ -536,7 +536,7 @@ fn search_batch(
             let oracle = HeuristicOracle::new(universe.clone());
             wait_all(universe, oracle, propositions, &log)
         }
-        JudgeKind::Jev => match JevOracle::from_env() {
+        JudgeKind::Jev => match JevOracle::from_env(log.clone()) {
             Ok(oracle) => wait_all(universe, oracle, propositions, &log),
             Err(err) => Err(SearchFailure {
                 spend: 0.0,
@@ -588,8 +588,7 @@ fn wait_all<O: Oracle>(
     ),
     SearchFailure,
 > {
-    let mut session = Search::new(universe, oracle, DEFAULT_BUDGET_BYTES);
-    session.set_log(log.clone());
+    let mut session = Search::new(universe, oracle, DEFAULT_BUDGET_BYTES, Some(log.clone()));
     let tickets: Vec<_> = propositions
         .iter()
         .map(|item| {
@@ -608,8 +607,7 @@ fn wait<O: Oracle>(
     proposition: &str,
     log: &Log,
 ) -> Result<autoground::search::View<Filesystem>, SearchFailure> {
-    let mut session = Search::new(universe, oracle, DEFAULT_BUDGET_BYTES);
-    session.set_log(log.clone());
+    let mut session = Search::new(universe, oracle, DEFAULT_BUDGET_BYTES, Some(log.clone()));
     let ticket = session.submit(proposition);
     match session.wait(ticket) {
         Ok(view) => Ok(view),

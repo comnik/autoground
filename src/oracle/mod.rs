@@ -9,11 +9,13 @@ pub mod jev;
 mod mock;
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::time::{Duration, SystemTime};
+
+use serde::{Deserialize, Serialize};
 
 pub use jev::{JevOracle, Transport, UreqTransport};
 pub use mock::HeuristicOracle;
@@ -127,20 +129,69 @@ impl Classification {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ticket(pub(crate) u64);
 
-/// One answer, plus the exchange that produced it when the impl is remote.
+/// One answer.
 ///
 /// A Choice fills `choice` and `confidence`. A Noul fills `noul` with the
 /// probability the answer is yes. That probability is the whole answer: a
-/// Noul has no separate confidence.
+/// Noul has no separate confidence. The round-trip that produced the answer
+/// is logged once per POST, under [`EXCHANGE_KIND`], and names these tickets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Answer {
     pub choice: String,
     pub confidence: f64,
     pub noul: Option<f64>,
-    pub exchange: Option<OracleExchange>,
 }
 
-/// One transport round-trip. Shared across every ticket resolved by that POST.
+/// Log kind for one oracle POST. `tickets` are the questions that POST served.
+pub const EXCHANGE_KIND: &str = "exchange";
+
+/// One logged POST. Join a step's ticket to [`ExchangeEvent::tickets`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExchangeEvent {
+    pub tickets: Vec<u64>,
+    pub request: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// Exchange events indexed by the ticket each one served.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ExchangeIndex {
+    events: Vec<ExchangeEvent>,
+    by_ticket: HashMap<u64, usize>,
+}
+
+impl ExchangeIndex {
+    pub fn from_events(events: Vec<ExchangeEvent>) -> Self {
+        let mut by_ticket = HashMap::new();
+        for (index, event) in events.iter().enumerate() {
+            for ticket in &event.tickets {
+                by_ticket.insert(*ticket, index);
+            }
+        }
+        Self { events, by_ticket }
+    }
+
+    pub fn get(&self, ticket: u64) -> Option<&ExchangeEvent> {
+        self.by_ticket
+            .get(&ticket)
+            .map(|index| &self.events[*index])
+    }
+}
+
+/// One transport round-trip, kept once per POST.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OracleExchange {
     pub request: serde_json::Value,

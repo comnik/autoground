@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use crate::log::Log;
+
 use super::{
-    Answer, Classification, Oracle, OracleError, OracleExchange, QuestionKind, State, Ticket, Usage,
+    Answer, Classification, ExchangeEvent, Oracle, OracleError, OracleExchange, QuestionKind,
+    State, Ticket, Usage, EXCHANGE_KIND,
 };
 
 const DEFAULT_BASE: &str = "https://api.typesafe.ai";
@@ -159,6 +162,7 @@ pub struct JevOracle<T: Transport = UreqTransport> {
     questions: u64,
     round_trips: Vec<super::Flight>,
     last_exchanges: Vec<OracleExchange>,
+    log: Option<Log>,
     /// Production HTTP overlaps posts. Tests post inline so a flush is deterministic.
     parallel: bool,
     inflight: usize,
@@ -179,12 +183,18 @@ struct Done {
 }
 
 impl JevOracle<UreqTransport> {
-    pub fn from_env() -> Result<Self, OracleError> {
+    /// The live client needs `TYPESAFE_API_KEY`. A missing key fails before any POST.
+    pub fn require_api_key() -> Result<(), OracleError> {
         if std::env::var("TYPESAFE_API_KEY").is_err() {
             return Err(OracleError::Config(
                 "TYPESAFE_API_KEY is not set; pass --judge heuristic or set the key".into(),
             ));
         }
+        Ok(())
+    }
+
+    pub fn from_env(log: Log) -> Result<Self, OracleError> {
+        Self::require_api_key()?;
         let base = std::env::var("TYPESAFE_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE.into());
         let model =
             std::env::var("TYPESAFE_DEFAULT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
@@ -192,6 +202,7 @@ impl JevOracle<UreqTransport> {
             UreqTransport,
             format!("{}/v1/systemone", base.trim_end_matches('/')),
             model,
+            Some(log),
         );
         oracle.parallel = true;
         Ok(oracle)
@@ -199,7 +210,12 @@ impl JevOracle<UreqTransport> {
 }
 
 impl<T: Transport> JevOracle<T> {
-    pub fn new(transport: T, endpoint: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        transport: T,
+        endpoint: impl Into<String>,
+        model: impl Into<String>,
+        log: Option<Log>,
+    ) -> Self {
         let (done_tx, done_rx) = mpsc::channel();
         Self {
             transport,
@@ -215,6 +231,7 @@ impl<T: Transport> JevOracle<T> {
             questions: 0,
             round_trips: Vec::new(),
             last_exchanges: Vec::new(),
+            log,
             parallel: false,
             inflight: 0,
             next_flight: 0,
@@ -374,21 +391,19 @@ impl<T: Transport> JevOracle<T> {
     ) {
         match result {
             Ok(posted) => {
-                let response = posted.value.clone();
                 let n = tickets.len();
                 let ex = exchange_from_posted(request, posted);
                 self.record_request(&ex, n);
-                self.last_exchanges.push(ex.clone());
-                for (ticket, kind) in tickets {
-                    let key = question_key(ticket);
-                    let parsed = parse_answer(&response, &key, kind).map(|mut answer| {
-                        answer.exchange = Some(ex.clone());
-                        answer
-                    });
-                    self.resolved.insert(ticket, parsed);
+                self.emit_exchange(&tickets, &ex, None);
+                for (ticket, kind) in &tickets {
+                    let key = question_key(*ticket);
+                    let parsed = parse_answer(&ex.response, &key, *kind);
+                    self.resolved.insert(*ticket, parsed);
                 }
+                self.last_exchanges.push(ex);
             }
             Err(error) => {
+                self.emit_failure(&request, &tickets, &error);
                 for (ticket, _) in tickets {
                     self.resolved.insert(ticket, Err(error.clone()));
                 }
@@ -475,6 +490,64 @@ impl<T: Transport> Oracle for JevOracle<T> {
     }
 }
 
+fn emit_exchange<T: Transport>(
+    oracle: &JevOracle<T>,
+    tickets: &[(Ticket, QuestionKind)],
+    ex: &OracleExchange,
+    error: Option<String>,
+) {
+    let Some(log) = &oracle.log else {
+        return;
+    };
+    let event = ExchangeEvent {
+        tickets: tickets.iter().map(|(ticket, _)| ticket.0).collect(),
+        request: ex.request.clone(),
+        response: error.is_none().then(|| ex.response.clone()),
+        error,
+        started_at_ms: ex.started_at.map(epoch_ms),
+        ended_at_ms: ex.ended_at.map(epoch_ms),
+        input_tokens: ex.input_tokens,
+        output_tokens: ex.output_tokens,
+        cost_usd: ex.cost_usd,
+    };
+    let _ = log.append_event(EXCHANGE_KIND, &event);
+}
+
+impl<T: Transport> JevOracle<T> {
+    fn emit_exchange(
+        &self,
+        tickets: &[(Ticket, QuestionKind)],
+        ex: &OracleExchange,
+        error: Option<String>,
+    ) {
+        emit_exchange(self, tickets, ex, error);
+    }
+
+    fn emit_failure(
+        &self,
+        request: &Value,
+        tickets: &[(Ticket, QuestionKind)],
+        error: &OracleError,
+    ) {
+        let ex = OracleExchange {
+            request: request.clone(),
+            response: Value::Null,
+            started_at: None,
+            ended_at: None,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+        };
+        self.emit_exchange(tickets, &ex, Some(error.to_string()));
+    }
+}
+
+fn epoch_ms(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn question_key(ticket: Ticket) -> String {
     format!("q{}", ticket.0)
 }
@@ -519,7 +592,6 @@ fn parse_answer(resp: &Value, key: &str, kind: QuestionKind) -> Result<Answer, O
                 choice: choice.to_string(),
                 confidence,
                 noul: None,
-                exchange: None,
             })
         }
         QuestionKind::Noul => {
@@ -531,7 +603,6 @@ fn parse_answer(resp: &Value, key: &str, kind: QuestionKind) -> Result<Answer, O
                 choice: String::new(),
                 confidence: noul,
                 noul: Some(noul),
-                exchange: None,
             })
         }
     }
@@ -634,6 +705,10 @@ mod tests {
     }
 
     fn oracle(responses: Vec<Value>) -> JevOracle<SeqTransport> {
+        oracle_logging(responses, None)
+    }
+
+    fn oracle_logging(responses: Vec<Value>, log: Option<Log>) -> JevOracle<SeqTransport> {
         JevOracle::new(
             SeqTransport {
                 responses,
@@ -642,6 +717,7 @@ mod tests {
             },
             "http://example/v1/systemone",
             "jev-latest",
+            log,
         )
     }
 
@@ -657,6 +733,7 @@ mod tests {
             },
             "http://example/v1/systemone",
             "jev-latest",
+            None,
         )
     }
 
@@ -835,12 +912,79 @@ mod tests {
             "usage": { "input_tokens": 2000, "output_tokens": 8 }
         })]);
         let t = o.submit(classify(json!({"n": 1}), "a"));
-        let a = o.wait(t).unwrap();
-        let ex = a.exchange.unwrap();
+        o.wait(t).unwrap();
+        let ex = o.last_exchanges().last().unwrap();
         assert_eq!(ex.input_tokens, Some(2000));
         assert_eq!(ex.output_tokens, Some(8));
         assert!((ex.cost_usd.unwrap() - 2000.0 * 0.042 / 1_000_000.0).abs() < 1e-15);
         assert!(ex.started_at.is_some() && ex.ended_at.is_some());
+    }
+
+    #[test]
+    fn exchange_event_lists_every_ticket_in_the_post() {
+        let path = std::env::temp_dir().join(format!(
+            "autoground-exchange-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let log = crate::log::Log::open(&path).unwrap();
+        let mut o = oracle_logging(vec![choice_resp(&["q0", "q1"], "yes")], Some(log));
+        let state = json!({"n": 1});
+        let t0 = o.submit(classify(state.clone(), "p0"));
+        let t1 = o.submit(classify(state, "p1"));
+        assert_eq!(o.wait(t0).unwrap().choice, "yes");
+        assert_eq!(o.wait(t1).unwrap().choice, "yes");
+        assert_eq!(o.transport.bodies.len(), 1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let events = crate::log::parse_jsonl(&text).unwrap();
+        let exchanges: Vec<_> = events
+            .iter()
+            .filter(|event| event.get("kind").and_then(|kind| kind.as_str()) == Some(EXCHANGE_KIND))
+            .collect();
+        assert_eq!(exchanges.len(), 1);
+        assert_eq!(
+            exchanges[0]["tickets"],
+            json!([t0.0, t1.0]),
+            "{}",
+            exchanges[0]
+        );
+        assert!(exchanges[0].get("request").is_some());
+        assert!(exchanges[0]["response"]["answers"]["q0"]["choice"] == "yes");
+    }
+
+    #[test]
+    fn failed_post_logs_the_request_and_the_error() {
+        let path = std::env::temp_dir().join(format!(
+            "autoground-exchange-fail-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let log = crate::log::Log::open(&path).unwrap();
+        let mut o = oracle_logging(vec![], Some(log));
+        let ticket = o.submit(classify(json!({"n": 1}), "a"));
+        assert!(o.wait(ticket).is_err());
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let events = crate::log::parse_jsonl(&text).unwrap();
+        let exchanges: Vec<_> = events
+            .iter()
+            .filter(|event| event.get("kind").and_then(|kind| kind.as_str()) == Some(EXCHANGE_KIND))
+            .collect();
+        assert_eq!(exchanges.len(), 1);
+        assert_eq!(exchanges[0]["tickets"], json!([ticket.0]));
+        assert!(exchanges[0].get("request").is_some());
+        assert!(exchanges[0].get("response").is_none());
+        assert!(exchanges[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no more responses"));
     }
 
     #[test]

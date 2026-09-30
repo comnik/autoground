@@ -3,7 +3,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::search::trace::{ExchangeRecord, UsageRecord};
+use crate::oracle::{ExchangeIndex, EXCHANGE_KIND};
+use crate::search::trace::UsageRecord;
 use crate::value::Value;
 
 use super::Stance;
@@ -20,10 +21,8 @@ pub struct ReadStep {
     pub confidence: f64,
     pub rendered_bytes: u64,
     pub escalation: bool,
-    /// The Jev round-trip that produced this step. A stop answer shares the
-    /// document request, so only the document step carries it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exchange: Option<ExchangeRecord>,
+    /// Oracle ticket. The round-trip is the `exchange` event that lists it.
+    pub ticket: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,6 +42,9 @@ pub struct ReadTraceFile {
     pub started_at_ms: u64,
     pub ended_at_ms: u64,
     pub steps: Vec<ReadStep>,
+    /// POSTs loaded from this trace, joined by step ticket.
+    #[serde(skip)]
+    pub exchanges: ExchangeIndex,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -104,11 +106,15 @@ fn indent_json(value: &serde_json::Value) -> String {
 
 fn assemble(events: Vec<serde_json::Value>, path: &Path) -> Result<ReadTraceFile, String> {
     let mut steps = Vec::new();
+    let mut exchanges = Vec::new();
     let mut summary: Option<ReadSummary> = None;
     for event in events {
         match event.get("kind").and_then(|kind| kind.as_str()) {
             Some(STEP_KIND) => {
                 steps.push(serde_json::from_value(event).map_err(|err| err.to_string())?);
+            }
+            Some(EXCHANGE_KIND) => {
+                exchanges.push(serde_json::from_value(event).map_err(|err| err.to_string())?);
             }
             Some(TRACE_KIND) => {
                 summary = Some(serde_json::from_value(event).map_err(|err| err.to_string())?);
@@ -133,6 +139,7 @@ fn assemble(events: Vec<serde_json::Value>, path: &Path) -> Result<ReadTraceFile
         started_at_ms: summary.started_at_ms,
         ended_at_ms: summary.ended_at_ms,
         steps,
+        exchanges: ExchangeIndex::from_events(exchanges),
     })
 }
 
@@ -162,11 +169,13 @@ pub fn present_read(path: &Path, file: &ReadTraceFile, full: bool) -> io::Result
                     step.path, step.verdict, step.confidence
                 )?;
             }
-            if let Some(exchange) = &step.exchange {
+            if let Some(exchange) = file.exchanges.get(step.ticket) {
                 writeln!(out, "  oracle request")?;
                 write!(out, "{}", indent_json(&exchange.request))?;
                 writeln!(out, "  oracle response")?;
-                write!(out, "{}", indent_json(&exchange.response))?;
+                if let Some(response) = &exchange.response {
+                    write!(out, "{}", indent_json(response))?;
+                }
             }
         }
     }

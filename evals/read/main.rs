@@ -217,7 +217,7 @@ fn score(
     let propositions = load_propositions(&propositions_path(repo))?;
     let baselines = load_baselines(dir, &propositions)?;
     if judge == JudgeKind::Jev {
-        JevOracle::from_env().map_err(|err| err.to_string())?;
+        JevOracle::require_api_key().map_err(|err| err.to_string())?;
     }
     let each = pass(repo, &propositions, &baselines, judge, false, within)?;
     let batch = pass(repo, &propositions, &baselines, judge, true, within)?;
@@ -456,7 +456,7 @@ fn read_one(
             let oracle = HeuristicOracle::new(universe.clone());
             wait(universe, oracle, proposition, &log)
         }
-        JudgeKind::Jev => match JevOracle::from_env() {
+        JudgeKind::Jev => match JevOracle::from_env(log.clone()) {
             Ok(oracle) => wait(universe, oracle, proposition, &log),
             Err(err) => Err(ReadFailure {
                 spend: 0.0,
@@ -500,7 +500,7 @@ fn read_batch(
             let oracle = HeuristicOracle::new(universe.clone());
             wait_all(universe, oracle, propositions, &log)
         }
-        JudgeKind::Jev => match JevOracle::from_env() {
+        JudgeKind::Jev => match JevOracle::from_env(log.clone()) {
             Ok(oracle) => wait_all(universe, oracle, propositions, &log),
             Err(err) => Err(ReadFailure {
                 spend: 0.0,
@@ -544,8 +544,7 @@ fn wait_all<O: Oracle>(
     propositions: &[Proposition],
     log: &Log,
 ) -> Result<Batch, ReadFailure> {
-    let mut reader = Reader::new(universe, oracle, DEFAULT_BUDGET_BYTES);
-    reader.set_log(log.clone());
+    let mut reader = Reader::new(universe, oracle, DEFAULT_BUDGET_BYTES, Some(log.clone()));
     let tickets: Vec<_> = propositions
         .iter()
         .map(|item| {
@@ -579,8 +578,7 @@ fn wait<O: Oracle>(
     proposition: &str,
     log: &Log,
 ) -> Result<Ran, ReadFailure> {
-    let mut reader = Reader::new(universe, oracle, DEFAULT_BUDGET_BYTES);
-    reader.set_log(log.clone());
+    let mut reader = Reader::new(universe, oracle, DEFAULT_BUDGET_BYTES, Some(log.clone()));
     let ticket = reader.submit(proposition);
     match reader.wait(ticket) {
         Ok(finding) => Ok(ran_from_finding(finding)),

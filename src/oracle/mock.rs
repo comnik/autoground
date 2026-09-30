@@ -53,7 +53,6 @@ impl<U: Universe> HeuristicOracle<U> {
             choice: String::new(),
             confidence: noul,
             noul: Some(noul),
-            exchange: None,
         }
     }
 
@@ -75,7 +74,6 @@ impl<U: Universe> HeuristicOracle<U> {
             choice: choice.to_string(),
             confidence: 0.95,
             noul: None,
-            exchange: None,
         }
     }
 }

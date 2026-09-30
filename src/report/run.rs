@@ -941,6 +941,10 @@ impl Live {
     /// Apply one shared-log event and redraw. Draw errors are ignored so a
     /// display glitch does not fail the run.
     pub fn on_event(&self, event: &Json) {
+        let kind = event.get("kind").and_then(|kind| kind.as_str());
+        if !matches!(kind, Some("search_step" | "read_step")) {
+            return;
+        }
         let mut body = self.lock();
         body.view.on_event(event);
         let _ = body.draw();

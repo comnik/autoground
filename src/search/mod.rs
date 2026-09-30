@@ -27,7 +27,7 @@ use crate::oracle::jev::QUESTION_BUDGET;
 use crate::oracle::{Classification, Oracle, State, Ticket as OracleTicket, Usage};
 use crate::universe::{Universe, UniverseError};
 
-use trace::{ExchangeRecord, SearchStep, ViewDatabase};
+use trace::{SearchStep, ViewDatabase};
 
 /// Default byte budget for one directory-listing state. About 12k tokens at
 /// 4 bytes each, under Jev's 32k state-side cap.
@@ -71,6 +71,8 @@ pub struct Decision {
     /// and a floor; the number does not change meaning with the label.
     pub signal: f64,
     pub applied: Applied,
+    /// Oracle ticket for the question that classified this database.
+    pub ticket: u64,
 }
 
 /// Pruned universe for one proposition, plus the directory decisions that
@@ -128,7 +130,7 @@ pub struct Search<U, O> {
 }
 
 impl<U, O> Search<U, O> {
-    pub fn new(universe: U, oracle: O, budget: usize) -> Self {
+    pub fn new(universe: U, oracle: O, budget: usize, log: Option<Log>) -> Self {
         Self {
             universe,
             oracle,
@@ -136,12 +138,8 @@ impl<U, O> Search<U, O> {
             next: 0,
             pending: Vec::new(),
             resolved: HashMap::new(),
-            log: None,
+            log,
         }
-    }
-
-    pub fn set_log(&mut self, log: Log) {
-        self.log = Some(log);
     }
 
     pub fn usage(&self) -> Usage
@@ -309,7 +307,6 @@ where
                 prop_steps.push(SearchStep {
                     view: group.view.clone(),
                     classifications: Vec::new(),
-                    exchange: None,
                 });
                 for name in names_in_group(&groups, index, &names) {
                     if !name.summarizable {
@@ -335,7 +332,7 @@ where
             step: usize,
             path: String,
             noul: f64,
-            exchange: Option<crate::oracle::OracleExchange>,
+            oracle_ticket: OracleTicket,
         }
 
         let mut hits = Vec::new();
@@ -347,7 +344,7 @@ where
                     step: ask.step,
                     path: ask.path,
                     noul: answer.noul.unwrap_or(0.0),
-                    exchange: answer.exchange,
+                    oracle_ticket: ask.oracle_ticket,
                 }),
                 Err(error) => {
                     failed
@@ -357,32 +354,16 @@ where
             }
         }
 
-        for (index, group) in groups.iter().enumerate() {
-            for item in &pending {
-                if failed.contains_key(&item.ticket) {
-                    continue;
-                }
-                let step = &mut steps.get_mut(&item.ticket).unwrap()[index];
-                for id in &group.ids {
-                    let irrelevant = hits
-                        .iter()
-                        .find(|hit| hit.search_ticket == item.ticket && hit.path == *id)
-                        .map(|hit| hit.noul)
-                        .unwrap_or(0.0);
-                    let signal = 1.0 - irrelevant;
-                    step.classifications.push(decision_from_signal(id, signal));
-                }
-                if step.exchange.is_none() {
-                    if let Some(hit) = hits
-                        .iter()
-                        .find(|hit| hit.search_ticket == item.ticket && hit.step == index)
-                    {
-                        if let Some(exchange) = &hit.exchange {
-                            step.exchange = Some(ExchangeRecord::from_oracle(exchange));
-                        }
-                    }
-                }
+        // One hit per directory per sentence, in pack order. A failed ask
+        // drops the whole sentence, so the directories of every group are here.
+        for hit in &hits {
+            if failed.contains_key(&hit.search_ticket) {
+                continue;
             }
+            let step = &mut steps.get_mut(&hit.search_ticket).unwrap()[hit.step];
+            let signal = 1.0 - hit.noul;
+            step.classifications
+                .push(decision_from_signal(&hit.path, signal, hit.oracle_ticket.0));
         }
 
         let usage = self.oracle.usage();
@@ -760,11 +741,12 @@ fn irrelevant_question(state: &State, path: &str, proposition: &str) -> Classifi
 /// under the directory: one minus that directory's own "irrelevant" answer.
 /// The child-name tree in the question's state is the subtree. The directory
 /// drops when that irrelevance is at least [`PRUNE_FLOOR`].
-fn decision_from_signal(id: &str, signal: f64) -> Decision {
+fn decision_from_signal(id: &str, signal: f64, ticket: u64) -> Decision {
     Decision {
         id: id.to_string(),
         signal,
         applied: apply_signal(signal, PRUNE_FLOOR),
+        ticket,
     }
 }
 
@@ -936,7 +918,6 @@ mod tests {
                         choice: String::new(),
                         confidence: noul,
                         noul: Some(noul),
-                        exchange: None,
                     },
                 );
             }
@@ -980,7 +961,7 @@ mod tests {
         proposition: &str,
         budget: usize,
     ) -> (View<U>, Script) {
-        let mut session = Search::new(universe, oracle, budget);
+        let mut session = Search::new(universe, oracle, budget, None);
         let ticket = session.submit(proposition);
         let view = session.wait(ticket).unwrap();
         (view, session.oracle)
@@ -1216,6 +1197,7 @@ mod tests {
             Filesystem::at_root("examples/toy-layered").unwrap(),
             Script::new(toy(&[("frontend", "keep", 0.95)])),
             DEFAULT_BUDGET_BYTES,
+            None,
         );
         let ticket = session.submit("frontend");
         assert!(session.oracle.log.is_empty());
@@ -1229,6 +1211,7 @@ mod tests {
             Filesystem::at_root("examples/toy-layered").unwrap(),
             Script::new(toy(&[])),
             DEFAULT_BUDGET_BYTES,
+            None,
         );
         let queued = session.submit("frontend");
         let err = match session.wait(Ticket(99)) {
@@ -1258,6 +1241,7 @@ mod tests {
             Filesystem::at_root("examples/toy-layered").unwrap(),
             oracle,
             DEFAULT_BUDGET_BYTES,
+            None,
         );
         let frontend = session.submit("frontend");
         let backend = session.submit("backend");

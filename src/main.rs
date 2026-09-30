@@ -356,7 +356,13 @@ fn run_judged_search<U: Universe + Clone>(
             let oracle = HeuristicOracle::new(universe.clone());
             run_search(universe, oracle, proposition, budget, log)
         }
-        JudgeKind::Jev => run_search(universe, JevOracle::from_env()?, proposition, budget, log),
+        JudgeKind::Jev => run_search(
+            universe,
+            JevOracle::from_env(log.clone())?,
+            proposition,
+            budget,
+            log,
+        ),
     }
 }
 
@@ -367,8 +373,7 @@ fn run_search<U: Universe + Clone, O: Oracle>(
     budget: usize,
     log: &Log,
 ) -> Result<Searched, Box<dyn std::error::Error>> {
-    let mut session = Search::new(universe, oracle, budget);
-    session.set_log(log.clone());
+    let mut session = Search::new(universe, oracle, budget, Some(log.clone()));
     let ticket = session.submit(proposition);
     match session.wait(ticket) {
         Ok(view) => Ok(Searched {
@@ -435,8 +440,10 @@ fn read_cmd(
         started_at_ms: epoch_ms(started_at),
         ended_at_ms: epoch_ms(ended_at),
         steps: read.steps,
+        exchanges: Default::default(),
     };
     file.write_summary(&log)?;
+    let file = ReadTraceFile::load(log.path())?;
     present_read(log.path(), &file, full)?;
     if let Some(err) = read.failure {
         eprintln!("{err}");
@@ -470,7 +477,13 @@ fn run_judged_read<U: Universe + Clone>(
             let oracle = HeuristicOracle::new(universe.clone());
             run_read(universe, oracle, proposition, budget, log)
         }
-        JudgeKind::Jev => run_read(universe, JevOracle::from_env()?, proposition, budget, log),
+        JudgeKind::Jev => run_read(
+            universe,
+            JevOracle::from_env(log.clone())?,
+            proposition,
+            budget,
+            log,
+        ),
     }
 }
 
@@ -481,8 +494,7 @@ fn run_read<U: Universe + Clone, O: Oracle>(
     budget: usize,
     log: &Log,
 ) -> Result<ReadOutcome, Box<dyn std::error::Error>> {
-    let mut session = Reader::new(universe, oracle, budget);
-    session.set_log(log.clone());
+    let mut session = Reader::new(universe, oracle, budget, Some(log.clone()));
     let ticket = session.submit(proposition);
     match session.wait(ticket) {
         Ok(finding) => Ok(ReadOutcome {
@@ -676,7 +688,13 @@ fn read_atoms<U: Universe + Clone>(
             let oracle = HeuristicOracle::new(universe.clone());
             read_with(universe, oracle, atoms, budget, log)
         }
-        JudgeKind::Jev => read_with(universe, JevOracle::from_env()?, atoms, budget, log),
+        JudgeKind::Jev => read_with(
+            universe,
+            JevOracle::from_env(log.clone())?,
+            atoms,
+            budget,
+            log,
+        ),
     }
 }
 
@@ -687,8 +705,7 @@ fn read_with<U: Universe + Clone, O: Oracle>(
     budget: usize,
     log: &Log,
 ) -> Result<Judged, Box<dyn std::error::Error>> {
-    let mut reader = Reader::new(universe, oracle, budget);
-    reader.set_log(log.clone());
+    let mut reader = Reader::new(universe, oracle, budget, Some(log.clone()));
     let tickets: Vec<_> = atoms
         .iter()
         .map(|atom| reader.submit(atom.clone()))

@@ -1,23 +1,22 @@
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
-use crate::oracle::{LatencyPercentiles, OracleExchange, Usage};
+use crate::oracle::{LatencyPercentiles, Usage};
 
 use super::{Applied, Decision};
 
 pub const TRACE_KIND: &str = "search";
 
-/// One oracle call: the universe view, then how each target was classified.
+/// One pack of directory decisions. Each decision's ticket names the oracle
+/// question. The POST that served it is the `exchange` event in the trace file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchStep {
     pub view: Vec<ViewDatabase>,
     pub classifications: Vec<Decision>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exchange: Option<ExchangeRecord>,
 }
 
 /// One summarizable database in the view.
@@ -30,37 +29,6 @@ pub struct ViewDatabase {
     pub listing: String,
     /// Classified in this call. The root is context only.
     pub target: bool,
-}
-
-/// Raw oracle round-trip, shared by every question in the step.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExchangeRecord {
-    pub request: Json,
-    pub response: Json,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_usd: Option<f64>,
-}
-
-impl ExchangeRecord {
-    pub fn from_oracle(ex: &OracleExchange) -> Self {
-        Self {
-            request: ex.request.clone(),
-            response: ex.response.clone(),
-            started_at_ms: ex.started_at.map(epoch_ms),
-            ended_at_ms: ex.ended_at.map(epoch_ms),
-            input_tokens: ex.input_tokens,
-            output_tokens: ex.output_tokens,
-            cost_usd: ex.cost_usd,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -430,40 +398,12 @@ pub fn format_step(step: &SearchStep, index: usize, total: usize) -> String {
     out
 }
 
-pub fn format_exchange(step: &SearchStep) -> String {
-    let Some(ex) = &step.exchange else {
-        return "\n  (no oracle request)\n".into();
-    };
-    let mut out = String::from("\n  oracle request\n");
-    out.push_str(&indent_json(&ex.request));
-    out.push_str("  oracle response\n");
-    out.push_str(&indent_json(&ex.response));
-    out
-}
-
 fn display_id(id: &str) -> String {
     if id.is_empty() {
         "/".to_string()
     } else {
         format!("{id}/")
     }
-}
-
-fn indent_json(value: &Json) -> String {
-    let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-    let mut out = String::new();
-    for line in pretty.lines() {
-        out.push_str("    ");
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-fn epoch_ms(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -479,6 +419,7 @@ mod tests {
                 Applied::Prune => 0.05,
             },
             applied,
+            ticket: 0,
         }
     }
 
@@ -505,7 +446,6 @@ mod tests {
             steps: vec![SearchStep {
                 view: Vec::new(),
                 classifications: decisions,
-                exchange: None,
             }],
         }
     }
@@ -612,5 +552,37 @@ mod tests {
         assert_eq!(loaded.bytes_before, 10);
         assert_eq!(loaded.bytes_after, 4);
         assert_eq!(loaded.proposition, "p");
+    }
+
+    #[test]
+    fn load_keeps_the_decision_ticket_beside_an_exchange_event() {
+        let path = std::env::temp_dir().join(format!(
+            "autoground-search-exchange-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let log = crate::log::Log::open(&path).unwrap();
+        let mut traced = file(vec!["frontend/"], vec![decision("frontend", Applied::Keep)]);
+        traced.steps[0].classifications[0].ticket = 7;
+        log.append_event(
+            "exchange",
+            &serde_json::json!({
+                "tickets": [7, 8],
+                "request": {"state": {"tree": {}}},
+                "response": {"answers": {"q7": {"noul": 0.2}}}
+            }),
+        )
+        .unwrap();
+        log.append_event("search_step", &traced.steps[0]).unwrap();
+        traced.write_summary(&log).unwrap();
+        let loaded = SearchTraceFile::load(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.steps[0].classifications[0].ticket, 7);
+        assert!(text.contains("\"kind\":\"exchange\""));
+        assert!(text.contains("\"tickets\":[7,8]"));
     }
 }
