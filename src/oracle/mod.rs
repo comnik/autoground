@@ -1,15 +1,18 @@
 //! Classification oracle: enqueue questions, batch on wait.
 //!
 //! Callers (`search` and `read`) `submit` one classification at a time and
-//! `wait` when they need the label. The planner does not hold an oracle. Grouping is over the `state` JSON the caller passed — typically a
-//! listing tree or a file body. The oracle hashes that JSON; Universe does not
-//! grow a digest method.
+//! `wait` when they need the label. The planner does not hold an oracle.
+//! Grouping is over the [`State`] the caller passed — typically a listing
+//! tree or a file body.
 
 pub mod jev;
 mod mock;
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 use std::time::{Duration, SystemTime};
 
 pub use jev::{JevOracle, Transport, UreqTransport};
@@ -31,6 +34,48 @@ impl QuestionKind {
     }
 }
 
+/// System One `state` document and the digest a batch groups on.
+///
+/// The digest is fixed here. [`Clone`] copies it with the JSON, so a caller
+/// that builds one state and clones it onto many questions serializes once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct State {
+    json: serde_json::Value,
+    digest: u64,
+}
+
+impl State {
+    pub fn new(json: serde_json::Value) -> Self {
+        let digest = digest_of(&json);
+        Self { json, digest }
+    }
+
+    pub(crate) fn json(&self) -> &serde_json::Value {
+        &self.json
+    }
+
+    pub(crate) fn digest(&self) -> u64 {
+        self.digest
+    }
+}
+
+impl Deref for State {
+    type Target = serde_json::Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.json
+    }
+}
+
+fn digest_of(json: &serde_json::Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    match serde_json::to_vec(json) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(_) => 0u64.hash(&mut hasher),
+    }
+    hasher.finish()
+}
+
 /// One question to evaluate against a shared System One `state`.
 ///
 /// `instructions` and `criteria` are JSON. A string is a one-line question.
@@ -39,7 +84,7 @@ impl QuestionKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Classification {
     /// Shared context. Equal states share a POST.
-    pub state: serde_json::Value,
+    pub state: State,
     pub kind: QuestionKind,
     pub instructions: serde_json::Value,
     /// Choice options, or a Noul's `true` / `false` boundary. Null omits the field.
@@ -48,7 +93,7 @@ pub struct Classification {
 
 impl Classification {
     pub fn choice(
-        state: serde_json::Value,
+        state: State,
         instructions: impl Into<String>,
         criteria: BTreeMap<String, String>,
     ) -> Self {
@@ -65,7 +110,7 @@ impl Classification {
     }
 
     pub fn noul(
-        state: serde_json::Value,
+        state: State,
         instructions: serde_json::Value,
         criteria: serde_json::Value,
     ) -> Self {
@@ -255,6 +300,21 @@ pub trait Oracle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_clone_keeps_the_digest() {
+        let state = State::new(serde_json::json!({"tree": {"src": ["a.rs"]}}));
+        let cloned = state.clone();
+        assert_eq!(state.digest(), cloned.digest());
+        assert_eq!(
+            state.digest(),
+            State::new(serde_json::json!({"tree": {"src": ["a.rs"]}})).digest()
+        );
+        assert_ne!(
+            state.digest(),
+            State::new(serde_json::json!({"tree": {"src": ["b.rs"]}})).digest()
+        );
+    }
 
     #[test]
     fn tickets_are_copy_ids() {

@@ -24,7 +24,7 @@ use serde_json::{json, Map, Value as Json};
 
 use crate::log::Log;
 use crate::oracle::jev::QUESTION_BUDGET;
-use crate::oracle::{Classification, Oracle, Ticket as OracleTicket, Usage};
+use crate::oracle::{Classification, Oracle, State, Ticket as OracleTicket, Usage};
 use crate::universe::{Universe, UniverseError};
 
 use trace::{ExchangeRecord, SearchStep, ViewDatabase};
@@ -110,7 +110,7 @@ struct Pending {
 }
 
 struct Group {
-    state: Json,
+    state: State,
     ids: Vec<String>,
     view: Vec<ViewDatabase>,
 }
@@ -267,7 +267,7 @@ where
         let mut groups = Vec::new();
         for chunk in chunks {
             let state = match child_tree(&self.universe, &chunk) {
-                Ok(state) => state,
+                Ok(state) => State::new(state),
                 Err(error) => {
                     self.reject_all(pending, error.to_string());
                     return;
@@ -742,7 +742,7 @@ fn group_for(groups: &[Group], name: &ListedName) -> usize {
         .unwrap_or(0)
 }
 
-fn irrelevant_question(state: &Json, path: &str, proposition: &str) -> Classification {
+fn irrelevant_question(state: &State, path: &str, proposition: &str) -> Classification {
     let name = path.rsplit('/').next().unwrap_or(path);
     Classification::noul(
         state.clone(),

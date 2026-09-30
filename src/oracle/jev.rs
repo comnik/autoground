@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -7,7 +6,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 
 use super::{
-    Answer, Classification, Oracle, OracleError, OracleExchange, QuestionKind, Ticket, Usage,
+    Answer, Classification, Oracle, OracleError, OracleExchange, QuestionKind, State, Ticket, Usage,
 };
 
 const DEFAULT_BASE: &str = "https://api.typesafe.ai";
@@ -296,8 +295,7 @@ impl<T: Transport> JevOracle<T> {
             let Some(items) = self.take_chunk() else {
                 return;
             };
-            let state = items[0].req.state.clone();
-            let request = request_body(&self.model, &state, &items);
+            let request = request_body(&self.model, &items[0].req.state, &items);
             let tickets = items
                 .iter()
                 .map(|item| (item.ticket, item.req.kind))
@@ -316,11 +314,11 @@ impl<T: Transport> JevOracle<T> {
         if self.pending.is_empty() {
             return None;
         }
-        let digest = state_digest(&self.pending[0].req.state);
+        let digest = self.pending[0].req.state.digest();
         let mut taken = Vec::new();
         let mut kept = Vec::new();
         for item in self.pending.drain(..) {
-            if state_digest(&item.req.state) == digest && taken.len() < QUESTION_BUDGET {
+            if item.req.state.digest() == digest && taken.len() < QUESTION_BUDGET {
                 taken.push(item);
             } else {
                 kept.push(item);
@@ -481,7 +479,7 @@ fn question_key(ticket: Ticket) -> String {
     format!("q{}", ticket.0)
 }
 
-fn request_body(model: &str, state: &Value, items: &[Pending]) -> Value {
+fn request_body(model: &str, state: &State, items: &[Pending]) -> Value {
     let mut questions = serde_json::Map::new();
     for p in items {
         let mut question = serde_json::Map::new();
@@ -494,20 +492,9 @@ fn request_body(model: &str, state: &Value, items: &[Pending]) -> Value {
     }
     json!({
         "model": model,
-        "state": state,
+        "state": state.json().clone(),
         "questions": questions,
     })
-}
-
-/// Digest of classification `state`. Callers pass that JSON; the oracle hashes
-/// it and does not ask Universe for a digest.
-fn state_digest(state: &Value) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    match serde_json::to_vec(state) {
-        Ok(bytes) => bytes.hash(&mut hasher),
-        Err(_) => 0.hash(&mut hasher),
-    }
-    hasher.finish()
 }
 
 fn parse_answer(resp: &Value, key: &str, kind: QuestionKind) -> Result<Answer, OracleError> {
@@ -603,7 +590,7 @@ mod tests {
 
     fn classify(state: Value, instructions: &str) -> Classification {
         Classification::choice(
-            state,
+            State::new(state),
             instructions,
             criteria(&[("yes", "yes"), ("no", "no")]),
         )
@@ -679,7 +666,7 @@ mod tests {
             "answers": { "q0": { "type": "noul", "noul": 0.17 } }
         })]);
         let ticket = o.submit(Classification::noul(
-            json!({ "tree": {} }),
+            State::new(json!({ "tree": {} })),
             json!({
                 "path": "src/core/mod.rs",
                 "name": "mod.rs",

@@ -29,7 +29,7 @@ use serde_json::{json, Value as Json};
 use crate::confidence::{FLOOR, RESOLVE, SUPPORT};
 use crate::log::Log;
 use crate::oracle::jev::POST_PARALLELISM;
-use crate::oracle::{Answer, Classification, Oracle, QuestionKind, Usage};
+use crate::oracle::{Answer, Classification, Oracle, QuestionKind, State, Usage};
 use crate::search::trace::ExchangeRecord;
 use crate::search::{Decision, Search, View};
 use crate::universe::{Universe, UniverseError};
@@ -191,7 +191,7 @@ struct Prepared {
     proposition: String,
     rendered_bytes: u64,
     excerpt: String,
-    state: Json,
+    state: State,
 }
 
 enum Action {
@@ -479,7 +479,7 @@ where
             };
             let rendered_bytes = body.len() as u64;
             let excerpt = body.clone();
-            let state = json!({ "path": path, "body": body });
+            let state = State::new(json!({ "path": path, "body": body }));
             for (index, open) in opens.iter().enumerate() {
                 if open.is_reading() && open.contains(path) && !open.seen.contains(path.as_str()) {
                     prepared.push(Prepared {
@@ -731,7 +731,7 @@ fn take_unseen<'a, U>(open: &'a Open<U>, cursor: &mut usize) -> Option<&'a str> 
     None
 }
 
-fn document_question(state: &Json, proposition: &str) -> Classification {
+fn document_question(state: &State, proposition: &str) -> Classification {
     Classification {
         state: state.clone(),
         kind: QuestionKind::Choice,
@@ -749,10 +749,10 @@ fn document_question(state: &Json, proposition: &str) -> Classification {
 
 fn escalation_question(proposition: &str, evidence: &[Json]) -> Classification {
     Classification {
-        state: json!({
+        state: State::new(json!({
             "proposition": proposition,
             "evidence": evidence,
-        }),
+        })),
         kind: QuestionKind::Choice,
         instructions: json!({
             "proposition": proposition,
