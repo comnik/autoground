@@ -13,8 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use autoground::log::Log;
 use autoground::oracle::{HeuristicOracle, JevOracle, Oracle};
 use autoground::read::Reader;
+use autoground::read::DEFAULT_BODY_BYTES;
 use autoground::report::{format_duration, format_usd};
-use autoground::search::DEFAULT_BUDGET_BYTES;
 use autoground::universe::{Filesystem, Universe};
 use autoground::Value;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -544,7 +544,7 @@ fn wait_all<O: Oracle>(
     propositions: &[Proposition],
     log: &Log,
 ) -> Result<Batch, ReadFailure> {
-    let mut reader = Reader::new(universe, oracle, DEFAULT_BUDGET_BYTES, Some(log.clone()));
+    let mut reader = Reader::new(universe, oracle, DEFAULT_BODY_BYTES, Some(log.clone()));
     let tickets: Vec<_> = propositions
         .iter()
         .map(|item| {
@@ -578,7 +578,7 @@ fn wait<O: Oracle>(
     proposition: &str,
     log: &Log,
 ) -> Result<Ran, ReadFailure> {
-    let mut reader = Reader::new(universe, oracle, DEFAULT_BUDGET_BYTES, Some(log.clone()));
+    let mut reader = Reader::new(universe, oracle, DEFAULT_BODY_BYTES, Some(log.clone()));
     let ticket = reader.submit(proposition);
     match reader.wait(ticket) {
         Ok(finding) => Ok(ran_from_finding(finding)),

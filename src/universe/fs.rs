@@ -180,21 +180,6 @@ pub fn list_files_recursive(
     Ok(out)
 }
 
-pub fn read_trimmed(root: &Path, rel: &str, budget: usize) -> io::Result<(String, bool)> {
-    let raw = fs::read_to_string(repo_join(root, rel))?;
-    if raw.len() <= budget {
-        Ok((raw, false))
-    } else {
-        let head = budget / 2;
-        let tail = budget - head;
-        let mut s = String::new();
-        s.push_str(&raw[..head]);
-        s.push_str("\n…\n");
-        s.push_str(&raw[raw.len() - tail..]);
-        Ok((s, true))
-    }
-}
-
 /// Local filesystem as a tree of databases. The initial view is every reachable
 /// leaf file.
 #[derive(Clone)]
@@ -335,56 +320,6 @@ fn read_leaf(path: &Path) -> io::Result<LeafBody> {
     }
 }
 
-/// Head and tail of `text`, at most `budget` bytes, with a marker in the middle.
-fn trim_text(text: &str, budget: usize) -> String {
-    if text.len() <= budget {
-        return text.to_string();
-    }
-    let marker = "\n…\n";
-    if budget <= marker.len() {
-        return prefix_bytes(text, budget);
-    }
-    let body = budget - marker.len();
-    let head_end = floor_boundary(text, body / 2);
-    let tail_start = ceil_boundary(text, text.len().saturating_sub(body - body / 2));
-    if tail_start <= head_end {
-        return prefix_bytes(text, budget);
-    }
-    let mut out = String::new();
-    out.push_str(&text[..head_end]);
-    out.push_str(marker);
-    out.push_str(&text[tail_start..]);
-    if out.len() > budget {
-        return prefix_bytes(text, budget);
-    }
-    out
-}
-
-fn prefix_bytes(text: &str, budget: usize) -> String {
-    let end = floor_boundary(text, budget.min(text.len()));
-    text[..end].to_string()
-}
-
-fn floor_boundary(text: &str, mut index: usize) -> usize {
-    if index > text.len() {
-        index = text.len();
-    }
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-fn ceil_boundary(text: &str, mut index: usize) -> usize {
-    if index > text.len() {
-        index = text.len();
-    }
-    while index < text.len() && !text.is_char_boundary(index) {
-        index += 1;
-    }
-    index
-}
-
 impl Universe for Filesystem {
     fn databases(&self) -> &[String] {
         &self.databases
@@ -434,7 +369,7 @@ impl Universe for Filesystem {
             LeafBody::Text(text) => text,
             LeafBody::Binary(n) => format!("<binary {n} bytes>"),
         };
-        Ok(trim_text(&text, budget))
+        crate::universe::within_budget(id, text, budget)
     }
 
     fn insert(&mut self, id: String) -> Result<(), UniverseError> {
@@ -704,6 +639,23 @@ mod tests {
         assert_eq!(text, "<binary 4 bytes>");
         assert!(summary.is_none());
         assert_eq!(size, 4);
+    }
+
+    #[test]
+    fn read_returns_the_body_when_it_fits_and_refuses_when_it_does_not() {
+        let root = scratch_dir("budget");
+        std::fs::create_dir_all(&root).unwrap();
+        let body = "0123456789";
+        std::fs::write(root.join("a.txt"), body).unwrap();
+        let fs = Filesystem::open(&root).unwrap();
+        assert_eq!(fs.read("a.txt", body.len()).unwrap(), body);
+        assert_eq!(fs.read("a.txt", usize::MAX).unwrap(), body);
+        let err = fs.read("a.txt", body.len() - 1).unwrap_err();
+        assert!(
+            matches!(err, UniverseError::TooLarge { ref id, bytes } if id == "a.txt" && bytes == body.len()),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

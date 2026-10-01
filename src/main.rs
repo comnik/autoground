@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use autoground::log::Log;
 use autoground::oracle::{Flight, HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::plan::Plan;
-use autoground::read::{present_read, Finding, ReadTraceFile, Reader, Stance, Verdict};
+use autoground::read::{
+    present_read, Finding, ReadTraceFile, Reader, Stance, Verdict, DEFAULT_BODY_BYTES,
+};
 use autoground::report::context::write_context;
 use autoground::report::run::{Explain, Ground};
 use autoground::report::summary::print_run_summary;
@@ -111,8 +113,9 @@ enum Commands {
         /// When set, this is the universe instead of `--repo`.
         #[arg(long, value_name = "PATH")]
         transcript: Option<PathBuf>,
-        /// Render budget in bytes for one file body.
-        #[arg(long, default_value_t = DEFAULT_BUDGET_BYTES)]
+        /// Largest file body, in bytes, sent to the oracle. A longer file
+        /// fails the read.
+        #[arg(long, default_value_t = DEFAULT_BODY_BYTES)]
         budget: usize,
         #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
         judge: JudgeKind,
@@ -159,8 +162,9 @@ enum Commands {
     ///
     /// Searches for a candidate window, then judges the files in it. The
     /// window is a closed world: a witness is true, a refutation is false,
-    /// and exhausting it with no witness is false. On a TTY the session log
-    /// is written under `/tmp/autoground/`.
+    /// and exhausting it with no witness is false. A file over `--budget`
+    /// fails the read. On a TTY the session log is written under
+    /// `/tmp/autoground/`.
     ///
     /// Examples:
     ///   autoground read "the codebase has a frontend" --repo examples/toy-layered
@@ -178,8 +182,9 @@ enum Commands {
         /// When set, this is the universe instead of `--repo`.
         #[arg(long, value_name = "PATH")]
         transcript: Option<PathBuf>,
-        /// Render budget in bytes for one file body.
-        #[arg(long, default_value_t = DEFAULT_BUDGET_BYTES)]
+        /// Largest file body, in bytes, sent to the oracle. A longer file
+        /// fails the read.
+        #[arg(long, default_value_t = DEFAULT_BODY_BYTES)]
         budget: usize,
         #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
         judge: JudgeKind,

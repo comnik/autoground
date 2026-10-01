@@ -13,8 +13,9 @@
 //! not change that decision.
 //!
 //! The search window is a closed world. A witness closes true, a refutation
-//! closes false, and exhausting the window with no witness is false. The
-//! evidence view is the databases that decision depends on.
+//! closes false, and exhausting the window with no witness is false. A file
+//! longer than the body budget fails the read. The evidence view is the
+//! databases that decision depends on.
 
 pub mod trace;
 
@@ -30,7 +31,7 @@ use crate::confidence::{FLOOR, RESOLVE, SUPPORT};
 use crate::log::Log;
 use crate::oracle::jev::POST_PARALLELISM;
 use crate::oracle::{Answer, Classification, Oracle, QuestionKind, State, Usage};
-use crate::search::{Decision, Search, View};
+use crate::search::{Decision, Search, View, DEFAULT_BUDGET_BYTES};
 use crate::universe::{Universe, UniverseError};
 use crate::value::Value;
 
@@ -38,6 +39,12 @@ use trace::{ReadStep as Step, STEP_KIND};
 
 const DOCUMENT_QUESTION: &str = "How does `body` at `path` ground the proposition?";
 const ESCALATION_QUESTION: &str = "Does the proposition `proposition` hold of the codebase given the conflicting evidence `evidence`?";
+
+/// Largest file body sent to the oracle.
+///
+/// A longer file fails the read. 128 KiB stays under Jev's 32k-token cap on
+/// state plus the longest question for source text.
+pub const DEFAULT_BODY_BYTES: usize = 128 * 1024;
 
 /// Handle for a proposition enqueued with [`Reader::submit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -203,7 +210,8 @@ enum Action {
 /// `submit` only enqueues. `wait` searches, then reads.
 pub struct Reader<U, O> {
     search: Search<U, O>,
-    budget: usize,
+    /// Maximum file body, in bytes, sent to the oracle.
+    body_budget: usize,
     next: u64,
     pending: Vec<Pending>,
     resolved: HashMap<Ticket, Result<Finding<U>, ReadError>>,
@@ -211,10 +219,13 @@ pub struct Reader<U, O> {
 }
 
 impl<U, O> Reader<U, O> {
-    pub fn new(universe: U, oracle: O, budget: usize, log: Option<Log>) -> Self {
+    /// `body_budget` is the largest file body sent to the oracle. A longer
+    /// body fails the read. Directory listings use [`DEFAULT_BUDGET_BYTES`],
+    /// which is a separate cap.
+    pub fn new(universe: U, oracle: O, body_budget: usize, log: Option<Log>) -> Self {
         Self {
-            search: Search::new(universe, oracle, budget, log.clone()),
-            budget,
+            search: Search::new(universe, oracle, DEFAULT_BUDGET_BYTES, log.clone()),
+            body_budget,
             next: 0,
             pending: Vec::new(),
             resolved: HashMap::new(),
@@ -460,7 +471,7 @@ where
     fn prepare(&mut self, opens: &mut [Open<U>], nominees: &[String]) -> Vec<Prepared> {
         let mut prepared = Vec::new();
         for path in nominees {
-            let body = match read_body(opens, path, self.budget) {
+            let body = match read_body(opens, path, self.body_budget) {
                 Ok(body) => body,
                 Err(message) => {
                     for open in opens.iter_mut() {
@@ -900,7 +911,6 @@ mod tests {
 
     use super::*;
     use crate::oracle::{HeuristicOracle, OracleError};
-    use crate::search::DEFAULT_BUDGET_BYTES;
     use crate::universe::Filesystem;
 
     struct Scratch(PathBuf);
@@ -1064,7 +1074,7 @@ mod tests {
 
     fn read_with(fs: Filesystem, oracle: Scripted) -> (Reader<Filesystem, Scripted>, Scripted) {
         let shared = oracle.clone();
-        let reader = Reader::new(fs, oracle, DEFAULT_BUDGET_BYTES, None);
+        let reader = Reader::new(fs, oracle, DEFAULT_BODY_BYTES, None);
         (reader, shared)
     }
 
@@ -1326,7 +1336,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/toy-layered");
         let universe = Filesystem::at_root(&root).unwrap();
         let oracle = HeuristicOracle::new(universe.clone());
-        let mut reader = Reader::new(universe, oracle, DEFAULT_BUDGET_BYTES, None);
+        let mut reader = Reader::new(universe, oracle, DEFAULT_BODY_BYTES, None);
         let frontend = reader.submit("frontend");
         let absent = reader.submit("zzzz-not-a-path");
         let found = reader.wait_many(&[frontend, absent]);
@@ -1351,5 +1361,85 @@ mod tests {
         assert_eq!(absent.value, Value::False);
         assert!(absent.exhausted);
         assert!(absent.evidence.databases().is_empty());
+    }
+
+    #[test]
+    fn a_file_over_the_body_budget_fails_every_claim() {
+        let (_scratch, fs) = scratch(&[("big.txt", "0123456789abcdef")]);
+        let oracle = Scripted::new();
+        let (mut reader, script) = read_at(fs, oracle, 8);
+        let one = reader.submit("one");
+        let two = reader.submit("two");
+        let found = reader.wait_many(&[one, two]);
+        for finding in &found {
+            match finding {
+                Err(err) => {
+                    assert_eq!(err.to_string(), "big.txt is 16 bytes, over the read budget")
+                }
+                Ok(_) => panic!("over-cap file produced a finding"),
+            }
+        }
+        assert!(document_paths(&script, "one").is_empty());
+        assert!(document_paths(&script, "two").is_empty());
+    }
+
+    #[test]
+    fn an_over_cap_file_fails_before_a_later_witness() {
+        let (_scratch, fs) = scratch(&[("big.txt", "0123456789abcdef"), ("small.txt", "yes")]);
+        let oracle = Scripted::new().document("small.txt", "p", "entailed", 0.95);
+        let (mut reader, script) = read_at(fs, oracle, 8);
+        let ticket = reader.submit("p");
+        match reader.wait(ticket) {
+            Err(err) => assert_eq!(err.to_string(), "big.txt is 16 bytes, over the read budget"),
+            Ok(_) => panic!("over-cap file produced a finding"),
+        }
+        assert!(document_paths(&script, "p").is_empty());
+    }
+
+    #[test]
+    fn an_earlier_file_does_not_save_a_claim_once_a_later_body_is_over_cap() {
+        let (_scratch, fs) = scratch(&[("a.txt", "no"), ("big.txt", "0123456789abcdef")]);
+        let oracle = Scripted::new().document("a.txt", "p", "neutral", 0.95);
+        let (mut reader, script) = read_at(fs, oracle, 8);
+        let ticket = reader.submit("p");
+        match reader.wait(ticket) {
+            Err(err) => assert_eq!(err.to_string(), "big.txt is 16 bytes, over the read budget"),
+            Ok(_) => panic!("over-cap file produced a finding"),
+        }
+        assert_eq!(document_paths(&script, "p"), vec!["a.txt".to_string()]);
+    }
+
+    #[test]
+    fn a_file_that_fits_is_sent_whole() {
+        let text = "0123456789";
+        let (_scratch, fs) = scratch(&[("a.txt", text)]);
+        let oracle = Scripted::new().document("a.txt", "p", "neutral", 0.95);
+        let (mut reader, script) = read_at(fs, oracle, text.len());
+        let ticket = reader.submit("p");
+        let finding = reader.wait(ticket).unwrap();
+        assert_eq!(finding.value, Value::False);
+        let submitted = script.inner.borrow();
+        let body = submitted
+            .submitted
+            .iter()
+            .find(|req| json_str(&req.state, "path") == "a.txt")
+            .unwrap()
+            .state
+            .get("body")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(body, text);
+        assert_eq!(finding.steps[0].rendered_bytes, text.len() as u64);
+    }
+
+    fn read_at(
+        fs: Filesystem,
+        oracle: Scripted,
+        body_budget: usize,
+    ) -> (Reader<Filesystem, Scripted>, Scripted) {
+        let shared = oracle.clone();
+        let reader = Reader::new(fs, oracle, body_budget, None);
+        (reader, shared)
     }
 }

@@ -616,10 +616,11 @@ fn notes_of(
             if parent_holds && value == Value::False {
                 return;
             }
+            let ground = grounds.get(*index);
             if !shown(value, explain) {
                 return;
             }
-            if let Some(text) = atom_text(value, grounds.get(*index)) {
+            if let Some(text) = atom_text(value, ground) {
                 out.push(Note {
                     at: clause.span.start,
                     text,

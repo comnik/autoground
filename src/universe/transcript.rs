@@ -180,7 +180,7 @@ impl Universe for Transcript {
         if node.summary.is_some() {
             return Err(UniverseError::Summarizable(id.to_string()));
         }
-        Ok(trim_text(&node.body, budget))
+        crate::universe::within_budget(id, node.body.clone(), budget)
     }
 
     fn insert(&mut self, id: String) -> Result<(), UniverseError> {
@@ -526,52 +526,12 @@ fn invalid(message: impl Into<String>) -> UniverseError {
     UniverseError::Io(io::Error::new(io::ErrorKind::InvalidData, message.into()))
 }
 
-/// Head and tail of `text`, at most `budget` bytes, with a marker in the middle.
-fn trim_text(text: &str, budget: usize) -> String {
-    if text.len() <= budget {
-        return text.to_string();
-    }
-    let marker = "\n…\n";
-    if budget <= marker.len() {
-        return prefix_bytes(text, budget);
-    }
-    let body = budget - marker.len();
-    let head_end = floor_boundary(text, body / 2);
-    let tail_start = ceil_boundary(text, text.len().saturating_sub(body - body / 2));
-    if tail_start <= head_end {
-        return prefix_bytes(text, budget);
-    }
-    let mut out = String::new();
-    out.push_str(&text[..head_end]);
-    out.push_str(marker);
-    out.push_str(&text[tail_start..]);
-    if out.len() > budget {
-        return prefix_bytes(text, budget);
-    }
-    out
-}
-
-fn prefix_bytes(text: &str, budget: usize) -> String {
-    let end = floor_boundary(text, budget.min(text.len()));
-    text[..end].to_string()
-}
-
 fn floor_boundary(text: &str, mut index: usize) -> usize {
     if index > text.len() {
         index = text.len();
     }
     while index > 0 && !text.is_char_boundary(index) {
         index -= 1;
-    }
-    index
-}
-
-fn ceil_boundary(text: &str, mut index: usize) -> usize {
-    if index > text.len() {
-        index = text.len();
-    }
-    while index < text.len() && !text.is_char_boundary(index) {
-        index += 1;
     }
     index
 }
@@ -719,6 +679,11 @@ mod tests {
         assert!(tree.summary("p0/c0/00-message").unwrap().is_none());
         let body = tree.read("p0/c0/00-message", usize::MAX).unwrap();
         assert_eq!(body, "Hello from the agent.");
+        let err = tree.read("p0/c0/00-message", 4).unwrap_err();
+        assert!(
+            matches!(err, UniverseError::TooLarge { bytes, .. } if bytes == body.len()),
+            "{err}"
+        );
         assert!(tree
             .summary("p0/c0")
             .unwrap()

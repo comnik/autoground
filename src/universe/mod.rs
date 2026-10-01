@@ -35,8 +35,8 @@ pub trait Universe {
 
     /// Full text of a database that has no summary.
     ///
-    /// A longer body is head-and-tail trimmed to `budget`. `usize::MAX` reads the
-    /// whole body. A database that has a summary cannot be read.
+    /// A body longer than `budget` is [`UniverseError::TooLarge`]. `usize::MAX`
+    /// reads the whole body. A database that has a summary cannot be read.
     fn read(&self, id: &str, budget: usize) -> Result<String, UniverseError>;
 
     /// The view can be refined by setting, inserting, and removing the active databases.
@@ -51,6 +51,27 @@ pub enum UniverseError {
     Missing(String),
     /// `read` was asked for a database that has a summary.
     Summarizable(String),
+    /// `read` was asked for a body longer than its budget.
+    TooLarge {
+        id: String,
+        bytes: usize,
+    },
+}
+
+/// Return `text` when it fits in `budget`. A longer body is not trimmed.
+pub(crate) fn within_budget(
+    id: &str,
+    text: String,
+    budget: usize,
+) -> Result<String, UniverseError> {
+    if text.len() > budget {
+        Err(UniverseError::TooLarge {
+            id: id.to_string(),
+            bytes: text.len(),
+        })
+    } else {
+        Ok(text)
+    }
 }
 
 impl fmt::Display for UniverseError {
@@ -71,6 +92,9 @@ impl fmt::Display for UniverseError {
                     write!(f, "cannot read {id}: it has a summary")
                 }
             }
+            UniverseError::TooLarge { id, bytes } => {
+                write!(f, "{id} is {bytes} bytes, over the read budget")
+            }
         }
     }
 }
@@ -79,7 +103,9 @@ impl std::error::Error for UniverseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             UniverseError::Io(e) => Some(e),
-            UniverseError::Missing(_) | UniverseError::Summarizable(_) => None,
+            UniverseError::Missing(_)
+            | UniverseError::Summarizable(_)
+            | UniverseError::TooLarge { .. } => None,
         }
     }
 }
