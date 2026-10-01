@@ -7,7 +7,7 @@ use autoground::log::Log;
 use autoground::oracle::{Flight, HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::plan::Plan;
 use autoground::read::{
-    present_read, Finding, ReadTraceFile, Reader, Stance, Verdict, DEFAULT_BODY_BYTES,
+    present_read, Finding, ReadTraceFile, Reader, Split, Stance, Verdict, DEFAULT_BODY_BYTES,
 };
 use autoground::report::context::write_context;
 use autoground::report::run::{Explain, Ground};
@@ -113,8 +113,8 @@ enum Commands {
         /// When set, this is the universe instead of `--repo`.
         #[arg(long, value_name = "PATH")]
         transcript: Option<PathBuf>,
-        /// Largest file body, in bytes, sent to the oracle. A longer file
-        /// fails the read.
+        /// Largest file body, in bytes, sent in one request. A longer file
+        /// is sent in parts, and the run reports that split.
         #[arg(long, default_value_t = DEFAULT_BODY_BYTES)]
         budget: usize,
         #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
@@ -163,8 +163,8 @@ enum Commands {
     /// Searches for a candidate window, then judges the files in it. The
     /// window is a closed world: a witness is true, a refutation is false,
     /// and exhausting it with no witness is false. A file over `--budget`
-    /// fails the read. On a TTY the session log is written under
-    /// `/tmp/autoground/`.
+    /// is sent in parts, and the read reports that split. On a TTY the
+    /// session log is written under `/tmp/autoground/`.
     ///
     /// Examples:
     ///   autoground read "the codebase has a frontend" --repo examples/toy-layered
@@ -182,8 +182,8 @@ enum Commands {
         /// When set, this is the universe instead of `--repo`.
         #[arg(long, value_name = "PATH")]
         transcript: Option<PathBuf>,
-        /// Largest file body, in bytes, sent to the oracle. A longer file
-        /// fails the read.
+        /// Largest file body, in bytes, sent in one request. A longer file
+        /// is sent in parts, and the read reports that split.
         #[arg(long, default_value_t = DEFAULT_BODY_BYTES)]
         budget: usize,
         #[arg(long, value_enum, default_value_t = JudgeKind::Jev)]
@@ -445,6 +445,7 @@ fn read_cmd(
         started_at_ms: epoch_ms(started_at),
         ended_at_ms: epoch_ms(ended_at),
         steps: read.steps,
+        splits: Vec::new(),
         exchanges: Default::default(),
     };
     file.write_summary(&log)?;
@@ -582,6 +583,7 @@ fn run_cmd(
             usage: Usage::default(),
             flights: Vec::new(),
             flight_limit: None,
+            splits: Vec::new(),
         }
     } else if let Some(path) = transcript {
         let universe = Transcript::open(path)?;
@@ -639,6 +641,9 @@ fn run_cmd(
             println!("{:<7}  {}", value.to_string(), claim.verbalized);
         }
     }
+    for split in &judged.splits {
+        println!("{}", split.line());
+    }
     print_run_summary(
         &usage,
         &flights,
@@ -679,6 +684,7 @@ struct Judged {
     usage: Usage,
     flights: Vec<Flight>,
     flight_limit: Option<usize>,
+    splits: Vec<Split>,
 }
 
 fn read_atoms<U: Universe + Clone>(
@@ -727,6 +733,7 @@ fn read_with<U: Universe + Clone, O: Oracle>(
     let flights = reader.flights().to_vec();
     let flight_limit = reader.flight_limit();
     let usage = reader.usage();
+    let splits = reader.splits().to_vec();
     Ok(Judged {
         values,
         grounds,
@@ -734,6 +741,7 @@ fn read_with<U: Universe + Clone, O: Oracle>(
         usage,
         flights,
         flight_limit,
+        splits,
     })
 }
 

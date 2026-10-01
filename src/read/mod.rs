@@ -14,12 +14,13 @@
 //!
 //! The search window is a closed world. A witness closes true, a refutation
 //! closes false, and exhausting the window with no witness is false. A file
-//! longer than the body budget fails the read. The evidence view is the
-//! databases that decision depends on.
+//! longer than the body budget is sent in parts. Each part is a leaf, and the
+//! run reports the split. The evidence view is the databases that decision
+//! depends on.
 
 pub mod trace;
 
-pub use trace::{present_read, ReadStep, ReadTraceFile};
+pub use trace::{present_read, ReadStep, ReadTraceFile, Split};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -35,14 +36,15 @@ use crate::search::{Decision, Search, View, DEFAULT_BUDGET_BYTES};
 use crate::universe::{Universe, UniverseError};
 use crate::value::Value;
 
-use trace::{ReadStep as Step, STEP_KIND};
+use trace::{ReadStep as Step, SPLIT_KIND, STEP_KIND};
 
 const DOCUMENT_QUESTION: &str = "How does `body` at `path` ground the proposition?";
+const PART_QUESTION: &str = "How does this part of `body` at `path` ground the proposition? Text outside this part is not visible.";
 const ESCALATION_QUESTION: &str = "Does the proposition `proposition` hold of the codebase given the conflicting evidence `evidence`?";
 
-/// Largest file body sent to the oracle.
+/// Largest file body sent in one request.
 ///
-/// A longer file fails the read. 128 KiB stays under Jev's 32k-token cap on
+/// A longer file is sent in parts. 128 KiB stays under Jev's 32k-token cap on
 /// state plus the longest question for source text.
 pub const DEFAULT_BODY_BYTES: usize = 128 * 1024;
 
@@ -118,7 +120,10 @@ struct Pending {
 }
 
 struct Judgement {
+    /// Leaf id. A whole file uses its path. A part names the file and the part.
     id: String,
+    /// Universe path. Several parts share one path.
+    path: String,
     verdict: Verdict,
     confidence: f64,
     excerpt: String,
@@ -193,11 +198,23 @@ struct Flying {
 
 struct Prepared {
     index: usize,
+    /// Leaf id recorded as the step path and the stance id.
+    id: String,
+    /// Universe path stored on the judgement and in oracle state.
     path: String,
     proposition: String,
     rendered_bytes: u64,
     excerpt: String,
     state: State,
+    part: bool,
+}
+
+/// One slice of a file body, cached so every proposition shares it.
+struct Piece {
+    path: String,
+    body: String,
+    /// 1-based index and total. Absent when the file was sent whole.
+    part: Option<(u32, u32)>,
 }
 
 enum Action {
@@ -215,12 +232,15 @@ pub struct Reader<U, O> {
     next: u64,
     pending: Vec<Pending>,
     resolved: HashMap<Ticket, Result<Finding<U>, ReadError>>,
+    /// Leaf id to the body posted for it.
+    pieces: HashMap<String, Piece>,
+    splits: Vec<Split>,
     log: Option<Log>,
 }
 
 impl<U, O> Reader<U, O> {
-    /// `body_budget` is the largest file body sent to the oracle. A longer
-    /// body fails the read. Directory listings use [`DEFAULT_BUDGET_BYTES`],
+    /// `body_budget` is the largest file body sent in one request. A longer
+    /// body is sent in parts. Directory listings use [`DEFAULT_BUDGET_BYTES`],
     /// which is a separate cap.
     pub fn new(universe: U, oracle: O, body_budget: usize, log: Option<Log>) -> Self {
         Self {
@@ -229,8 +249,15 @@ impl<U, O> Reader<U, O> {
             next: 0,
             pending: Vec::new(),
             resolved: HashMap::new(),
+            pieces: HashMap::new(),
+            splits: Vec::new(),
             log,
         }
+    }
+
+    /// Files sent in parts, in the order they were split.
+    pub fn splits(&self) -> &[Split] {
+        &self.splits
     }
 
     pub fn usage(&self) -> Usage
@@ -405,13 +432,19 @@ where
             let mut skip = blocked.clone();
             for file in flying.iter() {
                 if let Some(ask) = file.asks.first() {
-                    skip.insert(ask.path.clone());
+                    skip.insert(ask.id.clone());
                 }
             }
             let Some(path) = next_file(opens, &skip) else {
                 break;
             };
-            let prepared = self.prepare(opens, &[path.clone()]);
+            let prepared = match self.prepare(opens, &path) {
+                Ok(prepared) => prepared,
+                Err(()) => {
+                    blocked.insert(path);
+                    continue;
+                }
+            };
             if prepared.is_empty() {
                 blocked.insert(path);
                 continue;
@@ -419,9 +452,11 @@ where
             let tickets = prepared
                 .iter()
                 .map(|ask| {
-                    self.search
-                        .oracle_mut()
-                        .submit(document_question(&ask.state, &ask.proposition))
+                    self.search.oracle_mut().submit(document_question(
+                        &ask.state,
+                        &ask.proposition,
+                        ask.part,
+                    ))
                 })
                 .collect();
             flying.push(Flying {
@@ -441,7 +476,13 @@ where
                 Ok(answer) => match parse_verdict(&answer.choice) {
                     Ok(verdict) => {
                         let step = self.step_for(&ask, verdict, &answer, ticket);
-                        opens[ask.index].record(step, verdict, answer.confidence, ask.excerpt);
+                        opens[ask.index].record(
+                            step,
+                            &ask.path,
+                            verdict,
+                            answer.confidence,
+                            ask.excerpt,
+                        );
                     }
                     Err(message) => opens[ask.index].fail(message),
                 },
@@ -468,37 +509,100 @@ where
         }
     }
 
-    fn prepare(&mut self, opens: &mut [Open<U>], nominees: &[String]) -> Vec<Prepared> {
-        let mut prepared = Vec::new();
-        for path in nominees {
-            let body = match read_body(opens, path, self.body_budget) {
-                Ok(body) => body,
-                Err(message) => {
-                    for open in opens.iter_mut() {
-                        if open.is_reading() && open.contains(path) && !open.seen.contains(path) {
-                            open.fail(message.clone());
-                        }
+    /// Post `leaf`, splitting its file into parts the first time it is read.
+    ///
+    /// `Err` means the body could not be read and the claims that contain it
+    /// have failed. An empty `Ok` means no still-open claim wants this leaf.
+    fn prepare(&mut self, opens: &mut [Open<U>], leaf: &str) -> Result<Vec<Prepared>, ()> {
+        if self.pieces.contains_key(leaf) {
+            return Ok(self.asks_for(opens, leaf));
+        }
+        let body = match read_whole(opens, leaf) {
+            Ok(body) => body,
+            Err(message) => {
+                for open in opens.iter_mut() {
+                    if open.is_reading() && open.contains(leaf) && !open.seen.contains(leaf) {
+                        open.fail(message.clone());
                     }
-                    continue;
                 }
-            };
-            let rendered_bytes = body.len() as u64;
-            let excerpt = body.clone();
-            let state = State::new(json!({ "path": path, "body": body }));
-            for (index, open) in opens.iter().enumerate() {
-                if open.is_reading() && open.contains(path) && !open.seen.contains(path.as_str()) {
-                    prepared.push(Prepared {
-                        index,
-                        path: path.clone(),
-                        proposition: open.proposition.clone(),
-                        rendered_bytes,
-                        excerpt: excerpt.clone(),
-                        state: state.clone(),
-                    });
-                }
+                return Err(());
+            }
+        };
+        let parts = split_body(&body, self.body_budget);
+        if parts.len() <= 1 {
+            self.pieces.insert(
+                leaf.to_string(),
+                Piece {
+                    path: leaf.to_string(),
+                    body,
+                    part: None,
+                },
+            );
+            return Ok(self.asks_for(opens, leaf));
+        }
+        let total = parts.len() as u32;
+        self.note_split(Split {
+            path: leaf.to_string(),
+            bytes: body.len() as u64,
+            parts: u64::from(total),
+        });
+        for (offset, part) in parts.into_iter().enumerate() {
+            let index = (offset as u32) + 1;
+            self.pieces.insert(
+                part_id(leaf, index, total),
+                Piece {
+                    path: leaf.to_string(),
+                    body: part,
+                    part: Some((index, total)),
+                },
+            );
+        }
+        for open in opens.iter_mut() {
+            if open.is_reading() {
+                splice_parts(&mut open.leaves, leaf, total);
+            }
+        }
+        Ok(self.asks_for(opens, &part_id(leaf, 1, total)))
+    }
+
+    fn asks_for(&self, opens: &[Open<U>], leaf: &str) -> Vec<Prepared> {
+        let Some(piece) = self.pieces.get(leaf) else {
+            return Vec::new();
+        };
+        let part = piece.part.is_some();
+        let state = match piece.part {
+            Some((index, total)) => State::new(json!({
+                "path": piece.path,
+                "body": piece.body,
+                "part": index,
+                "parts": total,
+            })),
+            None => State::new(json!({ "path": piece.path, "body": piece.body })),
+        };
+        let rendered_bytes = piece.body.len() as u64;
+        let mut prepared = Vec::new();
+        for (index, open) in opens.iter().enumerate() {
+            if open.is_reading() && open.contains(&piece.path) && !open.seen.contains(leaf) {
+                prepared.push(Prepared {
+                    index,
+                    id: leaf.to_string(),
+                    path: piece.path.clone(),
+                    proposition: open.proposition.clone(),
+                    rendered_bytes,
+                    excerpt: piece.body.clone(),
+                    state: state.clone(),
+                    part,
+                });
             }
         }
         prepared
+    }
+
+    fn note_split(&mut self, split: Split) {
+        if let Some(log) = &self.log {
+            let _ = log.append_event(SPLIT_KIND, &split);
+        }
+        self.splits.push(split);
     }
 
     fn step_for(
@@ -510,7 +614,7 @@ where
     ) -> Step {
         let step = Step {
             proposition: ask.proposition.clone(),
-            path: ask.path.clone(),
+            path: ask.id.clone(),
             verdict: verdict.label().to_string(),
             confidence: answer.confidence,
             rendered_bytes: ask.rendered_bytes,
@@ -583,10 +687,18 @@ impl<U: Universe> Open<U> {
         })
     }
 
-    fn record(&mut self, step: Step, verdict: Verdict, confidence: f64, excerpt: String) {
+    fn record(
+        &mut self,
+        step: Step,
+        path: &str,
+        verdict: Verdict,
+        confidence: f64,
+        excerpt: String,
+    ) {
         self.seen.insert(step.path.clone());
         self.judged.push(Judgement {
             id: step.path.clone(),
+            path: path.to_string(),
             verdict,
             confidence,
             excerpt,
@@ -665,7 +777,8 @@ impl<U: Universe + Clone> Open<U> {
             ),
             Status::Settled(settlement) => {
                 let mut evidence = self.candidate.clone();
-                if let Err(error) = evidence.set(settlement.ids.clone()) {
+                let paths = universe_paths(&self.judged, &settlement.ids);
+                if let Err(error) = evidence.set(paths) {
                     return (
                         ticket,
                         Err(ReadError {
@@ -695,14 +808,86 @@ impl<U: Universe + Clone> Open<U> {
     }
 }
 
-fn read_body<U: Universe>(opens: &[Open<U>], path: &str, budget: usize) -> Result<String, String> {
+fn read_whole<U: Universe>(opens: &[Open<U>], path: &str) -> Result<String, String> {
     let open = opens
         .iter()
         .find(|open| open.is_reading() && open.contains(path))
         .ok_or_else(|| format!("no proposition contains {path}"))?;
     open.candidate
-        .read(path, budget)
+        .read(path, usize::MAX)
         .map_err(|err| err.to_string())
+}
+
+/// Leaf id for one part. The run prints this as the evidence id.
+fn part_id(path: &str, index: u32, total: u32) -> String {
+    format!("{path} part {index}/{total}")
+}
+
+fn splice_parts(leaves: &mut Vec<String>, path: &str, total: u32) {
+    let Some(pos) = leaves.iter().position(|id| id == path) else {
+        return;
+    };
+    let parts = (1..=total).map(|index| part_id(path, index, total));
+    leaves.splice(pos..=pos, parts);
+}
+
+/// Split `text` into the fewest pieces that each fit in `budget`.
+///
+/// A piece ends on a newline when one fits. A line longer than `budget` is
+/// cut on a character boundary. The pieces concatenate back to `text`.
+fn split_body(text: &str, budget: usize) -> Vec<String> {
+    if text.len() <= budget {
+        return vec![text.to_string()];
+    }
+    let mut parts = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if rest.len() <= budget {
+            parts.push(rest.to_string());
+            break;
+        }
+        let cut = cut_at(rest, budget);
+        parts.push(rest[..cut].to_string());
+        rest = &rest[cut..];
+    }
+    parts
+}
+
+fn cut_at(text: &str, budget: usize) -> usize {
+    let end = floor_char_boundary(text, budget.min(text.len()));
+    if end == 0 {
+        return text.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+    }
+    if let Some(newline) = text[..end].rfind('\n') {
+        let cut = newline + 1;
+        if cut < text.len() {
+            return cut;
+        }
+    }
+    end
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn universe_paths(judged: &[Judgement], ids: &[String]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for id in ids {
+        let Some(item) = judged.iter().find(|item| item.id == *id) else {
+            continue;
+        };
+        if !paths.contains(&item.path) {
+            paths.push(item.path.clone());
+        }
+    }
+    paths
 }
 
 /// The next unread file in round-robin over each proposition's ranked leaves.
@@ -742,13 +927,13 @@ fn take_unseen<'a, U>(open: &'a Open<U>, cursor: &mut usize) -> Option<&'a str> 
     None
 }
 
-fn document_question(state: &State, proposition: &str) -> Classification {
+fn document_question(state: &State, proposition: &str, part: bool) -> Classification {
     Classification {
         state: state.clone(),
         kind: QuestionKind::Choice,
         instructions: json!({
             "proposition": proposition,
-            "question": DOCUMENT_QUESTION,
+            "question": if part { PART_QUESTION } else { DOCUMENT_QUESTION },
         }),
         criteria: json!({
             "entailed": "`body` at `path` supplies information that makes the proposition true",
@@ -910,6 +1095,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+    use crate::log::Log;
     use crate::oracle::{HeuristicOracle, OracleError};
     use crate::universe::Filesystem;
 
@@ -986,6 +1172,21 @@ mod tests {
             self
         }
 
+        fn part(
+            self,
+            path: &str,
+            part: u64,
+            proposition: &str,
+            choice: &str,
+            confidence: f64,
+        ) -> Self {
+            self.inner.borrow_mut().documents.insert(
+                (format!("{path}#{part}"), proposition.into()),
+                (choice.into(), confidence),
+            );
+            self
+        }
+
         fn escalation(self, choice: &str, confidence: f64) -> Self {
             self.inner.borrow_mut().escalation = (choice.into(), confidence);
             self
@@ -1042,7 +1243,7 @@ mod tests {
             QuestionKind::Choice if req.criteria.get("entailed").is_some() => {
                 let (choice, confidence) = inner
                     .documents
-                    .get(&(path.to_string(), proposition.to_string()))
+                    .get(&document_key(req))
                     .cloned()
                     .unwrap_or_else(|| ("neutral".into(), 0.95));
                 Answer {
@@ -1057,6 +1258,15 @@ mod tests {
                 noul: None,
             },
         }
+    }
+
+    fn document_key(req: &Classification) -> (String, String) {
+        let proposition = json_str(&req.instructions, "proposition").to_string();
+        let mut path = asked_path(req).to_string();
+        if let Some(part) = req.state.get("part").and_then(|value| value.as_u64()) {
+            path = format!("{path}#{part}");
+        }
+        (path, proposition)
     }
 
     fn asked_path(req: &Classification) -> &str {
@@ -1364,52 +1574,6 @@ mod tests {
     }
 
     #[test]
-    fn a_file_over_the_body_budget_fails_every_claim() {
-        let (_scratch, fs) = scratch(&[("big.txt", "0123456789abcdef")]);
-        let oracle = Scripted::new();
-        let (mut reader, script) = read_at(fs, oracle, 8);
-        let one = reader.submit("one");
-        let two = reader.submit("two");
-        let found = reader.wait_many(&[one, two]);
-        for finding in &found {
-            match finding {
-                Err(err) => {
-                    assert_eq!(err.to_string(), "big.txt is 16 bytes, over the read budget")
-                }
-                Ok(_) => panic!("over-cap file produced a finding"),
-            }
-        }
-        assert!(document_paths(&script, "one").is_empty());
-        assert!(document_paths(&script, "two").is_empty());
-    }
-
-    #[test]
-    fn an_over_cap_file_fails_before_a_later_witness() {
-        let (_scratch, fs) = scratch(&[("big.txt", "0123456789abcdef"), ("small.txt", "yes")]);
-        let oracle = Scripted::new().document("small.txt", "p", "entailed", 0.95);
-        let (mut reader, script) = read_at(fs, oracle, 8);
-        let ticket = reader.submit("p");
-        match reader.wait(ticket) {
-            Err(err) => assert_eq!(err.to_string(), "big.txt is 16 bytes, over the read budget"),
-            Ok(_) => panic!("over-cap file produced a finding"),
-        }
-        assert!(document_paths(&script, "p").is_empty());
-    }
-
-    #[test]
-    fn an_earlier_file_does_not_save_a_claim_once_a_later_body_is_over_cap() {
-        let (_scratch, fs) = scratch(&[("a.txt", "no"), ("big.txt", "0123456789abcdef")]);
-        let oracle = Scripted::new().document("a.txt", "p", "neutral", 0.95);
-        let (mut reader, script) = read_at(fs, oracle, 8);
-        let ticket = reader.submit("p");
-        match reader.wait(ticket) {
-            Err(err) => assert_eq!(err.to_string(), "big.txt is 16 bytes, over the read budget"),
-            Ok(_) => panic!("over-cap file produced a finding"),
-        }
-        assert_eq!(document_paths(&script, "p"), vec!["a.txt".to_string()]);
-    }
-
-    #[test]
     fn a_file_that_fits_is_sent_whole() {
         let text = "0123456789";
         let (_scratch, fs) = scratch(&[("a.txt", text)]);
@@ -1430,7 +1594,176 @@ mod tests {
             .as_str()
             .unwrap();
         assert_eq!(body, text);
+        assert!(submitted
+            .submitted
+            .iter()
+            .all(|req| req.state.get("part").is_none()));
         assert_eq!(finding.steps[0].rendered_bytes, text.len() as u64);
+        assert!(reader.splits().is_empty());
+    }
+
+    #[test]
+    fn a_file_over_the_budget_is_shared_across_claims_in_parts() {
+        let text = "0123456789abcdef";
+        let (_scratch, fs) = scratch(&[("big.txt", text)]);
+        let oracle = Scripted::new()
+            .part("big.txt", 1, "one", "neutral", 0.95)
+            .part("big.txt", 2, "one", "neutral", 0.95)
+            .part("big.txt", 1, "two", "neutral", 0.95)
+            .part("big.txt", 2, "two", "neutral", 0.95);
+        let log_path = std::env::temp_dir().join(format!(
+            "autoground-split-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let log = Log::open(&log_path).unwrap();
+        let mut reader = Reader::new(fs, oracle.clone(), 8, Some(log));
+        let one = reader.submit("one");
+        let two = reader.submit("two");
+        let found = reader.wait_many(&[one, two]);
+        for finding in &found {
+            let finding = finding.as_ref().unwrap();
+            assert_eq!(finding.value, Value::False);
+            assert!(finding.exhausted);
+        }
+        let submitted = oracle.inner.borrow();
+        let mut bodies = Vec::new();
+        for proposition in ["one", "two"] {
+            let posts: Vec<_> = submitted
+                .submitted
+                .iter()
+                .filter(|req| {
+                    req.kind == QuestionKind::Choice && req.criteria.get("entailed").is_some()
+                })
+                .filter(|req| json_str(&req.instructions, "proposition") == proposition)
+                .collect();
+            assert_eq!(posts.len(), 2, "{proposition}");
+            let mut joined = String::new();
+            for (index, post) in posts.iter().enumerate() {
+                let body = post.state.get("body").unwrap().as_str().unwrap();
+                assert!(body.len() <= 8, "{body}");
+                assert_eq!(
+                    post.state.get("part").unwrap().as_u64(),
+                    Some(index as u64 + 1)
+                );
+                assert_eq!(post.state.get("parts").unwrap().as_u64(), Some(2));
+                assert_eq!(json_str(&post.state, "path"), "big.txt");
+                let question = json_str(&post.instructions, "question");
+                assert!(question.contains("part"), "{question}");
+                assert!(question.contains("not visible"), "{question}");
+                joined.push_str(body);
+            }
+            bodies.push(joined);
+        }
+        assert_eq!(bodies[0], text);
+        assert_eq!(bodies[1], text);
+        let shared: Vec<_> = submitted
+            .submitted
+            .iter()
+            .filter(|req| {
+                json_str(&req.state, "path") == "big.txt"
+                    && req.state.get("part").and_then(|value| value.as_u64()) == Some(1)
+            })
+            .map(|req| req.state.clone())
+            .collect();
+        assert_eq!(shared.len(), 2);
+        assert_eq!(shared[0], shared[1]);
+        drop(submitted);
+        assert_eq!(
+            reader.splits(),
+            &[Split {
+                path: "big.txt".into(),
+                bytes: text.len() as u64,
+                parts: 2,
+            }]
+        );
+        let events = crate::log::parse_jsonl(&std::fs::read_to_string(&log_path).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&log_path);
+        assert!(events.iter().any(|event| {
+            event["kind"] == "read_split"
+                && event["path"] == "big.txt"
+                && event["bytes"].as_u64() == Some(text.len() as u64)
+                && event["parts"].as_u64() == Some(2)
+        }));
+    }
+
+    #[test]
+    fn a_later_part_witness_settles_after_an_earlier_neutral() {
+        let (_scratch, fs) = scratch(&[("big.txt", "0123456789abcdef")]);
+        let oracle = Scripted::new()
+            .part("big.txt", 1, "p", "neutral", 0.95)
+            .part("big.txt", 2, "p", "entailed", 0.95);
+        let (mut reader, _) = read_at(fs, oracle, 8);
+        let ticket = reader.submit("p");
+        let finding = reader.wait(ticket).unwrap();
+        assert_eq!(finding.value, Value::True);
+        assert_eq!(finding.stances[0].id, "big.txt part 2/2");
+        assert_eq!(finding.evidence.databases(), &["big.txt".to_string()]);
+        assert_eq!(
+            reader.splits()[0].line(),
+            "big.txt is 16 bytes, sent as 2 parts"
+        );
+    }
+
+    #[test]
+    fn an_earlier_part_refutation_ignores_a_later_witness() {
+        let (_scratch, fs) = scratch(&[("big.txt", "0123456789abcdef")]);
+        let oracle = Scripted::new()
+            .part("big.txt", 1, "p", "contradicted", 0.9)
+            .part("big.txt", 2, "p", "entailed", 0.95);
+        let (mut reader, script) = read_at(fs, oracle, 8);
+        let ticket = reader.submit("p");
+        let finding = reader.wait(ticket).unwrap();
+        assert_eq!(finding.value, Value::False);
+        assert!(!finding.exhausted);
+        assert_eq!(finding.stances[0].id, "big.txt part 1/2");
+        assert_eq!(finding.evidence.databases(), &["big.txt".to_string()]);
+        assert_eq!(script.inner.borrow().escalations, 0);
+        assert_eq!(document_paths(&script, "p").len(), 2);
+    }
+
+    #[test]
+    fn a_part_veto_then_a_later_witness_escalates() {
+        let (_scratch, fs) = scratch(&[("big.txt", "0123456789abcdef")]);
+        let oracle = Scripted::new()
+            .part("big.txt", 1, "p", "contradicted", 0.6)
+            .part("big.txt", 2, "p", "entailed", 0.9)
+            .escalation("true", 0.9);
+        let (mut reader, script) = read_at(fs, oracle, 8);
+        let ticket = reader.submit("p");
+        let finding = reader.wait(ticket).unwrap();
+        assert_eq!(finding.value, Value::True);
+        assert_eq!(script.inner.borrow().escalations, 1);
+        assert_eq!(
+            finding
+                .stances
+                .iter()
+                .map(|stance| stance.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["big.txt part 1/2", "big.txt part 2/2"]
+        );
+        assert_eq!(finding.evidence.databases(), &["big.txt".to_string()]);
+    }
+
+    #[test]
+    fn split_body_keeps_lines_and_a_long_line_and_a_wide_character() {
+        assert_eq!(
+            split_body("aaaa\nbbbb\ncc", 8),
+            vec!["aaaa\n".to_string(), "bbbb\ncc".to_string()]
+        );
+        assert_eq!(
+            split_body("abcdefghij", 4),
+            vec!["abcd".to_string(), "efgh".to_string(), "ij".to_string()]
+        );
+        assert_eq!(
+            split_body("ééé", 3),
+            vec!["é".to_string(), "é".to_string(), "é".to_string()]
+        );
+        let joined = split_body("aaaa\nbbbb\ncc", 8).concat();
+        assert_eq!(joined, "aaaa\nbbbb\ncc");
     }
 
     fn read_at(
