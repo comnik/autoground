@@ -4,9 +4,11 @@
 //! filled. Planning names each distinct sentence once, in the order the claims
 //! mention it, and keeps the claim as an expression over those sentences.
 //! [`Plan::evaluate`] combines a value per sentence with Kleene `and`, `or`,
-//! and `not`. Nothing here reads a universe or asks an oracle.
+//! and `not`. A sentence that heads a detail is not named: every use of it,
+//! including the detail, takes the body's value. Nothing here reads a universe
+//! or asks an oracle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::syntax::{verbalize_proposition, Proposition};
 use crate::value::Value;
@@ -19,6 +21,11 @@ pub enum Expr {
     And(Vec<Expr>),
     Or(Vec<Expr>),
     Not(Box<Expr>),
+    /// `head` is not an atom. The detail's value is the Kleene `and` of `body`.
+    Detail {
+        head: String,
+        body: Vec<Expr>,
+    },
 }
 
 /// One claim: the ground sentence as written, and how its atoms combine.
@@ -38,13 +45,15 @@ pub struct Plan {
 
 impl Plan {
     pub fn of(compiled: &Compiled) -> Self {
+        let defs = definitions(&compiled.claims);
         let mut atoms = Vec::new();
         let mut index = HashMap::new();
+        let mut stack = HashSet::new();
         let mut claims = Vec::new();
         for proposition in &compiled.claims {
             claims.push(Claim {
                 verbalized: verbalize_proposition(proposition),
-                expr: lower(proposition, &mut atoms, &mut index),
+                expr: lower(proposition, &defs, &mut stack, &mut atoms, &mut index),
             });
         }
         Self { atoms, claims }
@@ -59,16 +68,83 @@ impl Plan {
     }
 }
 
+fn definitions(claims: &[Proposition]) -> HashMap<String, Vec<Proposition>> {
+    let mut defs = HashMap::new();
+    for claim in claims {
+        collect_defs(claim, &mut defs);
+    }
+    defs
+}
+
+fn collect_defs(proposition: &Proposition, defs: &mut HashMap<String, Vec<Proposition>>) {
+    match proposition {
+        Proposition::And(xs) | Proposition::Or(xs) => {
+            for proposition in xs {
+                collect_defs(proposition, defs);
+            }
+        }
+        Proposition::Not(inner) => collect_defs(inner, defs),
+        Proposition::Sentence(_) => {}
+        Proposition::Detail { head, body } => {
+            defs.entry(head.clone()).or_insert_with(|| body.clone());
+            for proposition in body {
+                collect_defs(proposition, defs);
+            }
+        }
+    }
+}
+
 fn lower(
     proposition: &Proposition,
+    defs: &HashMap<String, Vec<Proposition>>,
+    stack: &mut HashSet<String>,
     atoms: &mut Vec<String>,
     index: &mut HashMap<String, usize>,
 ) -> Expr {
     match proposition {
-        Proposition::And(xs) => Expr::And(xs.iter().map(|x| lower(x, atoms, index)).collect()),
-        Proposition::Or(xs) => Expr::Or(xs.iter().map(|x| lower(x, atoms, index)).collect()),
-        Proposition::Not(inner) => Expr::Not(Box::new(lower(inner, atoms, index))),
-        Proposition::Sentence(sentence) => Expr::Atom(intern(sentence, atoms, index)),
+        Proposition::And(xs) => Expr::And(
+            xs.iter()
+                .map(|x| lower(x, defs, stack, atoms, index))
+                .collect(),
+        ),
+        Proposition::Or(xs) => Expr::Or(
+            xs.iter()
+                .map(|x| lower(x, defs, stack, atoms, index))
+                .collect(),
+        ),
+        Proposition::Not(inner) => Expr::Not(Box::new(lower(inner, defs, stack, atoms, index))),
+        Proposition::Sentence(sentence) => {
+            if let Some(body) = defs.get(sentence) {
+                expand(sentence, body, defs, stack, atoms, index)
+            } else {
+                Expr::Atom(intern(sentence, atoms, index))
+            }
+        }
+        Proposition::Detail { head, body } => expand(head, body, defs, stack, atoms, index),
+    }
+}
+
+/// The head is not interned. A sentence already on the stack is its own body,
+/// which `check_details` rejects; interning it keeps planning from recursing.
+fn expand(
+    head: &str,
+    body: &[Proposition],
+    defs: &HashMap<String, Vec<Proposition>>,
+    stack: &mut HashSet<String>,
+    atoms: &mut Vec<String>,
+    index: &mut HashMap<String, usize>,
+) -> Expr {
+    if !stack.insert(head.to_string()) {
+        return Expr::Atom(intern(head, atoms, index));
+    }
+    let body = body
+        .iter()
+        .map(|claim| lower(claim, defs, stack, atoms, index))
+        .collect();
+    stack.remove(head);
+    Expr::Detail {
+        head: head.to_string(),
+        body,
     }
 }
 
@@ -100,6 +176,10 @@ fn eval(expr: &Expr, values: &[Value]) -> Value {
         Expr::Or(xs) => xs
             .iter()
             .fold(Value::False, |acc, x| acc.or(eval(x, values))),
+        // The head is taken at face value: a body that holds establishes it.
+        Expr::Detail { body, .. } => body
+            .iter()
+            .fold(Value::True, |acc, x| acc.and(eval(x, values))),
     }
 }
 
@@ -168,6 +248,98 @@ mod tests {
                 "Backend is a component of the system".to_string(),
                 "Frontend calls Backend".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn a_detail_asks_its_body_and_takes_that_value() {
+        let plan = planned(
+            r#"
+(name Concept)
+(detail ("Logic blocks can depend on arbitrary concepts.")
+  (name LogicBlock)
+  (sense input "{X} is an input into {Y}")
+  (and
+    (input Concept LogicBlock)
+    ("Relationship is an input into LogicBlock")))
+(detail ("nested")
+  (detail ("inner")
+    ("leaf")))
+("leaf")
+"#,
+        );
+        assert_eq!(
+            plan.atoms,
+            vec![
+                "Concept is an input into LogicBlock".to_string(),
+                "Relationship is an input into LogicBlock".to_string(),
+                "leaf".to_string(),
+            ]
+        );
+        assert!(!plan.atoms.iter().any(|atom| atom.contains("arbitrary")));
+        assert!(!plan
+            .atoms
+            .iter()
+            .any(|atom| atom == "nested" || atom == "inner"));
+        match &plan.claims[0].expr {
+            Expr::Detail { head, body } => {
+                assert_eq!(head, "Logic blocks can depend on arbitrary concepts.");
+                assert_eq!(body, &vec![Expr::And(vec![Expr::Atom(0), Expr::Atom(1)])]);
+            }
+            other => panic!("detail, got {other:?}"),
+        }
+        assert_eq!(
+            plan.claims[0].verbalized,
+            "(detail (\"Logic blocks can depend on arbitrary concepts.\") (and (\"Concept is an input into LogicBlock\") (\"Relationship is an input into LogicBlock\")))"
+        );
+        assert_eq!(
+            plan.evaluate(&[Value::True, Value::True, Value::False]),
+            vec![Value::True, Value::False, Value::False]
+        );
+        assert_eq!(
+            plan.evaluate(&[Value::True, Value::Unknown, Value::True]),
+            vec![Value::Unknown, Value::True, Value::True]
+        );
+        assert_eq!(
+            plan.evaluate(&[Value::False, Value::True, Value::Unknown]),
+            vec![Value::False, Value::Unknown, Value::Unknown]
+        );
+    }
+
+    #[test]
+    fn a_use_of_a_detailed_sentence_reads_the_body() {
+        let plan = planned(
+            r#"
+(and
+  ("Logic blocks can depend on arbitrary concepts and relationships.")
+  ("Relationship is an input into LogicBlock"))
+(detail ("Relationship is an input into LogicBlock")
+  ("LogicBlocks can depend on relations defined by other blocks."))
+"#,
+        );
+        assert_eq!(
+            plan.atoms,
+            vec![
+                "Logic blocks can depend on arbitrary concepts and relationships.".to_string(),
+                "LogicBlocks can depend on relations defined by other blocks.".to_string(),
+            ]
+        );
+        let body = Expr::Detail {
+            head: "Relationship is an input into LogicBlock".into(),
+            body: vec![Expr::Atom(1)],
+        };
+        assert_eq!(
+            plan.claims[0].expr,
+            Expr::And(vec![Expr::Atom(0), body.clone()])
+        );
+        assert_eq!(plan.claims[1].expr, body);
+        assert_eq!(
+            plan.evaluate(&[Value::False, Value::True]),
+            vec![Value::False, Value::True]
+        );
+        assert_eq!(
+            plan.evaluate(&[Value::True, Value::True]),
+            vec![Value::True, Value::True]
         );
     }
 

@@ -46,7 +46,7 @@ pub enum Arg {
     Literal(String),
 }
 
-/// A ground claim. `and`, `or`, and `not` are left for the planner.
+/// A ground claim. `and`, `or`, `not`, and `detail` are left for the planner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Formula {
     And(Vec<Formula>),
@@ -56,6 +56,14 @@ pub enum Formula {
     Apply {
         reading: Reading,
         args: Vec<Arg>,
+    },
+    /// A sentence established by the claims of a lect local to this detail.
+    ///
+    /// Names and senses in `body` are visible to the head and to those claims,
+    /// and nowhere else.
+    Detail {
+        head: Box<Formula>,
+        body: Vec<Form>,
     },
 }
 
@@ -92,6 +100,12 @@ pub enum Proposition {
     Or(Vec<Proposition>),
     Not(Box<Proposition>),
     Sentence(String),
+    /// `head` is the sentence being detailed. `body` is the lect's claims, in
+    /// order, and the detail holds when every one of them holds.
+    Detail {
+        head: String,
+        body: Vec<Proposition>,
+    },
 }
 
 /// A top-level form.

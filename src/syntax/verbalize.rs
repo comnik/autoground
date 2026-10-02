@@ -20,14 +20,24 @@ impl std::fmt::Display for VerbalizeError {
 
 impl std::error::Error for VerbalizeError {}
 
-/// Render a proposition as source. A sentence is a ground reading `("...")`,
-/// and `and` / `or` / `not` stay in place for the planner.
+/// Render a proposition as source. A sentence is a ground reading `("...")`.
+/// `and`, `or`, `not`, and `detail` stay in place for the planner. A detail's
+/// local declarations are resolved away; its body is the claims that remain.
 pub fn verbalize_proposition(proposition: &Proposition) -> String {
     match proposition {
         Proposition::Sentence(sentence) => format!("({})", quote_const(sentence)),
         Proposition::Not(inner) => format!("(not {})", verbalize_proposition(inner)),
         Proposition::And(xs) => verbalize_nary("and", xs),
         Proposition::Or(xs) => verbalize_nary("or", xs),
+        Proposition::Detail { head, body } => {
+            let mut out = format!("(detail ({})", quote_const(head));
+            for proposition in body {
+                out.push(' ');
+                out.push_str(&verbalize_proposition(proposition));
+            }
+            out.push(')');
+            out
+        }
     }
 }
 

@@ -86,6 +86,22 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
             write_formula(x, indent, out);
             out.push(')');
         }
+        Formula::Detail { head, body } => {
+            out.push_str("(detail ");
+            write_formula(head, indent, out);
+            if body.len() == 1 {
+                out.push(' ');
+                print_form(&body[0], indent, out);
+                out.push(')');
+                return;
+            }
+            for form in body {
+                out.push('\n');
+                write_indent(indent + 1, out);
+                print_form(form, indent + 1, out);
+            }
+            out.push(')');
+        }
         Formula::Apply { reading, args } => {
             out.push('(');
             match reading {
@@ -177,6 +193,20 @@ mod tests {
         let program = parse(src).unwrap();
         let printed = print_program(&program);
         let again = parse(&printed).unwrap();
+        assert_eq!(program, again);
+    }
+
+    #[test]
+    fn round_trip_keeps_a_detail() {
+        let src = r#"(detail ("broad")
+  (name Concept)
+  (sense input "{X} is an input into {Y}")
+  (and
+    (input Concept LogicBlock)
+    ("Concept is named")))
+"#;
+        let program = parse(src).unwrap();
+        let again = parse(&print_program(&program)).unwrap();
         assert_eq!(program, again);
     }
 

@@ -452,7 +452,7 @@ fn index_atoms(plan: &Plan) -> HashMap<String, Vec<usize>> {
 fn collect(expr: &Expr, atoms: &mut Vec<usize>) {
     match expr {
         Expr::Atom(index) => atoms.push(*index),
-        Expr::And(xs) | Expr::Or(xs) => {
+        Expr::And(xs) | Expr::Or(xs) | Expr::Detail { body: xs, .. } => {
             for expr in xs {
                 collect(expr, atoms);
             }
@@ -520,7 +520,7 @@ fn regions_of(expr: &Expr, clause: &ClauseSpan, atoms: &[Value], out: &mut Vec<M
             span: clause.span.clone(),
             value,
         }),
-        Expr::And(xs) | Expr::Or(xs) => {
+        Expr::And(xs) | Expr::Or(xs) | Expr::Detail { body: xs, .. } => {
             if xs.len() != clause.children.len() {
                 out.push(Mark {
                     span: clause.span.clone(),
@@ -596,6 +596,32 @@ fn notes_of(
             for (child, span) in xs.iter().zip(&clause.children) {
                 notes_of(child, span, atoms, grounds, explain, holds, out);
             }
+        }
+        Expr::Detail { body, .. } => {
+            if body.len() == clause.children.len() {
+                let holds = parent_holds || value == Value::True;
+                for (child, span) in body.iter().zip(&clause.children) {
+                    notes_of(child, span, atoms, grounds, explain, holds, out);
+                }
+                return;
+            }
+            // A use of the sentence. The file evidence stays on the detail's body.
+            if parent_holds && value == Value::False {
+                return;
+            }
+            if !shown(value, explain) {
+                return;
+            }
+            let text = match value {
+                Value::True => ";; entailed via detail",
+                Value::False => ";; fails via detail",
+                Value::Unknown => return,
+            };
+            out.push(Note {
+                at: clause.span.start,
+                text: text.to_string(),
+                tone: note_tone(value),
+            });
         }
         Expr::Not(inner) => {
             if parent_holds && value == Value::False {
@@ -698,7 +724,7 @@ fn gather(
             Some(Ground::Unknown) | None => {}
         },
         Expr::Not(inner) => gather(inner, grounds, entailed, contradicted, unsupported),
-        Expr::And(xs) | Expr::Or(xs) => {
+        Expr::And(xs) | Expr::Or(xs) | Expr::Detail { body: xs, .. } => {
             for child in xs {
                 gather(child, grounds, entailed, contradicted, unsupported);
             }
@@ -1334,6 +1360,41 @@ mod tests {
             .all(|row| row.pieces.iter().all(|piece| piece.tone != Tone::FalseText)));
     }
 
+    #[test]
+    fn a_use_of_a_detailed_sentence_cites_the_body() {
+        let src = "\
+(and
+  (\"broad\")
+  (\"arrow\"))
+(detail (\"arrow\")
+  (\"leaf\"))
+";
+        let rows = explained(
+            src,
+            &[Value::False, Value::True],
+            &[
+                Ground::Contradicted(vec!["multi_reasoner_validation.py".into()]),
+                Ground::Entailed(vec!["reasoners/prescriptive_reasoner.py".into()]),
+            ],
+            Explain::All,
+        );
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "✗ (and".to_string(),
+                "    ;; contradicted in multi_reasoner_validation.py".to_string(),
+                "▌   (\"broad\")".to_string(),
+                "    ;; entailed via detail".to_string(),
+                "    (\"arrow\"))".to_string(),
+                "✓ (detail (\"arrow\")".to_string(),
+                "    ;; entailed in reasoners/prescriptive_reasoner.py".to_string(),
+                "    (\"leaf\"))".to_string(),
+            ]
+        );
+        assert!(text.iter().all(|line| !line.contains("no supporting file")));
+    }
+
     fn finished(src: &str, atoms: &[Value]) -> Vec<Row> {
         explained(src, atoms, &[], Explain::Contradictions)
     }
@@ -1455,6 +1516,31 @@ mod tests {
             vec![
                 "  ;; entailed in src/main.rs".to_string(),
                 "✗ (not (\"Search calls Log\"))".to_string(),
+            ]
+        );
+
+        let detailed = "\
+(detail (\"broad\")
+  (\"nope\")
+  (\"yep\"))
+";
+        let rows = explained(
+            detailed,
+            &[Value::False, Value::True],
+            &[
+                Ground::Unsupported,
+                Ground::Entailed(vec!["src/yep.rs".into()]),
+            ],
+            Explain::Contradictions,
+        );
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "✗ (detail (\"broad\")".to_string(),
+                "    ;; no supporting file".to_string(),
+                "▌   (\"nope\")".to_string(),
+                "    (\"yep\"))".to_string(),
             ]
         );
 

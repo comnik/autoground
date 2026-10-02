@@ -47,7 +47,7 @@ impl std::fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
-/// A model whose claims are sentences under `and`, `or`, and `not`.
+/// A model whose claims are sentences under `and`, `or`, `not`, and `detail`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Compiled {
     pub names: Vec<String>,
@@ -123,12 +123,119 @@ pub(crate) fn compile_with(program: &Program, imports: &Imports) -> Result<Compi
     for formula in program.claims() {
         claims.push(resolve(formula, &declared, &sense_by_name, imports)?);
     }
+    check_details(&claims)?;
 
     Ok(Compiled {
         names,
         senses,
         claims,
     })
+}
+
+/// One detail defines a sentence. A cycle would ask that sentence to establish
+/// itself.
+fn check_details(claims: &[Proposition]) -> Result<(), CompileError> {
+    let mut defs: HashMap<String, Vec<Proposition>> = HashMap::new();
+    for claim in claims {
+        collect_detail(claim, &mut defs)?;
+    }
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for head in defs.keys() {
+        if let Some(sentence) = detail_cycle(head, &defs, &mut visiting, &mut visited) {
+            return Err(CompileError {
+                message: format!("`{sentence}` is detailed in terms of itself"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn collect_detail(
+    proposition: &Proposition,
+    defs: &mut HashMap<String, Vec<Proposition>>,
+) -> Result<(), CompileError> {
+    match proposition {
+        Proposition::And(xs) | Proposition::Or(xs) => {
+            for proposition in xs {
+                collect_detail(proposition, defs)?;
+            }
+        }
+        Proposition::Not(inner) => collect_detail(inner, defs)?,
+        Proposition::Sentence(_) => {}
+        Proposition::Detail { head, body } => {
+            if defs.contains_key(head) {
+                return Err(CompileError {
+                    message: format!("duplicate detail of `{head}`"),
+                });
+            }
+            defs.insert(head.clone(), body.clone());
+            for proposition in body {
+                collect_detail(proposition, defs)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn detail_cycle(
+    head: &str,
+    defs: &HashMap<String, Vec<Proposition>>,
+    visiting: &mut HashSet<String>,
+    visited: &mut HashSet<String>,
+) -> Option<String> {
+    if visited.contains(head) {
+        return None;
+    }
+    if !visiting.insert(head.to_string()) {
+        return Some(head.to_string());
+    }
+    if let Some(body) = defs.get(head) {
+        for dep in detail_deps(body, defs) {
+            if let Some(sentence) = detail_cycle(&dep, defs, visiting, visited) {
+                return Some(sentence);
+            }
+        }
+    }
+    visiting.remove(head);
+    visited.insert(head.to_string());
+    None
+}
+
+fn detail_deps(body: &[Proposition], defs: &HashMap<String, Vec<Proposition>>) -> Vec<String> {
+    let mut deps = Vec::new();
+    for proposition in body {
+        push_detail_deps(proposition, defs, &mut deps);
+    }
+    deps
+}
+
+fn push_detail_deps(
+    proposition: &Proposition,
+    defs: &HashMap<String, Vec<Proposition>>,
+    deps: &mut Vec<String>,
+) {
+    match proposition {
+        Proposition::Sentence(sentence) => {
+            if defs.contains_key(sentence) {
+                deps.push(sentence.clone());
+            }
+        }
+        Proposition::And(xs) | Proposition::Or(xs) => {
+            for proposition in xs {
+                push_detail_deps(proposition, defs, deps);
+            }
+        }
+        Proposition::Not(inner) => push_detail_deps(inner, defs, deps),
+        Proposition::Detail { head, body } => {
+            if defs.contains_key(head) {
+                deps.push(head.clone());
+            }
+            for proposition in body {
+                push_detail_deps(proposition, defs, deps);
+            }
+        }
+    }
 }
 
 fn resolve(
@@ -143,6 +250,7 @@ fn resolve(
         Formula::Not(x) => Ok(Proposition::Not(Box::new(resolve(
             x, names, senses, imports,
         )?))),
+        Formula::Detail { head, body } => resolve_detail(head, body, names, senses, imports),
         Formula::Apply { reading, args } => {
             let mut spellings = Vec::with_capacity(args.len());
             for arg in args {
@@ -169,6 +277,75 @@ fn resolve(
             Ok(Proposition::Sentence(sentence))
         }
     }
+}
+
+/// Names and senses declared in `body` extend the enclosing scope for the head
+/// and for the body's claims. They are not visible outside this detail.
+fn resolve_detail(
+    head: &Formula,
+    body: &[Form],
+    names: &HashSet<String>,
+    senses: &HashMap<String, Sense>,
+    imports: &Imports,
+) -> Result<Proposition, CompileError> {
+    let (names, senses) = extend(body, names, senses)?;
+    let Proposition::Sentence(head) = resolve(head, &names, &senses, imports)? else {
+        return Err(CompileError {
+            message: "`detail` heads a sentence".into(),
+        });
+    };
+    let mut claims = Vec::new();
+    for form in body {
+        if let Form::Claim(formula) = form {
+            claims.push(resolve(formula, &names, &senses, imports)?);
+        }
+    }
+    if claims.is_empty() {
+        return Err(CompileError {
+            message: "a detail's body has no claim".into(),
+        });
+    }
+    Ok(Proposition::Detail { head, body: claims })
+}
+
+fn extend(
+    body: &[Form],
+    names: &HashSet<String>,
+    senses: &HashMap<String, Sense>,
+) -> Result<(HashSet<String>, HashMap<String, Sense>), CompileError> {
+    let mut names = names.clone();
+    let mut senses = senses.clone();
+    for form in body {
+        match form {
+            Form::Name(name) => {
+                if !names.insert(name.clone()) {
+                    return Err(CompileError {
+                        message: format!("duplicate name `{name}`"),
+                    });
+                }
+                if senses.contains_key(name) {
+                    return Err(CompileError {
+                        message: format!("`{name}` is declared as both a name and a sense"),
+                    });
+                }
+            }
+            Form::Sense(sense) => {
+                if senses.contains_key(&sense.name) {
+                    return Err(CompileError {
+                        message: format!("duplicate sense `{}`", sense.name),
+                    });
+                }
+                if names.contains(&sense.name) {
+                    return Err(CompileError {
+                        message: format!("`{}` is declared as both a name and a sense", sense.name),
+                    });
+                }
+                senses.insert(sense.name.clone(), sense.clone());
+            }
+            Form::Claim(_) => {}
+        }
+    }
+    Ok((names, senses))
 }
 
 fn resolve_all(
@@ -348,6 +525,144 @@ mod tests {
             vec![Proposition::Sentence(
                 "Universe is implemented at src/universe".into()
             )]
+        );
+    }
+
+    #[test]
+    fn a_detail_keeps_its_locals_inside_the_body() {
+        let c = compiled(
+            r#"
+(name Concept)
+(detail (input Concept LogicBlock)
+  (name LogicBlock)
+  (name Relationship)
+  (sense input "{X} is an input into {Y}")
+  (and
+    ("Concept is closed over by a LogicBlock")
+    (input Relationship LogicBlock)))
+"#,
+        );
+        assert_eq!(c.names, vec!["Concept".to_string()]);
+        assert!(c.senses.is_empty());
+        assert_eq!(
+            c.claims,
+            vec![Proposition::Detail {
+                head: "Concept is an input into LogicBlock".into(),
+                body: vec![Proposition::And(vec![
+                    Proposition::Sentence("Concept is closed over by a LogicBlock".into()),
+                    Proposition::Sentence("Relationship is an input into LogicBlock".into()),
+                ])],
+            }]
+        );
+
+        let itself = compile(
+            &parse(
+                r#"
+(name Concept)
+(name LogicBlock)
+(sense input "{X} is an input into {Y}")
+(detail (input Concept LogicBlock)
+  (input Concept LogicBlock))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            itself
+                .message
+                .contains("`Concept is an input into LogicBlock` is detailed in terms of itself"),
+            "{itself}"
+        );
+
+        let leaked = compile(
+            &parse(
+                r#"
+(detail ("h")
+  (name Local)
+  ("Local holds"))
+("{Name} holds" Local)
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            leaked.message.contains("`Local` is not a declared name"),
+            "{leaked}"
+        );
+
+        let hidden = compile(
+            &parse(
+                r#"
+(detail ("outer")
+  (detail ("inner")
+    (name Hidden)
+    ("Hidden holds"))
+  ("{Name} holds" Hidden))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            hidden.message.contains("`Hidden` is not a declared name"),
+            "{hidden}"
+        );
+
+        let again = compile(
+            &parse(
+                r#"
+(name Concept)
+(detail ("h")
+  (name Concept)
+  ("Concept holds"))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            again.message.contains("duplicate name `Concept`"),
+            "{again}"
+        );
+    }
+
+    #[test]
+    fn a_sentence_is_detailed_once_and_not_in_terms_of_itself() {
+        let twice = compile(
+            &parse(
+                r#"
+(detail ("arrow") ("one"))
+(detail ("arrow") ("two"))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            twice.message.contains("duplicate detail of `arrow`"),
+            "{twice}"
+        );
+
+        let cycle = compile(
+            &parse(
+                r#"
+(detail ("arrow") ("leaf"))
+(detail ("leaf") ("arrow"))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            cycle
+                .message
+                .contains("`arrow` is detailed in terms of itself")
+                || cycle
+                    .message
+                    .contains("`leaf` is detailed in terms of itself"),
+            "{cycle}"
         );
     }
 

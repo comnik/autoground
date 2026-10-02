@@ -81,6 +81,7 @@ fn render_expr(
             let sentence = atoms.get(*index).map(String::as_str).unwrap_or("");
             vec![format!("{prefix}{sentence}")]
         }
+        Expr::Detail { head, .. } => vec![format!("{prefix}{head}")],
         Expr::Not(inner) => render_expr(inner, &format!("{prefix}NOT: "), atoms, stances),
         Expr::And(xs) => render_siblings(xs, prefix, "AND: ", atoms, stances),
         Expr::Or(xs) => render_siblings(xs, prefix, "OR: ", atoms, stances),
@@ -123,7 +124,7 @@ fn collect(expr: &Expr, stances: &[Vec<Stance>], files: &mut BTreeSet<String>) {
             }
         }
         Expr::Not(inner) => collect(inner, stances, files),
-        Expr::And(xs) | Expr::Or(xs) => {
+        Expr::And(xs) | Expr::Or(xs) | Expr::Detail { body: xs, .. } => {
             for expr in xs {
                 collect(expr, stances, files);
             }
@@ -154,6 +155,77 @@ mod tests {
         assert_eq!(
             context_path(Path::new("/tmp/autoground/trace-1790-51022-0.jsonl")),
             PathBuf::from("/tmp/autoground/context-1790-51022-0.md")
+        );
+    }
+
+    #[test]
+    fn a_true_detail_records_its_head_and_cites_the_body() {
+        let plan = planned(
+            r#"
+(detail ("broad")
+  (name Local)
+  (sense holds "{Name} holds")
+  (holds Local))
+(and
+  (detail ("mid") ("leaf"))
+  ("other"))
+"#,
+        );
+        assert_eq!(
+            plan.atoms,
+            vec![
+                "Local holds".to_string(),
+                "leaf".to_string(),
+                "other".to_string()
+            ]
+        );
+        let stances = vec![
+            vec![stance("src/a.rs", Verdict::Entailed)],
+            vec![stance("src/b.rs", Verdict::Entailed)],
+            vec![stance("src/c.rs", Verdict::Contradicted)],
+        ];
+        assert_eq!(
+            render(&plan, &[Value::True, Value::True], &stances),
+            "\
+broad
+(see src/a.rs)
+
+mid
+AND: other
+(see src/b.rs, src/c.rs)
+"
+        );
+    }
+
+    #[test]
+    fn a_true_and_records_a_detailed_sentence_as_its_head() {
+        let plan = planned(
+            r#"
+(and
+  ("other")
+  ("arrow"))
+(detail ("arrow")
+  ("leaf"))
+"#,
+        );
+        assert_eq!(plan.atoms, vec!["other".to_string(), "leaf".to_string()]);
+        let stances = vec![
+            vec![stance("src/other.py", Verdict::Entailed)],
+            vec![stance(
+                "reasoners/prescriptive_reasoner.py",
+                Verdict::Entailed,
+            )],
+        ];
+        assert_eq!(
+            render(&plan, &[Value::True, Value::True], &stances),
+            "\
+other
+AND: arrow
+(see reasoners/prescriptive_reasoner.py, src/other.py)
+
+arrow
+(see reasoners/prescriptive_reasoner.py)
+"
         );
     }
 

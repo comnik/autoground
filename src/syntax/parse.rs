@@ -586,6 +586,7 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
             let (inner, child) = lower_formula(&xs[1])?;
             Ok((Formula::Not(Box::new(inner)), clause(vec![child])))
         }
+        SexpKind::Symbol(head) if head == "detail" => lower_detail(s, xs),
         SexpKind::Symbol(head) if is_retired(head) => Err(retired(head)),
         SexpKind::Symbol(head) => Ok((
             Formula::Apply {
@@ -612,6 +613,38 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
             "a formula starts with `and`, `or`, `not`, a sense name, or a reading",
         )),
     }
+}
+
+fn lower_detail(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseError> {
+    if xs.len() < 3 {
+        return Err(err_at(&xs[0], "`detail` takes a sentence and a body"));
+    }
+    let (head, _) = lower_formula(&xs[1])?;
+    if !matches!(head, Formula::Apply { .. }) {
+        return Err(err_at(&xs[1], "`detail` heads a sentence"));
+    }
+    let mut body = Vec::with_capacity(xs.len() - 2);
+    let mut children = Vec::new();
+    for item in &xs[2..] {
+        let (form, span) = lower_form(item)?;
+        if let Some(span) = span {
+            children.push(span);
+        }
+        body.push(form);
+    }
+    if !body.iter().any(|form| matches!(form, Form::Claim(_))) {
+        return Err(err_at(&xs[0], "a detail's body has no claim"));
+    }
+    Ok((
+        Formula::Detail {
+            head: Box::new(head),
+            body,
+        },
+        ClauseSpan {
+            span: s.span.clone(),
+            children,
+        },
+    ))
 }
 
 fn lower_formulas(xs: &[Sexp]) -> Result<(Vec<Formula>, Vec<ClauseSpan>), ParseError> {
@@ -692,7 +725,10 @@ fn expect_symbol(s: &Sexp, message: &str) -> Result<String, ParseError> {
 }
 
 fn reject_reserved(s: &Sexp, spelling: &str) -> Result<(), ParseError> {
-    if matches!(spelling, "name" | "sense" | "ns" | "and" | "or" | "not") {
+    if matches!(
+        spelling,
+        "name" | "sense" | "ns" | "and" | "or" | "not" | "detail"
+    ) {
         Err(err_at(
             s,
             format!("`{spelling}` is reserved and cannot be declared"),
@@ -734,7 +770,7 @@ fn err_at(s: &Sexp, message: impl Into<String>) -> ParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::{Arg, Formula, Reading, Refer};
+    use crate::syntax::{Arg, Form, Formula, Reading, Refer};
 
     #[test]
     fn parses_declarations_and_applications() {
@@ -780,6 +816,46 @@ mod tests {
         ] {
             let err = parse(src).unwrap_err();
             assert!(err.message.contains("not in this language"), "{src}: {err}");
+        }
+    }
+
+    #[test]
+    fn parses_a_detail_with_local_declarations() {
+        let src = r#"
+(detail ("Logic blocks can depend on arbitrary concepts.")
+  (name Concept)
+  (name LogicBlock)
+  (sense input "{X} is an input into {Y}")
+  (and
+    (input Concept LogicBlock)
+    ("Concept is named")))
+"#;
+        let program = parse(src).unwrap();
+        assert_eq!(program.names().count(), 0);
+        assert_eq!(program.senses().count(), 0);
+        let formula = program.claims().next().unwrap();
+        let Formula::Detail { head, body } = formula else {
+            panic!("detail");
+        };
+        assert!(matches!(head.as_ref(), Formula::Apply { .. }));
+        assert_eq!(body.len(), 4);
+        assert!(matches!(body[0], Form::Name(_)));
+        assert!(matches!(body[2], Form::Sense(_)));
+        assert_eq!(program.clauses[0].children.len(), 1);
+    }
+
+    #[test]
+    fn rejects_a_detail_that_cannot_be_a_lect() {
+        for (src, needle) in [
+            ("(detail)", "takes a sentence"),
+            ("(detail (\"only the head\"))", "takes a sentence"),
+            ("(detail (and (\"a\") (\"b\")) (\"c\"))", "heads a sentence"),
+            ("(detail (\"h\") (name Only))", "no claim"),
+            ("(name detail)", "reserved"),
+            ("(sense detail \"{X}\")", "reserved"),
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(err.message.contains(needle), "{src}: {err}");
         }
     }
 
