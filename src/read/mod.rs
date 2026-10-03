@@ -280,6 +280,10 @@ impl<U, O> Reader<U, O> {
     {
         self.search.flight_limit()
     }
+
+    pub fn into_oracle(self) -> O {
+        self.search.into_oracle()
+    }
 }
 
 impl<U, O> Reader<U, O>

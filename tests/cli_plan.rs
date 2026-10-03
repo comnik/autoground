@@ -191,4 +191,18 @@ OR: Backend is part of the system
 (see backend/__init__.py)
 "
     );
+    let diagram_path = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("diagram available at "))
+        .expect("diagram path");
+    assert!(
+        diagram_path.starts_with("/tmp/autoground/diagram-") && diagram_path.ends_with(".mmd"),
+        "{diagram_path}"
+    );
+    let diagram = std::fs::read_to_string(diagram_path).unwrap();
+    assert!(diagram.starts_with("flowchart TD\n"), "{diagram}");
+    assert!(
+        !body.contains("Is this name a component or data?"),
+        "{body}"
+    );
 }

@@ -6,7 +6,7 @@ use crate::syntax::{Arg, Form, Formula, Ident, Program, Proposition, Reading, Se
 mod link;
 mod scan;
 
-pub use link::link;
+pub use link::{link, link_parts};
 pub use scan::{display_path, scan_namespaces, LoadError, Loaded};
 
 /// Names and senses visible through `:as` and `:refer`.
@@ -31,6 +31,133 @@ impl Imports {
             qualifiers: HashMap::new(),
             opened: HashMap::new(),
         }
+    }
+}
+
+/// Where a resolved name was declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameOrigin {
+    Declared,
+    Imported,
+}
+
+/// Names and senses a file can see through `:as` and `:refer`.
+///
+/// Local declarations stay with the file. This is only what other namespaces
+/// contribute, plus enough of each required namespace to resolve a qualifier.
+#[derive(Debug, Clone)]
+pub struct Vocabulary {
+    names: HashSet<String>,
+    senses: HashMap<String, Sense>,
+    qualifiers: HashMap<String, String>,
+    opened_names: HashMap<String, HashSet<String>>,
+    opened_senses: HashMap<String, HashMap<String, Sense>>,
+}
+
+impl Vocabulary {
+    pub fn none() -> Self {
+        Self {
+            names: HashSet::new(),
+            senses: HashMap::new(),
+            qualifiers: HashMap::new(),
+            opened_names: HashMap::new(),
+            opened_senses: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn from_imports(imports: &Imports) -> Self {
+        Self {
+            names: imports.names.clone(),
+            senses: imports.senses.clone(),
+            qualifiers: imports.qualifiers.clone(),
+            opened_names: imports
+                .opened
+                .iter()
+                .map(|(ns, opened)| (ns.clone(), opened.names.clone()))
+                .collect(),
+            opened_senses: imports
+                .opened
+                .iter()
+                .map(|(ns, opened)| (ns.clone(), opened.senses.clone()))
+                .collect(),
+        }
+    }
+
+    pub fn imported_names(&self) -> &HashSet<String> {
+        &self.names
+    }
+
+    pub fn imported_senses(&self) -> &HashMap<String, Sense> {
+        &self.senses
+    }
+
+    /// `declared` is the names this file can see, not the imported ones.
+    pub fn resolve_name(
+        &self,
+        ident: &Ident,
+        declared: &HashSet<String>,
+    ) -> Result<(String, NameOrigin), CompileError> {
+        if let Some(qualifier) = &ident.qualifier {
+            let namespace = self.required(qualifier)?;
+            if !self
+                .opened_names
+                .get(&namespace)
+                .is_some_and(|names| names.contains(&ident.name))
+            {
+                return Err(CompileError {
+                    message: format!("`{}` is not a name in `{namespace}`", ident.name),
+                });
+            }
+            return Ok((ident.name.clone(), NameOrigin::Imported));
+        }
+        if declared.contains(&ident.name) {
+            return Ok((ident.name.clone(), NameOrigin::Declared));
+        }
+        if self.names.contains(&ident.name) {
+            return Ok((ident.name.clone(), NameOrigin::Imported));
+        }
+        Err(CompileError {
+            message: format!("`{}` is not a declared name", ident.name),
+        })
+    }
+
+    /// `declared` is the senses this file can see, not the imported ones.
+    pub fn resolve_sense(
+        &self,
+        ident: &Ident,
+        declared: &HashMap<String, Sense>,
+    ) -> Result<Sense, CompileError> {
+        if let Some(qualifier) = &ident.qualifier {
+            let namespace = self.required(qualifier)?;
+            let Some(sense) = self
+                .opened_senses
+                .get(&namespace)
+                .and_then(|senses| senses.get(&ident.name))
+            else {
+                return Err(CompileError {
+                    message: format!("`{}` is not a sense in `{namespace}`", ident.name),
+                });
+            };
+            return Ok(sense.clone());
+        }
+        if let Some(sense) = declared.get(&ident.name) {
+            return Ok(sense.clone());
+        }
+        self.senses
+            .get(&ident.name)
+            .cloned()
+            .ok_or_else(|| CompileError {
+                message: format!("`{}` is not a declared sense", ident.name),
+            })
+    }
+
+    fn required(&self, qualifier: &str) -> Result<String, CompileError> {
+        self.qualifiers
+            .get(qualifier)
+            .cloned()
+            .ok_or_else(|| CompileError {
+                message: format!("`{qualifier}` is not a required namespace"),
+            })
     }
 }
 
@@ -288,7 +415,7 @@ fn resolve_detail(
     senses: &HashMap<String, Sense>,
     imports: &Imports,
 ) -> Result<Proposition, CompileError> {
-    let (names, senses) = extend(body, names, senses)?;
+    let (names, senses) = extend_scope(body, names, senses)?;
     let Proposition::Sentence(head) = resolve(head, &names, &senses, imports)? else {
         return Err(CompileError {
             message: "`detail` heads a sentence".into(),
@@ -308,7 +435,8 @@ fn resolve_detail(
     Ok(Proposition::Detail { head, body: claims })
 }
 
-fn extend(
+/// Names and senses declared in `body`, added to the enclosing scope.
+pub fn extend_scope(
     body: &[Form],
     names: &HashSet<String>,
     senses: &HashMap<String, Sense>,

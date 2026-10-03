@@ -166,6 +166,10 @@ impl<U, O> Search<U, O> {
     pub fn oracle_mut(&mut self) -> &mut O {
         &mut self.oracle
     }
+
+    pub fn into_oracle(self) -> O {
+        self.oracle
+    }
 }
 
 impl<U, O> Search<U, O>

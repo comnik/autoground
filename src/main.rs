@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use autoground::compiler::{link_parts, Vocabulary};
 use autoground::log::Log;
 use autoground::oracle::{Flight, HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::plan::Plan;
@@ -10,6 +11,7 @@ use autoground::read::{
     present_read, Finding, ReadTraceFile, Reader, Split, Stance, Verdict, DEFAULT_BODY_BYTES,
 };
 use autoground::report::context::write_context;
+use autoground::report::mermaid::{diagram_of, write_diagram, Diagram, Styles};
 use autoground::report::run::{Explain, Ground};
 use autoground::report::summary::print_run_summary;
 use autoground::search::trace::SearchStep;
@@ -19,8 +21,7 @@ use autoground::search::{
 };
 use autoground::universe::{Filesystem, Transcript, Universe};
 use autoground::{
-    compile, display_path, lect_source, link, parse, scan_namespaces, verbalize_proposition,
-    Proposition,
+    compile, display_path, lect_source, parse, scan_namespaces, verbalize_proposition, Proposition,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
@@ -529,7 +530,7 @@ fn run_read<U: Universe + Clone, O: Oracle>(
 }
 
 fn verbalize_cmd(input: &str, repo: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let (_src, _program, compiled) = load_compiled(input, repo)?;
+    let (_src, _program, compiled, _vocab) = load_compiled(input, repo)?;
     for claim in &compiled.claims {
         println!("{}", verbalize_proposition(claim));
     }
@@ -537,7 +538,7 @@ fn verbalize_cmd(input: &str, repo: &Path) -> Result<(), Box<dyn std::error::Err
 }
 
 fn plan_cmd(input: &str, repo: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let (_src, _program, compiled) = load_compiled(input, repo)?;
+    let (_src, _program, compiled, _vocab) = load_compiled(input, repo)?;
     let planned = Plan::of(&compiled);
     for atom in &planned.atoms {
         println!(
@@ -565,7 +566,8 @@ fn run_cmd(
     if let Some(live) = &live {
         live.show_planning()?;
     }
-    let (src, program, compiled) = load_compiled(input, repo)?;
+    let (src, program, compiled, vocab) = load_compiled(input, repo)?;
+    let mut diagram = diagram_of(&program, &vocab);
     let planned = Plan::of(&compiled);
     let log = Log::create()?;
     if let Some(live) = &live {
@@ -575,26 +577,34 @@ fn run_cmd(
             log.set_hook(move |event| ui.on_event(event));
         }
     }
-    let judged = if planned.atoms.is_empty() {
-        Judged {
-            values: Vec::new(),
-            grounds: Vec::new(),
-            stances: Vec::new(),
-            usage: Usage::default(),
-            flights: Vec::new(),
-            flight_limit: None,
-            splits: Vec::new(),
-        }
+    let (judged, styles) = if planned.atoms.is_empty() {
+        style_without_read(judge, &planned, &diagram, &log)?
     } else if let Some(path) = transcript {
         let universe = Transcript::open(path)?;
-        read_atoms(universe, judge, &planned.atoms, budget, &log)?
+        read_atoms(
+            universe,
+            judge,
+            &planned.atoms,
+            budget,
+            &log,
+            &planned,
+            &diagram,
+        )?
     } else {
         let mut universe = Filesystem::at_root(repo)?;
         let model = Path::new(input);
         if model.is_file() {
             universe.hide_model(model);
         }
-        read_atoms(universe, judge, &planned.atoms, budget, &log)?
+        read_atoms(
+            universe,
+            judge,
+            &planned.atoms,
+            budget,
+            &log,
+            &planned,
+            &diagram,
+        )?
     };
     log.clear_hook();
     let atom_values = judged.values;
@@ -623,6 +633,16 @@ fn run_cmd(
         }),
     )?;
     write_context(log.path(), &planned, &claim_values, &stances)?;
+    let contradicted: Vec<bool> = grounds
+        .iter()
+        .map(|ground| matches!(ground, Ground::Contradicted(_)))
+        .collect();
+    diagram.mark_contradicted(&autoground::report::mermaid::contradicted_sentences(
+        &planned,
+        &atom_values,
+        &contradicted,
+    ));
+    write_diagram(log.path(), &diagram, &styles)?;
     let true_count = claim_values
         .iter()
         .filter(|value| **value == autoground::Value::True)
@@ -659,10 +679,18 @@ fn run_cmd(
 fn load_compiled(
     input: &str,
     repo: &Path,
-) -> Result<(String, autoground::Program, autoground::Compiled), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        String,
+        autoground::Program,
+        autoground::Compiled,
+        Vocabulary,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let src = model_source(input)?;
     let program = parse(&src)?;
-    let compiled = if program
+    let (compiled, vocab) = if program
         .namespace
         .as_ref()
         .is_some_and(|ns| !ns.requires.is_empty())
@@ -670,11 +698,11 @@ fn load_compiled(
         let files = scan_namespaces(repo)?;
         let entry = Path::new(input);
         let entry_path = entry.is_file().then(|| display_path(repo, entry));
-        link(&program, entry_path.as_deref(), &files)?
+        link_parts(&program, entry_path.as_deref(), &files)?
     } else {
-        compile(&program)?
+        (compile(&program)?, Vocabulary::none())
     };
-    Ok((src, program, compiled))
+    Ok((src, program, compiled, vocab))
 }
 
 struct Judged {
@@ -687,26 +715,74 @@ struct Judged {
     splits: Vec<Split>,
 }
 
+impl Judged {
+    fn empty() -> Self {
+        Self {
+            values: Vec::new(),
+            grounds: Vec::new(),
+            stances: Vec::new(),
+            usage: Usage::default(),
+            flights: Vec::new(),
+            flight_limit: None,
+            splits: Vec::new(),
+        }
+    }
+}
+
 fn read_atoms<U: Universe + Clone>(
     universe: U,
     judge: JudgeKind,
     atoms: &[String],
     budget: usize,
     log: &Log,
-) -> Result<Judged, Box<dyn std::error::Error>> {
+    plan: &Plan,
+    diagram: &Diagram,
+) -> Result<(Judged, Styles), Box<dyn std::error::Error>> {
     match judge {
         JudgeKind::Heuristic => {
             let oracle = HeuristicOracle::new(universe.clone());
-            read_with(universe, oracle, atoms, budget, log)
+            let (judged, _) = read_with(universe, oracle, atoms, budget, log)?;
+            Ok((judged, Styles::plain()))
         }
-        JudgeKind::Jev => read_with(
-            universe,
-            JevOracle::from_env(log.clone())?,
-            atoms,
-            budget,
-            log,
-        ),
+        JudgeKind::Jev => {
+            let oracle = JevOracle::from_env(log.clone())?;
+            let (judged, oracle) = read_with(universe, oracle, atoms, budget, log)?;
+            Ok(styled(judged, oracle, plan, diagram, log))
+        }
     }
+}
+
+/// A lect with nothing to read still gets a diagram. Jev is opened only when
+/// there is a name or a sense to style.
+fn style_without_read(
+    judge: JudgeKind,
+    plan: &Plan,
+    diagram: &Diagram,
+    log: &Log,
+) -> Result<(Judged, Styles), Box<dyn std::error::Error>> {
+    let judged = Judged::empty();
+    if matches!(judge, JudgeKind::Jev) && diagram.has_style_questions() {
+        let oracle = JevOracle::from_env(log.clone())?;
+        return Ok(styled(judged, oracle, plan, diagram, log));
+    }
+    Ok((judged, Styles::plain()))
+}
+
+fn styled<O: Oracle>(
+    mut judged: Judged,
+    mut oracle: O,
+    plan: &Plan,
+    diagram: &Diagram,
+    log: &Log,
+) -> (Judged, Styles) {
+    log.clear_hook();
+    let claim_values = plan.evaluate(&judged.values);
+    let context = autoground::report::context::render(plan, &claim_values, &judged.stances);
+    let styles = Styles::ask(&mut oracle, diagram, &context);
+    judged.usage = oracle.usage();
+    judged.flights = oracle.flights().to_vec();
+    judged.flight_limit = oracle.flight_limit();
+    (judged, styles)
 }
 
 fn read_with<U: Universe + Clone, O: Oracle>(
@@ -715,7 +791,7 @@ fn read_with<U: Universe + Clone, O: Oracle>(
     atoms: &[String],
     budget: usize,
     log: &Log,
-) -> Result<Judged, Box<dyn std::error::Error>> {
+) -> Result<(Judged, O), Box<dyn std::error::Error>> {
     let mut reader = Reader::new(universe, oracle, budget, Some(log.clone()));
     let tickets: Vec<_> = atoms
         .iter()
@@ -734,15 +810,19 @@ fn read_with<U: Universe + Clone, O: Oracle>(
     let flight_limit = reader.flight_limit();
     let usage = reader.usage();
     let splits = reader.splits().to_vec();
-    Ok(Judged {
-        values,
-        grounds,
-        stances,
-        usage,
-        flights,
-        flight_limit,
-        splits,
-    })
+    let oracle = reader.into_oracle();
+    Ok((
+        Judged {
+            values,
+            grounds,
+            stances,
+            usage,
+            flights,
+            flight_limit,
+            splits,
+        },
+        oracle,
+    ))
 }
 
 fn ground_of<U>(finding: &Finding<U>) -> Ground {

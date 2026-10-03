@@ -27,6 +27,15 @@ pub fn link(
     entry_path: Option<&str>,
     files: &[Loaded],
 ) -> Result<Compiled, CompileError> {
+    Ok(link_parts(entry, entry_path, files)?.0)
+}
+
+/// [`link`], plus the vocabulary the entry can see through its requires.
+pub fn link_parts(
+    entry: &Program,
+    entry_path: Option<&str>,
+    files: &[Loaded],
+) -> Result<(Compiled, super::Vocabulary), CompileError> {
     let index = build_index(entry, entry_path, files)?;
     let order = dependency_order(entry, &index)?;
     for ns in &order {
@@ -37,7 +46,9 @@ pub fn link(
         })?;
     }
     let imports = environment(entry, &index)?;
-    compile_with(entry, &imports)
+    let vocab = super::Vocabulary::from_imports(&imports);
+    let compiled = compile_with(entry, &imports)?;
+    Ok((compiled, vocab))
 }
 
 fn build_index<'a>(
