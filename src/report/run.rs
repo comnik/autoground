@@ -3,8 +3,8 @@
 //! While requests are in flight, one status line names the sentence being
 //! judged. The working line stops short of the last column and leaves the
 //! last row free. When the check finishes, the view is the lect, printed
-//! once: a discharged claim carries a quiet mark, and an undischarged claim
-//! carries its failure comment on the clause that failed. `--explain all`
+//! once: each judged clause carries its own mark, and an undischarged clause
+//! carries its failure comment. `--explain all`
 //! also comments a discharged witness with the paths it cites. Piped output
 //! never draws this.
 
@@ -233,8 +233,8 @@ struct Mark {
 }
 
 struct ClaimPaint {
-    span: Range<usize>,
-    value: Value,
+    /// One glyph per clause, on the line that clause opens.
+    openers: Vec<Mark>,
     /// False and unknown clauses. A true clause is absent, so it stays plain.
     regions: Vec<Mark>,
 }
@@ -244,15 +244,26 @@ fn paints(clauses: &[ClauseSpan], claims: &[Node]) -> Vec<ClaimPaint> {
         .iter()
         .zip(claims)
         .map(|(clause, node)| {
+            let mut openers = Vec::new();
             let mut regions = Vec::new();
+            openers_of(node, clause, &mut openers);
             regions_of(node, clause, &mut regions);
-            ClaimPaint {
-                span: clause.span.clone(),
-                value: node.value,
-                regions,
-            }
+            ClaimPaint { openers, regions }
         })
         .collect()
+}
+
+/// Every judged clause opens with its own resolution, including the body of a detail.
+fn openers_of(node: &Node, clause: &ClauseSpan, out: &mut Vec<Mark>) {
+    out.push(Mark {
+        span: clause.span.clone(),
+        value: node.value,
+    });
+    if node.children.len() == clause.children.len() && !node.children.is_empty() {
+        for (child, span) in node.children.iter().zip(&clause.children) {
+            openers_of(child, span, out);
+        }
+    }
 }
 
 /// A compound that fails uniformly is one region, connective included.
@@ -400,9 +411,10 @@ fn line_ranges(source: &str) -> Vec<(usize, usize)> {
 fn source_line(source: &str, lo: usize, hi: usize, paints: &[ClaimPaint]) -> Row {
     let opener = paints
         .iter()
-        .filter(|paint| paint.span.start >= lo && paint.span.start < hi)
-        .max_by_key(|paint| rank(paint.value))
-        .map(|paint| paint.value);
+        .flat_map(|paint| paint.openers.iter())
+        .filter(|mark| mark.span.start >= lo && mark.span.start < hi)
+        .min_by_key(|mark| mark.span.start)
+        .map(|mark| mark.value);
     let regions = overlapping(paints, lo, hi);
     let mut pieces = vec![gutter(opener, &regions)];
     pieces.extend(content_pieces(source, lo, hi, &regions));
@@ -425,8 +437,9 @@ fn rank(value: Value) -> u8 {
     }
 }
 
-/// The claim's own glyph opens its first line. Later lines are barred only
-/// where a false or unknown clause sits, so a true clause stays plain.
+/// The clause's own glyph opens its first line. A detail's body does too.
+/// Later lines are barred only where a false or unknown clause sits, so a
+/// true clause stays plain.
 fn gutter(opener: Option<Value>, regions: &[&Mark]) -> Piece {
     if let Some(value) = opener {
         let (mark, tone) = match value {
@@ -839,11 +852,59 @@ mod tests {
         assert_eq!(text[0], "  ;; not entailed");
         assert!(text[1].starts_with("? (detail"), "{text:?}");
         assert!(
-            text.iter().any(|line| line.contains("(witness")
-                && !line.contains('✗')
-                && !line.contains('▌')),
+            text.iter()
+                .any(|line| line.starts_with('✓') && line.contains("(witness")),
             "{text:?}"
         );
+    }
+
+    #[test]
+    fn a_detail_marks_each_body_witness() {
+        let src = "\
+(detail (\"the head\")
+  (witness (\"search finds the window\") \"src/search.rs\")
+  (witness (\"nope\") \"gone.rs\"))
+";
+        let report = Report {
+            claims: vec![detail(
+                "the head",
+                Value::Unknown,
+                vec![
+                    leaf(
+                        "search finds the window",
+                        Value::True,
+                        None,
+                        &["src/search.rs"],
+                    ),
+                    leaf(
+                        "nope",
+                        Value::Unknown,
+                        Some(Failure::NotEntailed),
+                        &["gone.rs"],
+                    ),
+                ],
+                Some(Failure::NotEntailed),
+            )],
+        };
+        let rows = finished(src, &report, Explain::Contradictions);
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "  ;; not entailed".to_string(),
+                "? (detail (\"the head\")".to_string(),
+                "✓   (witness (\"search finds the window\") \"src/search.rs\")".to_string(),
+                "    ;; not entailed".to_string(),
+                "?   (witness (\"nope\") \"gone.rs\"))".to_string(),
+            ]
+        );
+        assert!(rows[4]
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::UnknownText && piece.text.contains("nope")));
+        assert!(rows[2].pieces.iter().any(|piece| {
+            piece.tone == Tone::Source && piece.text.contains("search finds the window")
+        }));
     }
 
     #[test]
