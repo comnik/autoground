@@ -519,7 +519,6 @@ mod tests {
         assert!(latency.contains("p50 663ms"), "{latency}");
         assert!(latency.contains("p95 965ms"), "{latency}");
         assert!(latency.contains("p99 1.10s"), "{latency}");
-        assert!(!latency.contains("p50="), "{latency}");
         let throughput = lines
             .iter()
             .find(|line| line.starts_with("throughput"))

@@ -1,9 +1,8 @@
 //! Classification oracle: enqueue questions, batch on wait.
 //!
-//! Callers (`search` and `read`) `submit` one classification at a time and
-//! `wait` when they need the label. The planner does not hold an oracle.
-//! Grouping is over the [`State`] the caller passed — typically a listing
-//! tree or a file body.
+//! `check` and `search` `submit` one classification at a time and `wait`
+//! when they need the label. Grouping is over the [`State`] the caller
+//! passed — typically a listing tree or a file body.
 
 pub mod jev;
 mod mock;

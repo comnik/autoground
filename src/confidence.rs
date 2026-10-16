@@ -18,10 +18,9 @@
 //!   (confidence-gated routing uses >0.85 for a transfer). An `entailed`
 //!   document may become a witness and a `contradicted` document may close
 //!   false.
-//! - [`RESOLVE`] is the same 0.85 for now. Taking a conflict Choice of
-//!   `true` or `false` in the face of mixed polar files is the same class
-//!   of automatic yes; a stricter split is a named constant so it can
-//!   move independently later.
+//! - [`RESOLVE`] is the same 0.85. Taking a conflict Choice of `true` or
+//!   `false` in the face of mixed polar files is the same class of automatic
+//!   yes.
 
 /// TypeSafe's floor for "the model is genuinely unsure; do not guess."
 ///
@@ -40,7 +39,7 @@ pub const SUPPORT: f64 = 0.85;
 ///
 /// Same number as [`SUPPORT`]: mixed polar files already disagree, and
 /// picking a side is the same class of automatic yes as a single-document
-/// witness. Own constant so it can rise independently later.
+/// witness.
 pub const RESOLVE: f64 = SUPPORT;
 
 /// Any verdict at [`SUPPORT`]: this document was a real look.

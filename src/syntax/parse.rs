@@ -588,7 +588,6 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
         }
         SexpKind::Symbol(head) if head == "detail" => lower_detail(s, xs),
         SexpKind::Symbol(head) if head == "witness" => lower_witness(s, xs),
-        SexpKind::Symbol(head) if is_retired(head) => Err(retired(head)),
         SexpKind::Symbol(head) => Ok((
             Formula::Apply {
                 reading: Reading::Sense(use_symbol(&xs[0], head)?),
@@ -840,23 +839,6 @@ fn reject_reserved(s: &Sexp, spelling: &str) -> Result<(), ParseError> {
     }
 }
 
-fn is_retired(head: &str) -> bool {
-    matches!(
-        head,
-        "require" | "def" | "declare" | "forall" | "exists" | "implies"
-    )
-}
-
-fn retired(head: &str) -> ParseError {
-    err(
-        1,
-        1,
-        format!(
-            "`{head}` is not in this language; a model is names, senses, and `and` / `or` / `not`"
-        ),
-    )
-}
-
 fn err(line: usize, col: usize, message: impl Into<String>) -> ParseError {
     ParseError {
         line,
@@ -904,21 +886,6 @@ mod tests {
     fn repeated_hole_labels_stay_in_order() {
         let program = parse(r#"(sense part_of "{Name} is a part of {Name}")"#).unwrap();
         assert_eq!(program.senses().next().unwrap().holes, vec!["Name", "Name"]);
-    }
-
-    #[test]
-    fn rejects_retired_forms() {
-        for src in [
-            "(require (component \"Frontend\"))",
-            "(def depends_on [x y] (component x))",
-            "(declare component \"{String} is a component\")",
-            "(forall [x] (component x))",
-            "(exists [f] (file f))",
-            "(implies (component \"A\") (component \"B\"))",
-        ] {
-            let err = parse(src).unwrap_err();
-            assert!(err.message.contains("not in this language"), "{src}: {err}");
-        }
     }
 
     #[test]
@@ -1117,12 +1084,6 @@ mod tests {
             qualified.message.contains("Clojure identifier"),
             "{qualified}"
         );
-    }
-
-    #[test]
-    fn require_at_top_level_stays_retired() {
-        let err = parse("(require (component \"Frontend\"))").unwrap_err();
-        assert!(err.message.contains("not in this language"), "{err}");
     }
 
     #[test]

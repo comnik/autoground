@@ -1,11 +1,10 @@
 //! Re-check a lect against the files it cites.
 //!
-//! A lect is a mental model already worked out with an agent. Check
-//! re-validates it as the codebase changes. A witness is one sentence judged
-//! against the bodies of its paths. A detail is discharged when its body is
-//! discharged and those immediate sentences entail the head. A sentence that
-//! a detail defines is a use of that lemma: it takes the lemma's value, and
-//! the proof is not asked again. `and`, `or`, and `not` stay Kleene.
+//! A witness is one sentence judged against the bodies of its paths. A detail
+//! is discharged when its body is discharged and those immediate sentences
+//! entail the head. A sentence that a detail defines is a use of that lemma:
+//! it takes the lemma's value, and the proof is not asked again. `and`, `or`,
+//! and `not` stay Kleene.
 //!
 //! A file larger than the body budget is sliced into parts. The witness is
 //! discharged when one part entails the sentence, so the proof cites the file

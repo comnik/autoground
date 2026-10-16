@@ -46,8 +46,7 @@ pub enum Arg {
     Literal(String),
 }
 
-/// A ground claim. `and`, `or`, `not`, `detail`, and `witness` are left for
-/// the planner and the checker.
+/// A ground claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Formula {
     And(Vec<Formula>),

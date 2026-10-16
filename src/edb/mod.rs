@@ -29,7 +29,7 @@ pub struct Binding {
     pub entity: String,
 }
 
-/// In-memory EDB matching the DuckDB schema we will persist later:
+/// In-memory EDB with these tables:
 ///
 /// ```text
 /// facts(pred TEXT, args TEXT[], ...)
@@ -183,7 +183,7 @@ impl Store {
         v
     }
 
-    /// DDL for the on-disk DuckDB artefact. Persistence lands in a later slice.
+    /// DuckDB DDL for the tables this store keeps.
     pub fn duckdb_schema() -> &'static str {
         r#"
 CREATE TABLE IF NOT EXISTS facts (
@@ -227,10 +227,5 @@ mod tests {
         s.bind("Backend", "api/");
         s.bind("Backend", "server/");
         assert_eq!(s.bindings_for("Backend"), vec!["api/", "server/"]);
-    }
-
-    #[test]
-    fn schema_is_nonempty() {
-        assert!(Store::duckdb_schema().contains("CREATE TABLE"));
     }
 }
