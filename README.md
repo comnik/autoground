@@ -93,9 +93,10 @@ reads file contents.
 
 `autoground check` is how a lect is judged. A witness cites one or more repo-relative
 files, and those bodies are judged together. A file longer than the body budget is sliced;
-the witness is discharged when one part entails the sentence. A detail is an inference
-step: the head is discharged when every body claim is discharged and the body sentences
-entail the head. A later citation of that head takes the proved value. `and`, `or`, and
+the witness is discharged when one part entails the sentence. `--budget` is the cost cap
+in cents and defaults to 1. The request that crosses the cap still finishes; later
+requests are refused. A detail is an inference step: the head is discharged when every
+body claim is discharged and the body sentences entail the head. A later citation of that head takes the proved value. `and`, `or`, and
 `not` stay Kleene. A bare sentence is unpinned.
 
 Exit status is 0 when every top-level claim is discharged, 1 otherwise, and 3 on a

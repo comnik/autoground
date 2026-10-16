@@ -23,8 +23,9 @@ const MAX_RETRIES: u32 = 4;
 pub const POST_PARALLELISM: usize = 16;
 /// Published Jev input price. Output tokens are unmetered.
 const INPUT_USD_PER_MILLION_TOKENS: f64 = 0.042;
-/// Hard cap on recorded Jev spend for one oracle instance.
-const RUN_COST_LIMIT_USD: f64 = 0.01;
+/// Default cap, in cents, on recorded Jev spend for one oracle instance.
+pub const DEFAULT_RUN_COST_CENTS: u64 = 1;
+const RUN_COST_LIMIT_USD: f64 = DEFAULT_RUN_COST_CENTS as f64 / 100.0;
 /// Max Choice questions in one System One POST.
 pub const QUESTION_BUDGET: usize = 100;
 /// Documented Jev cap on `state` plus the longest question. Fill uses billed
@@ -155,6 +156,7 @@ pub struct JevOracle<T: Transport = UreqTransport> {
     next_ticket: u64,
     pending: Vec<Pending>,
     resolved: HashMap<Ticket, Result<Answer, OracleError>>,
+    cost_limit_usd: f64,
     spent_usd: f64,
     input_tokens: u64,
     requests: u64,
@@ -222,6 +224,7 @@ impl<T: Transport> JevOracle<T> {
             next_ticket: 0,
             pending: Vec::new(),
             resolved: HashMap::new(),
+            cost_limit_usd: RUN_COST_LIMIT_USD,
             spent_usd: 0.0,
             input_tokens: 0,
             requests: 0,
@@ -247,15 +250,21 @@ impl<T: Transport> JevOracle<T> {
         self.spent_usd = spent;
     }
 
+    /// Cap recorded spend for this oracle. The request that crosses the cap
+    /// is kept. Later posts return [`OracleError::Limit`].
+    pub fn set_run_cost_limit_usd(&mut self, limit_usd: f64) {
+        self.cost_limit_usd = limit_usd;
+    }
+
     fn budget_error(&self) -> OracleError {
         OracleError::Limit(format!(
             "run cost limit of ${:.2} exceeded (spent ${:.4})",
-            RUN_COST_LIMIT_USD, self.spent_usd
+            self.cost_limit_usd, self.spent_usd
         ))
     }
 
     fn over_budget(&self) -> bool {
-        self.spent_usd >= RUN_COST_LIMIT_USD
+        self.spent_usd >= self.cost_limit_usd
     }
 
     fn add_spend(&mut self, cost: Option<f64>) {
@@ -868,6 +877,26 @@ mod tests {
         assert!(matches!(err, OracleError::Limit(_)), "{err}");
         assert!(err.to_string().contains("$0.01"));
         assert_eq!(o.transport.bodies.len(), 1);
+    }
+
+    #[test]
+    fn a_raised_cost_limit_is_the_refusal_amount() {
+        let response = |key: &str| {
+            json!({
+                "answers": { key: { "type": "choice", "choice": "yes", "confidence": 0.9 } },
+                "usage": { "input_tokens": 10, "cost_usd": 0.03 }
+            })
+        };
+        let mut o = oracle(vec![response("q0"), response("q1"), response("q2")]);
+        o.set_run_cost_limit_usd(0.05);
+        let first = o.submit(classify(json!({"n": 1}), "a"));
+        o.wait(first).unwrap();
+        let second = o.submit(classify(json!({"n": 2}), "b"));
+        o.wait(second).unwrap();
+        let third = o.submit(classify(json!({"n": 3}), "c"));
+        let err = o.wait(third).unwrap_err();
+        assert!(err.to_string().contains("$0.05"), "{err}");
+        assert_eq!(o.transport.bodies.len(), 2);
     }
 
     #[test]

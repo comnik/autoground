@@ -4,9 +4,7 @@
 //! judged. The working line stops short of the last column and leaves the
 //! last row free. When the check finishes, the view is the lect, printed
 //! once: each judged clause carries its own mark, and an undischarged clause
-//! carries its failure comment. `--explain all`
-//! also comments a discharged witness with the paths it cites. Piped output
-//! never draws this.
+//! carries its failure comment. Piped output never draws this.
 
 use std::io::{self, stdout, Write};
 use std::ops::Range;
@@ -36,8 +34,6 @@ enum Tone {
     UnknownText,
     /// A `;;` comment on a false clause. Red, but not the bold violation mark.
     FalseNote,
-    /// A `;;` comment on a true clause.
-    TrueNote,
 }
 
 enum Mode {
@@ -111,11 +107,11 @@ impl CheckView {
         self.tick = self.tick.wrapping_add(1);
     }
 
-    fn finish(&mut self, source: &str, clauses: &[ClauseSpan], report: &Report, explain: Explain) {
+    fn finish(&mut self, source: &str, clauses: &[ClauseSpan], report: &Report) {
         self.mode = Mode::Done;
         self.sentence.clear();
         let paints = paints(clauses, &report.claims);
-        let notes = notes(clauses, &report.claims, explain);
+        let notes = notes(clauses, &report.claims);
         self.done = source_rows(source, &paints, &notes);
     }
 
@@ -207,7 +203,7 @@ fn fit(text: &str, width: usize) -> String {
 fn tone_color(tone: Tone) -> Option<Color> {
     Some(match tone {
         Tone::Rule => Color::DarkGrey,
-        Tone::TrueMark | Tone::TrueNote => Color::DarkGreen,
+        Tone::TrueMark => Color::DarkGreen,
         Tone::FalseMark | Tone::FalseText | Tone::FalseNote => Color::Red,
         Tone::UnknownMark | Tone::UnknownText => Color::Yellow,
         Tone::Source => return None,
@@ -216,15 +212,6 @@ fn tone_color(tone: Tone) -> Option<Color> {
 
 fn tone_is_bold(tone: Tone) -> bool {
     matches!(tone, Tone::FalseMark | Tone::FalseText)
-}
-
-/// How much of a finished claim to annotate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Explain {
-    /// Comment undischarged clauses only.
-    Contradictions,
-    /// Also comment each discharged witness with the paths it cites.
-    All,
 }
 
 struct Mark {
@@ -301,32 +288,18 @@ struct Note {
     tone: Tone,
 }
 
-fn notes(clauses: &[ClauseSpan], claims: &[Node], explain: Explain) -> Vec<Note> {
+fn notes(clauses: &[ClauseSpan], claims: &[Node]) -> Vec<Note> {
     let mut out = Vec::new();
     for (clause, node) in clauses.iter().zip(claims) {
-        notes_of(node, clause, explain, false, &mut out);
+        notes_of(node, clause, false, &mut out);
     }
     out
 }
 
 /// `parent_holds` means an ancestor is already true, so a false clause inside
 /// it is not why the claim failed.
-fn notes_of(
-    node: &Node,
-    clause: &ClauseSpan,
-    explain: Explain,
-    parent_holds: bool,
-    out: &mut Vec<Note>,
-) {
-    if node.value == Value::True {
-        if explain == Explain::All && !node.cites.is_empty() {
-            out.push(Note {
-                at: clause.span.start,
-                text: format!(";; {}", node.cites.join(", ")),
-                tone: Tone::TrueNote,
-            });
-        }
-    } else if !parent_holds {
+fn notes_of(node: &Node, clause: &ClauseSpan, parent_holds: bool, out: &mut Vec<Note>) {
+    if node.value != Value::True && !parent_holds {
         if let Some(failure) = failure_comment(node) {
             out.push(Note {
                 at: clause.span.start,
@@ -338,7 +311,7 @@ fn notes_of(
     if node.children.len() == clause.children.len() && !node.children.is_empty() {
         let holds = parent_holds || node.value == Value::True;
         for (child, span) in node.children.iter().zip(&clause.children) {
-            notes_of(child, span, explain, holds, out);
+            notes_of(child, span, holds, out);
         }
     }
 }
@@ -352,10 +325,10 @@ fn failure_comment(node: &Node) -> Option<&Failure> {
 }
 
 fn note_tone(value: Value) -> Tone {
-    match value {
-        Value::False => Tone::FalseNote,
-        Value::Unknown => Tone::UnknownMark,
-        Value::True => Tone::TrueNote,
+    if value == Value::False {
+        Tone::FalseNote
+    } else {
+        Tone::UnknownMark
     }
 }
 
@@ -589,15 +562,9 @@ impl Live {
         let _ = body.draw();
     }
 
-    pub fn finish(
-        &self,
-        source: &str,
-        clauses: &[ClauseSpan],
-        report: &Report,
-        explain: Explain,
-    ) -> io::Result<()> {
+    pub fn finish(&self, source: &str, clauses: &[ClauseSpan], report: &Report) -> io::Result<()> {
         let mut body = self.lock();
-        body.view.finish(source, clauses, report, explain);
+        body.view.finish(source, clauses, report);
         body.draw()
     }
 
@@ -673,10 +640,10 @@ mod tests {
         }
     }
 
-    fn finished(src: &str, report: &Report, explain: Explain) -> Vec<Row> {
+    fn finished(src: &str, report: &Report) -> Vec<Row> {
         let program = parse(src).unwrap();
         let mut view = CheckView::checking();
-        view.finish(src, &program.clauses, report, explain);
+        view.finish(src, &program.clauses, report);
         view.rows(160)
     }
 
@@ -767,7 +734,7 @@ mod tests {
                 ),
             ],
         };
-        let rows = finished(src, &report, Explain::Contradictions);
+        let rows = finished(src, &report);
         let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
         assert_eq!(
             text,
@@ -812,7 +779,7 @@ mod tests {
                 ],
             )],
         };
-        let rows = finished(src, &report, Explain::Contradictions);
+        let rows = finished(src, &report);
         let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
         assert!(
             text.iter().any(|line| line.contains(";; contradicted")),
@@ -847,7 +814,7 @@ mod tests {
                 Some(Failure::NotEntailed),
             )],
         };
-        let rows = finished(src, &report, Explain::Contradictions);
+        let rows = finished(src, &report);
         let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
         assert_eq!(text[0], "  ;; not entailed");
         assert!(text[1].starts_with("? (detail"), "{text:?}");
@@ -886,7 +853,7 @@ mod tests {
                 Some(Failure::NotEntailed),
             )],
         };
-        let rows = finished(src, &report, Explain::Contradictions);
+        let rows = finished(src, &report);
         let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
         assert_eq!(
             text,
@@ -905,33 +872,5 @@ mod tests {
         assert!(rows[2].pieces.iter().any(|piece| {
             piece.tone == Tone::Source && piece.text.contains("search finds the window")
         }));
-    }
-
-    #[test]
-    fn explain_all_cites_a_discharged_witness() {
-        let src = "(witness (\"search finds the window\") \"src/search.rs\")\n";
-        let report = Report {
-            claims: vec![leaf(
-                "search finds the window",
-                Value::True,
-                None,
-                &["src/search.rs"],
-            )],
-        };
-        let quiet = finished(src, &report, Explain::Contradictions);
-        assert!(quiet.iter().all(|row| !row.plain().contains(";;")));
-        let rows = finished(src, &report, Explain::All);
-        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
-        assert_eq!(
-            text,
-            vec![
-                "  ;; src/search.rs".to_string(),
-                "✓ (witness (\"search finds the window\") \"src/search.rs\")".to_string(),
-            ]
-        );
-        assert!(rows[0]
-            .pieces
-            .iter()
-            .any(|piece| piece.tone == Tone::TrueNote));
     }
 }

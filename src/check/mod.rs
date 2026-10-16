@@ -24,7 +24,7 @@ use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, S
 use crate::syntax::Proposition;
 use crate::value::Value;
 
-/// Largest body sent in one request, unless `--budget` says otherwise.
+/// Largest body sent in one request.
 pub const DEFAULT_BODY_BYTES: usize = 128 * 1024;
 
 /// A single file larger than this is too large to slice.

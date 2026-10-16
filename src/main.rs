@@ -6,10 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use autoground::check::{self, write_report, DEFAULT_BODY_BYTES};
 use autoground::compiler::{link_parts, Vocabulary};
 use autoground::log::{Log, DEFAULT_TRACE_DIR};
+use autoground::oracle::jev::DEFAULT_RUN_COST_CENTS;
 use autoground::oracle::{HeuristicOracle, JevOracle, Oracle, Usage};
 use autoground::report::context::write_context;
 use autoground::report::mermaid::{diagram_of, write_diagram, Diagram, Styles};
-use autoground::report::run::Explain;
 use autoground::report::summary::print_run_summary;
 use autoground::search::trace::SearchStep;
 use autoground::search::trace::UsageRecord;
@@ -36,38 +36,21 @@ enum JudgeKind {
     Heuristic,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum ExplainMode {
-    /// Comment each undischarged clause with its failure.
-    Contradictions,
-    /// Also comment each discharged witness with the paths it cites.
-    All,
-}
-
-impl From<ExplainMode> for Explain {
-    fn from(mode: ExplainMode) -> Self {
-        match mode {
-            ExplainMode::Contradictions => Explain::Contradictions,
-            ExplainMode::All => Explain::All,
-        }
-    }
-}
-
 #[derive(Subcommand)]
 enum Commands {
     /// Re-check a lect against the files its witnesses cite.
     ///
     /// A witness is one sentence judged on those bodies together. A file
-    /// longer than `--budget` is sent in parts, and the sentence is discharged
-    /// when one part entails it. A detail is discharged when its body is
-    /// discharged and those sentences entail the head. On a terminal the
+    /// longer than the body budget is sent in parts, and the sentence is
+    /// discharged when one part entails it. A detail is discharged when its
+    /// body is discharged and those sentences entail the head. `--budget`
+    /// caps this run in cents and defaults to 1. On a terminal the
     /// spinner names the sentence in flight, and the finished view is the
-    /// lect: a discharged claim carries a quiet mark, and an undischarged
-    /// claim carries its failure comment. `--explain all` also comments a
-    /// discharged witness with the paths it cites. The trace, the context, and
-    /// the diagram are written in a new directory under `/tmp/autoground/`,
-    /// or under `--out`. Exit status is 1 when a top-level claim is
-    /// not discharged.
+    /// lect: each judged clause carries its own mark, and an undischarged
+    /// clause carries its failure comment. The trace, the context, and the
+    /// diagram are written in a new directory under `/tmp/autoground/`, or
+    /// under `--out`. Exit status is 1 when a top-level claim is not
+    /// discharged.
     ///
     /// Examples:
     ///   autoground check examples/search-calls-oracle.lect --repo .
@@ -78,13 +61,10 @@ enum Commands {
         /// Repository the witness paths are relative to. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
-        /// Largest file body, in bytes, sent in one request. A longer single
-        /// file is sent in parts.
-        #[arg(long, default_value_t = DEFAULT_BODY_BYTES)]
-        budget: usize,
-        /// Comments in the finished view. Defaults to undischarged clauses.
-        #[arg(long, value_enum, default_value_t = ExplainMode::Contradictions)]
-        explain: ExplainMode,
+        /// Cost cap for this check, in cents. The request that crosses the
+        /// cap still finishes. Later requests are refused.
+        #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
+        budget: u64,
         /// Parent directory for this check. A new subdirectory holds
         /// `trace.jsonl`, `context.md`, and `diagram.mmd`.
         /// Defaults to `/tmp/autoground`.
@@ -135,9 +115,8 @@ fn main() -> ExitCode {
             input,
             repo,
             budget,
-            explain,
             out,
-        } => match check_cmd(&input, &repo, budget, explain, out.as_deref()) {
+        } => match check_cmd(&input, &repo, budget, out.as_deref()) {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
                 eprintln!("{err}");
@@ -299,8 +278,7 @@ fn run_search<U: Universe + Clone, O: Oracle>(
 fn check_cmd(
     input: &str,
     repo: &Path,
-    budget: usize,
-    explain: ExplainMode,
+    budget_cents: u64,
     out: Option<&Path>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let started = std::time::Instant::now();
@@ -319,17 +297,16 @@ fn check_cmd(
         log.set_hook(move |event| ui.on_event(event));
     }
     let mut oracle = JevOracle::from_env(log.clone())?;
+    oracle.set_run_cost_limit_usd(budget_cents as f64 / 100.0);
     finish_check(
         &src,
         &program,
         &compiled.claims,
         repo,
-        budget,
         &mut oracle,
         &mut diagram,
         &log,
         live,
-        explain.into(),
         started,
     )
 }
@@ -339,15 +316,13 @@ fn finish_check<O: Oracle>(
     program: &autoground::Program,
     claims: &[Proposition],
     repo: &Path,
-    budget: usize,
     oracle: &mut O,
     diagram: &mut Diagram,
     log: &Log,
     live: Option<autoground::report::run::Live>,
-    explain: Explain,
     started: std::time::Instant,
 ) -> Result<u8, Box<dyn std::error::Error>> {
-    let report = check::check(claims, repo, budget, oracle)?;
+    let report = check::check(claims, repo, DEFAULT_BODY_BYTES, oracle)?;
     log.clear_hook();
     let context = autoground::report::context::render(&report);
     let styles = if diagram.has_style_questions() {
@@ -384,7 +359,7 @@ fn finish_check<O: Oracle>(
     diagram.mark_contradicted(&check::contradicted_sentences(&report));
     write_diagram(log.path(), diagram, &styles)?;
     if let Some(live) = live {
-        live.finish(src, &program.clauses, &report, explain)?;
+        live.finish(src, &program.clauses, &report)?;
     } else {
         print!("{}", write_report(&report));
     }
