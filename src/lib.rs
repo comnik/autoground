@@ -1,10 +1,9 @@
+pub mod check;
 pub mod compiler;
 pub mod confidence;
 pub mod edb;
 pub mod log;
 pub mod oracle;
-pub mod plan;
-pub mod read;
 pub mod report;
 pub mod search;
 pub mod syntax;
@@ -16,10 +15,8 @@ pub use compiler::{
 };
 pub use edb::Store;
 pub use log::Log;
-pub use plan::Plan;
 pub use syntax::{
-    extract_lects, lect_source, parse, print_formula, print_program, verbalize_proposition,
-    verbalize_source, Form, Formula, MarkdownError, ParseError, Program, Proposition, Reading,
-    Sense, VerbalizeError,
+    extract_lects, lect_source, parse, print_formula, print_program, Form, Formula, MarkdownError,
+    ParseError, Program, Proposition, Reading, Sense,
 };
 pub use value::Value;

@@ -587,6 +587,7 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
             Ok((Formula::Not(Box::new(inner)), clause(vec![child])))
         }
         SexpKind::Symbol(head) if head == "detail" => lower_detail(s, xs),
+        SexpKind::Symbol(head) if head == "witness" => lower_witness(s, xs),
         SexpKind::Symbol(head) if is_retired(head) => Err(retired(head)),
         SexpKind::Symbol(head) => Ok((
             Formula::Apply {
@@ -647,6 +648,34 @@ fn lower_detail(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseErr
     ))
 }
 
+fn lower_witness(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseError> {
+    if xs.len() < 3 {
+        return Err(err_at(&xs[0], "`witness` takes a sentence and a path"));
+    }
+    let (fact, child) = lower_formula(&xs[1])?;
+    if !matches!(fact, Formula::Apply { .. }) {
+        return Err(err_at(&xs[1], "`witness` cites a sentence"));
+    }
+    let mut paths = Vec::with_capacity(xs.len() - 2);
+    for item in &xs[2..] {
+        match &item.kind {
+            SexpKind::String(text) if !text.is_empty() => paths.push(text.clone()),
+            SexpKind::String(_) => return Err(err_at(item, "a witness path is not empty")),
+            _ => return Err(err_at(item, "a witness path is a string")),
+        }
+    }
+    Ok((
+        Formula::Witness {
+            fact: Box::new(fact),
+            paths,
+        },
+        ClauseSpan {
+            span: s.span.clone(),
+            children: vec![child],
+        },
+    ))
+}
+
 fn lower_formulas(xs: &[Sexp]) -> Result<(Vec<Formula>, Vec<ClauseSpan>), ParseError> {
     let mut forms = Vec::with_capacity(xs.len());
     let mut spans = Vec::with_capacity(xs.len());
@@ -670,18 +699,89 @@ fn lower_arg(s: &Sexp) -> Result<Arg, ParseError> {
     }
 }
 
+/// A symbol the Clojure reader would accept as an unqualified name.
+///
+/// `/` is only the qualifier separator. A token the reader would take as a
+/// number, or that starts with a reader macro, is not a name.
+fn is_clojure_identifier(spelling: &str) -> bool {
+    let Some(first) = spelling.chars().next() else {
+        return false;
+    };
+    if first.is_ascii_digit()
+        || first == ':'
+        || is_reader_macro(first)
+        || is_numeric_literal(spelling)
+    {
+        return false;
+    }
+    if spelling.ends_with(':') || spelling.contains("::") {
+        return false;
+    }
+    spelling.chars().all(is_symbol_constituent)
+}
+
+fn is_reader_macro(c: char) -> bool {
+    matches!(
+        c,
+        '"' | ';'
+            | '\''
+            | '@'
+            | '^'
+            | '`'
+            | '~'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '\\'
+            | '%'
+            | '#'
+    )
+}
+
+fn is_symbol_constituent(c: char) -> bool {
+    !c.is_whitespace() && c != ',' && c != '/' && !is_terminating_macro(c)
+}
+
+fn is_terminating_macro(c: char) -> bool {
+    is_reader_macro(c) && !matches!(c, '#' | '\'' | '%')
+}
+
+fn is_numeric_literal(spelling: &str) -> bool {
+    let rest = spelling
+        .strip_prefix('+')
+        .or_else(|| spelling.strip_prefix('-'))
+        .unwrap_or(spelling);
+    !rest.is_empty() && rest.starts_with(|c: char| c.is_ascii_digit())
+}
+
+fn require_identifier(s: &Sexp, spelling: &str) -> Result<(), ParseError> {
+    if is_clojure_identifier(spelling) {
+        Ok(())
+    } else {
+        Err(err_at(
+            s,
+            format!("`{spelling}` is not a Clojure identifier"),
+        ))
+    }
+}
+
 fn declared_symbol(s: &Sexp, what: &str) -> Result<String, ParseError> {
     let spelling = expect_symbol(s, &format!("a {what} must be a symbol"))?;
     if spelling.contains('/') {
         return Err(err_at(s, format!("a {what} takes no qualifier")));
     }
     reject_reserved(s, &spelling)?;
+    require_identifier(s, &spelling)?;
     Ok(spelling)
 }
 
 fn use_symbol(s: &Sexp, spelling: &str) -> Result<Ident, ParseError> {
     let slashes = spelling.matches('/').count();
     if slashes == 0 {
+        require_identifier(s, spelling)?;
         return Ok(Ident {
             qualifier: None,
             name: spelling.to_string(),
@@ -694,6 +794,8 @@ fn use_symbol(s: &Sexp, spelling: &str) -> Result<Ident, ParseError> {
     if qualifier.is_empty() || name.is_empty() {
         return Err(err_at(s, "a `/` needs a qualifier and a name"));
     }
+    require_identifier(s, qualifier)?;
+    require_identifier(s, name)?;
     Ok(Ident {
         qualifier: Some(qualifier.to_string()),
         name: name.to_string(),
@@ -727,7 +829,7 @@ fn expect_symbol(s: &Sexp, message: &str) -> Result<String, ParseError> {
 fn reject_reserved(s: &Sexp, spelling: &str) -> Result<(), ParseError> {
     if matches!(
         spelling,
-        "name" | "sense" | "ns" | "and" | "or" | "not" | "detail"
+        "name" | "sense" | "ns" | "and" | "or" | "not" | "detail" | "witness"
     ) {
         Err(err_at(
             s,
@@ -845,6 +947,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_witness_fact_then_paths() {
+        let src = r#"
+(witness ("Search posts listings to the oracle") "src/search/mod.rs" "src/oracle/jev.rs")
+"#;
+        let formula = parse(src).unwrap().claims().next().unwrap().clone();
+        let Formula::Witness { fact, paths } = formula else {
+            panic!("witness");
+        };
+        assert!(matches!(fact.as_ref(), Formula::Apply { .. }));
+        assert_eq!(
+            paths,
+            vec![
+                "src/search/mod.rs".to_string(),
+                "src/oracle/jev.rs".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_a_witness_that_is_not_a_cited_sentence() {
+        for (src, needle) in [
+            ("(witness)", "takes a sentence"),
+            ("(witness (\"only the fact\"))", "takes a sentence"),
+            (
+                "(witness (and (\"a\") (\"b\")) \"a.rs\")",
+                "cites a sentence",
+            ),
+            ("(witness (\"a\") path)", "path is a string"),
+            ("(witness (\"a\") \"\")", "not empty"),
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(err.message.contains(needle), "{src}: {err}");
+        }
+    }
+
+    #[test]
     fn rejects_a_detail_that_cannot_be_a_lect() {
         for (src, needle) in [
             ("(detail)", "takes a sentence"),
@@ -853,6 +991,7 @@ mod tests {
             ("(detail (\"h\") (name Only))", "no claim"),
             ("(name detail)", "reserved"),
             ("(sense detail \"{X}\")", "reserved"),
+            ("(name witness)", "reserved"),
         ] {
             let err = parse(src).unwrap_err();
             assert!(err.message.contains(needle), "{src}: {err}");
@@ -946,6 +1085,38 @@ mod tests {
         }
         let slash = parse("(name A)\n(sense s \"{X}\")\n(s a/b/c)").unwrap_err();
         assert!(slash.message.contains("at most one"), "{slash}");
+    }
+
+    #[test]
+    fn a_name_is_a_clojure_identifier() {
+        let program = parse(
+            "(sense lemma-1 \"irrational\")\n(sense even? \"even\")\n(name executor.Executor)\n",
+        )
+        .unwrap();
+        let senses: Vec<_> = program.senses().map(|sense| sense.name.as_str()).collect();
+        assert_eq!(senses, vec!["lemma-1", "even?"]);
+        assert_eq!(
+            program.names().collect::<Vec<_>>(),
+            vec!["executor.Executor"]
+        );
+        for src in [
+            "(name 1)",
+            "(name +1)",
+            "(name foo@bar)",
+            "(name :kw)",
+            "(sense lemma/1 \"x\")",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(
+                err.message.contains("Clojure identifier") || err.message.contains("no qualifier"),
+                "{src}: {err}"
+            );
+        }
+        let qualified = parse("(sense calls \"{X}\")\n(calls lemma/1)").unwrap_err();
+        assert!(
+            qualified.message.contains("Clojure identifier"),
+            "{qualified}"
+        );
     }
 
     #[test]

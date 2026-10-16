@@ -1,0 +1,16 @@
+(name Search)
+(name Oracle)
+(name P)
+(name NP)
+(sense calls "{caller} calls {callee}")
+(sense equals "{X} = {Y}")
+
+(detail (equals P NP)
+;;(detail (calls Search Oracle)
+  (witness
+    ("Search asks the oracle to classify directory listings")
+    "src/search/mod.rs")
+  (witness
+    ("Search's oracle posts are the Jev HTTP call")
+    "src/search/mod.rs"
+    "src/oracle/jev.rs"))

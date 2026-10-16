@@ -102,6 +102,15 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
             }
             out.push(')');
         }
+        Formula::Witness { fact, paths } => {
+            out.push_str("(witness ");
+            write_formula(fact, indent, out);
+            for path in paths {
+                out.push(' ');
+                out.push_str(&quote_const(path));
+            }
+            out.push(')');
+        }
         Formula::Apply { reading, args } => {
             out.push('(');
             match reading {

@@ -24,7 +24,7 @@ pub const POST_PARALLELISM: usize = 16;
 /// Published Jev input price. Output tokens are unmetered.
 const INPUT_USD_PER_MILLION_TOKENS: f64 = 0.042;
 /// Hard cap on recorded Jev spend for one oracle instance.
-const RUN_COST_LIMIT_USD: f64 = 1.0;
+const RUN_COST_LIMIT_USD: f64 = 0.01;
 /// Max Choice questions in one System One POST.
 pub const QUESTION_BUDGET: usize = 100;
 /// Documented Jev cap on `state` plus the longest question. Fill uses billed
@@ -186,9 +186,7 @@ impl JevOracle<UreqTransport> {
     /// The live client needs `TYPESAFE_API_KEY`. A missing key fails before any POST.
     pub fn require_api_key() -> Result<(), OracleError> {
         if std::env::var("TYPESAFE_API_KEY").is_err() {
-            return Err(OracleError::Config(
-                "TYPESAFE_API_KEY is not set; pass --judge heuristic or set the key".into(),
-            ));
+            return Err(OracleError::Config("TYPESAFE_API_KEY is not set".into()));
         }
         Ok(())
     }
@@ -868,7 +866,7 @@ mod tests {
         let t1 = o.submit(classify(json!({"n": 2}), "b"));
         let err = o.wait(t1).unwrap_err();
         assert!(matches!(err, OracleError::Limit(_)), "{err}");
-        assert!(err.to_string().contains("$1.00"));
+        assert!(err.to_string().contains("$0.01"));
         assert_eq!(o.transport.bodies.len(), 1);
     }
 
@@ -992,11 +990,11 @@ mod tests {
         let mut o = oracle(vec![
             json!({
                 "answers": { "q0": { "type": "choice", "choice": "yes", "confidence": 0.9 } },
-                "usage": { "input_tokens": 1000, "cost_usd": 0.01 }
+                "usage": { "input_tokens": 1000, "cost_usd": 0.002 }
             }),
             json!({
                 "answers": { "q1": { "type": "choice", "choice": "no", "confidence": 0.9 } },
-                "usage": { "input_tokens": 3000, "cost_usd": 0.03 }
+                "usage": { "input_tokens": 3000, "cost_usd": 0.003 }
             }),
         ]);
         let t0 = o.submit(classify(json!({"n": 1}), "a"));
@@ -1006,7 +1004,7 @@ mod tests {
         let u = o.usage();
         assert_eq!(u.requests, 2);
         assert_eq!(u.input_tokens, 4000);
-        assert!((u.spend_usd - 0.04).abs() < 1e-12);
+        assert!((u.spend_usd - 0.005).abs() < 1e-12);
         assert!((u.batch_size.unwrap() - 1.0 / QUESTION_BUDGET as f64).abs() < 1e-12);
         assert!(
             (u.fill_factor.unwrap() - 4000.0 / (2.0 * CONTEXT_TOKEN_BUDGET as f64)).abs() < 1e-12

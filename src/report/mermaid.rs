@@ -15,24 +15,14 @@ use serde_json::{json, Value as Json};
 
 use crate::compiler::{extend_scope, NameOrigin, Vocabulary};
 use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, State};
-use crate::plan::{Expr, Plan};
 use crate::syntax::template::apply;
 use crate::syntax::{Arg, Form, Formula, Program, Reading, Sense};
-use crate::value::Value;
 
-/// `trace-….jsonl` → `diagram-….mmd` in the same directory.
+/// `…/trace.jsonl` → `…/diagram.mmd`.
 pub fn diagram_path(trace: &Path) -> PathBuf {
-    let stem = trace
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("trace");
-    let name = match stem.strip_prefix("trace") {
-        Some(rest) => format!("diagram{rest}.mmd"),
-        None => format!("{stem}.mmd"),
-    };
     match trace.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
-        _ => PathBuf::from(name),
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join("diagram.mmd"),
+        _ => PathBuf::from("diagram.mmd"),
     }
 }
 
@@ -75,63 +65,6 @@ fn mark_contradicted(scope: &mut Scope, sentences: &HashSet<String>) {
     }
     for child in &mut scope.children {
         mark_contradicted(child, sentences);
-    }
-}
-
-/// Atom sentences a file contradicted, plus a detail head whose body is false
-/// because one of those atoms is in it.
-pub fn contradicted_sentences(
-    plan: &Plan,
-    atom_values: &[Value],
-    contradicted: &[bool],
-) -> HashSet<String> {
-    let mut sentences = HashSet::new();
-    for (sentence, struck) in plan.atoms.iter().zip(contradicted) {
-        if *struck {
-            sentences.insert(sentence.clone());
-        }
-    }
-    for claim in &plan.claims {
-        collect_heads(&claim.expr, atom_values, contradicted, &mut sentences);
-    }
-    sentences
-}
-
-fn collect_heads(
-    expr: &Expr,
-    atom_values: &[Value],
-    contradicted: &[bool],
-    sentences: &mut HashSet<String>,
-) {
-    match expr {
-        Expr::And(xs) | Expr::Or(xs) => {
-            for expr in xs {
-                collect_heads(expr, atom_values, contradicted, sentences);
-            }
-        }
-        Expr::Not(inner) => collect_heads(inner, atom_values, contradicted, sentences),
-        Expr::Atom(_) => {}
-        Expr::Detail { head, body } => {
-            let failed = body
-                .iter()
-                .fold(Value::True, |acc, expr| acc.and(expr.value(atom_values)))
-                == Value::False;
-            if failed && body.iter().any(|expr| struck(expr, contradicted)) {
-                sentences.insert(head.clone());
-            }
-            for expr in body {
-                collect_heads(expr, atom_values, contradicted, sentences);
-            }
-        }
-    }
-}
-
-fn struck(expr: &Expr, contradicted: &[bool]) -> bool {
-    match expr {
-        Expr::Atom(index) => contradicted.get(*index).copied().unwrap_or(false),
-        Expr::Not(inner) => struck(inner, contradicted),
-        Expr::And(xs) | Expr::Or(xs) => xs.iter().any(|expr| struck(expr, contradicted)),
-        Expr::Detail { body, .. } => body.iter().any(|expr| struck(expr, contradicted)),
     }
 }
 
@@ -189,7 +122,7 @@ impl Styles {
 
     /// One same-state batch. An unknown choice leaves that item on the plain default.
     ///
-    /// `context` is the verbalized run context. It is the whole state.
+    /// `context` is the green proof. It is the whole state.
     pub fn ask(oracle: &mut impl Oracle, diagram: &Diagram, context: &str) -> Self {
         let Some(batch) = style_questions(diagram, context) else {
             return Self::plain();
@@ -714,6 +647,9 @@ fn walk_formula(
                 scope.edges.push(edge);
             }
         }
+        Formula::Witness { fact, .. } => {
+            walk_formula(fact, negated, stack, vocab, scope, legend);
+        }
         Formula::Detail { head, body } => {
             if extend_scope(
                 body,
@@ -1190,10 +1126,10 @@ mod tests {
     }
 
     #[test]
-    fn diagram_path_keeps_the_trace_identity() {
+    fn diagram_sits_beside_the_trace() {
         assert_eq!(
-            diagram_path(Path::new("/tmp/autoground/trace-1790-51022-0.jsonl")),
-            PathBuf::from("/tmp/autoground/diagram-1790-51022-0.mmd")
+            diagram_path(Path::new("/tmp/autoground/1790-51022-0/trace.jsonl")),
+            PathBuf::from("/tmp/autoground/1790-51022-0/diagram.mmd")
         );
     }
 
@@ -1440,51 +1376,6 @@ flowchart TD
         );
         assert!(
             text.contains("n_Backend -->|\"not depends_on\"| n_Frontend"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn a_contradicted_body_marks_the_detail_head_and_an_unsupported_one_does_not() {
-        let src = r#"
-(name Concept)
-(name LogicBlock)
-(name Relationship)
-(sense input "{X} is an input into {Y}")
-(detail (input Concept LogicBlock)
-  (input Relationship LogicBlock))
-"#;
-        let plan = crate::Plan::of(&crate::compile(&parse(src).unwrap()).unwrap());
-        let values = [crate::Value::False];
-        let struck = contradicted_sentences(&plan, &values, &[true]);
-        assert!(
-            struck.contains("Relationship is an input into LogicBlock"),
-            "{struck:?}"
-        );
-        assert!(
-            struck.contains("Concept is an input into LogicBlock"),
-            "{struck:?}"
-        );
-        let unsupported = contradicted_sentences(&plan, &values, &[false]);
-        assert!(unsupported.is_empty(), "{unsupported:?}");
-
-        let mut diagram = diagram_of(&parse(src).unwrap(), &Vocabulary::none());
-        diagram.mark_contradicted(&struck);
-        let text = render(&diagram, &Styles::plain());
-        assert!(
-            text.contains("n_Concept_2 -.->|\"input\"| n_LogicBlock_2"),
-            "{text}"
-        );
-        assert!(
-            text.contains("n_Relationship_2 -.->|\"input\"| n_LogicBlock_2"),
-            "{text}"
-        );
-        assert!(
-            text.contains("linkStyle 0 stroke:#dc2626,stroke-width:1.5px,stroke-dasharray: 4 3"),
-            "{text}"
-        );
-        assert!(
-            text.contains("linkStyle 1 stroke:#dc2626,stroke-width:1.5px,stroke-dasharray: 4 3"),
             "{text}"
         );
     }

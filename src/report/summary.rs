@@ -1,4 +1,4 @@
-//! Closing lines of `autoground run`: where the trace, the context, and the
+//! Closing lines of `autoground check`: where the trace, the context, and the
 //! diagram went, how full the in-flight cap stayed, the shape of round-trip
 //! latency, and what the run cost.
 

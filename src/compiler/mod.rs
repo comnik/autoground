@@ -289,7 +289,7 @@ fn collect_detail(
             }
         }
         Proposition::Not(inner) => collect_detail(inner, defs)?,
-        Proposition::Sentence(_) => {}
+        Proposition::Sentence(_) | Proposition::Witness { .. } => {}
         Proposition::Detail { head, body } => {
             if defs.contains_key(head) {
                 return Err(CompileError {
@@ -343,7 +343,7 @@ fn push_detail_deps(
     deps: &mut Vec<String>,
 ) {
     match proposition {
-        Proposition::Sentence(sentence) => {
+        Proposition::Sentence(sentence) | Proposition::Witness { sentence, .. } => {
             if defs.contains_key(sentence) {
                 deps.push(sentence.clone());
             }
@@ -378,6 +378,7 @@ fn resolve(
             x, names, senses, imports,
         )?))),
         Formula::Detail { head, body } => resolve_detail(head, body, names, senses, imports),
+        Formula::Witness { fact, paths } => resolve_witness(fact, paths, names, senses, imports),
         Formula::Apply { reading, args } => {
             let mut spellings = Vec::with_capacity(args.len());
             for arg in args {
@@ -433,6 +434,49 @@ fn resolve_detail(
         });
     }
     Ok(Proposition::Detail { head, body: claims })
+}
+
+fn resolve_witness(
+    fact: &Formula,
+    paths: &[String],
+    names: &HashSet<String>,
+    senses: &HashMap<String, Sense>,
+    imports: &Imports,
+) -> Result<Proposition, CompileError> {
+    let Proposition::Sentence(sentence) = resolve(fact, names, senses, imports)? else {
+        return Err(CompileError {
+            message: "`witness` cites a sentence".into(),
+        });
+    };
+    let mut seen = HashSet::new();
+    for path in paths {
+        if !is_repo_path(path) {
+            return Err(CompileError {
+                message: format!("`{path}` is not a path inside the repository"),
+            });
+        }
+        if !seen.insert(path.clone()) {
+            return Err(CompileError {
+                message: format!("witness cites `{path}` twice"),
+            });
+        }
+    }
+    Ok(Proposition::Witness {
+        sentence,
+        paths: paths.to_vec(),
+    })
+}
+
+/// A pin is a relative path of normal components: no absolute path, no `..`.
+fn is_repo_path(path: &str) -> bool {
+    if path.is_empty() || path.starts_with('/') || path.contains('\\') {
+        return false;
+    }
+    let path = std::path::Path::new(path);
+    path.is_relative()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 /// Names and senses declared in `body`, added to the enclosing scope.
@@ -791,6 +835,79 @@ mod tests {
                     .message
                     .contains("`leaf` is detailed in terms of itself"),
             "{cycle}"
+        );
+    }
+
+    #[test]
+    fn a_witness_keeps_its_sentence_and_its_paths() {
+        let c = compiled(
+            r#"
+(name Search)
+(name Oracle)
+(sense calls "{caller} calls {callee}")
+(witness (calls Search Oracle) "src/search/mod.rs" "src/oracle/jev.rs")
+"#,
+        );
+        assert_eq!(
+            c.claims,
+            vec![Proposition::Witness {
+                sentence: "Search calls Oracle".into(),
+                paths: vec!["src/search/mod.rs".into(), "src/oracle/jev.rs".into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_witness_path_stays_inside_the_repository() {
+        for (src, needle) in [
+            (
+                "(witness (\"a\") \"/etc/passwd\")",
+                "`/etc/passwd` is not a path inside the repository",
+            ),
+            (
+                "(witness (\"a\") \"src/../secret\")",
+                "`src/../secret` is not a path inside the repository",
+            ),
+            (
+                "(witness (\"a\") \"src/a.rs\" \"src/a.rs\")",
+                "witness cites `src/a.rs` twice",
+            ),
+        ] {
+            let err = compile(&parse(src).unwrap()).unwrap_err();
+            assert!(err.message.contains(needle), "{src}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_detail_is_not_witnessed_by_its_own_head() {
+        let err = compile(
+            &parse(
+                r#"
+(detail ("arrow")
+  (witness ("arrow") "src/a.rs"))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            err.message
+                .contains("`arrow` is detailed in terms of itself"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_nullary_sense_is_its_reading() {
+        let compiled = compile(
+            &parse("(sense lemma-1 \"The square root of two is irrational.\")\n(lemma-1)").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            compiled.claims,
+            vec![Proposition::Sentence(
+                "The square root of two is irrational.".into()
+            )]
         );
     }
 

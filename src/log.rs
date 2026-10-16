@@ -1,8 +1,10 @@
 //! Append-only session log.
 //!
-//! One JSON object per line, in a file under `/tmp/autoground`. [`Log`] is
-//! cheap to clone and safe to share across threads: each append takes the
-//! mutex, writes one line, and flushes.
+//! One JSON object per line. [`Log::create`] writes
+//! `trace-{nanos}-{pid}-{n}.jsonl` under `/tmp/autoground`. [`Log::create_under`]
+//! writes `trace.jsonl` inside a fresh `{nanos}-{pid}-{n}` directory.
+//! [`Log`] is cheap to clone and safe to share across threads: each append
+//! takes the mutex, writes one line, and flushes.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -38,6 +40,28 @@ pub fn allocate_unique_file(dir: &Path, ext: &str) -> std::io::Result<PathBuf> {
     ))
 }
 
+/// Create `{parent}/{nanos}-{pid}-{n}` and return that directory.
+pub fn allocate_unique_dir(parent: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(parent)?;
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    for n in 0u32..10_000 {
+        let path = parent.join(format!("{nanos}-{pid}-{n}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique session directory",
+    ))
+}
+
 struct Shared {
     file: Mutex<File>,
     /// Called after each appended line, without the file lock held.
@@ -56,6 +80,12 @@ impl Log {
     pub fn create() -> std::io::Result<Self> {
         let path = allocate_unique_file(Path::new(DEFAULT_TRACE_DIR), "jsonl")?;
         Self::open(path)
+    }
+
+    /// `{dir}/{nanos}-{pid}-{n}/trace.jsonl`.
+    pub fn create_under(dir: &Path) -> std::io::Result<Self> {
+        let session = allocate_unique_dir(dir)?;
+        Self::open(session.join("trace.jsonl"))
     }
 
     /// Append to a new or existing file.
@@ -271,5 +301,29 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.extension().is_some_and(|ext| ext == "json"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_under_puts_trace_jsonl_in_a_fresh_directory() {
+        let parent =
+            std::env::temp_dir().join(format!("autoground-session-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        let a = Log::create_under(&parent).unwrap();
+        let b = Log::create_under(&parent).unwrap();
+        assert_ne!(a.path(), b.path());
+        assert_eq!(
+            a.path().file_name().and_then(|name| name.to_str()),
+            Some("trace.jsonl")
+        );
+        assert_eq!(
+            b.path().file_name().and_then(|name| name.to_str()),
+            Some("trace.jsonl")
+        );
+        assert_eq!(
+            a.path().parent().and_then(|dir| dir.parent()),
+            Some(parent.as_path())
+        );
+        assert_ne!(a.path().parent(), b.path().parent());
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

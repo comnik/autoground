@@ -2,7 +2,7 @@
 name = "autoground"
 version = "0.2.0"
 edition = "2021"
-description = "Compile and run self-grounding conceptual models of a codebase"
+description = "Check a lect against the files it cites"
 license = "MIT"
 
 [dependencies]
@@ -17,7 +17,3 @@ ureq = { version = "2.12", features = ["json"] }
 [[bin]]
 name = "search-eval"
 path = "evals/search/main.rs"
-
-[[bin]]
-name = "read-eval"
-path = "evals/read/main.rs"

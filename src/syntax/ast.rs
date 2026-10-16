@@ -1,7 +1,7 @@
 /// A sense: a named reading whose `{holes}` are filled left to right.
 ///
 /// Hole labels disambiguate the reading. They are not types, and two holes
-/// may share a label.
+/// may share a label. The name is a Clojure identifier, such as `lemma-1`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sense {
     pub name: String,
@@ -46,7 +46,8 @@ pub enum Arg {
     Literal(String),
 }
 
-/// A ground claim. `and`, `or`, `not`, and `detail` are left for the planner.
+/// A ground claim. `and`, `or`, `not`, `detail`, and `witness` are left for
+/// the planner and the checker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Formula {
     And(Vec<Formula>),
@@ -64,6 +65,11 @@ pub enum Formula {
     Detail {
         head: Box<Formula>,
         body: Vec<Form>,
+    },
+    /// A sentence cited to one or more repository paths, judged together.
+    Witness {
+        fact: Box<Formula>,
+        paths: Vec<String>,
     },
 }
 
@@ -105,6 +111,11 @@ pub enum Proposition {
     Detail {
         head: String,
         body: Vec<Proposition>,
+    },
+    /// `sentence` judged against the bodies at `paths`, as one state.
+    Witness {
+        sentence: String,
+        paths: Vec<String>,
     },
 }
 

@@ -1,7 +1,6 @@
 # ⏚ autoground
 
-`autoground` compiles and runs *neurosymbolic*, *self-validating* mental models of a
-codebase.
+`autoground` compiles a lect and checks it against the files the lect cites.
 
 **Neurosymbolic**, because models are written as unordered collections of logical
 propositions. But those propositions can be "handwavy" — they don't need to adhere to any
@@ -37,12 +36,9 @@ misconceptions and violated assumptions.
 ## North Star
 
 A developer can express their mental model of a heavily vibe-engineered codebase in a simple
-S-expression language, without adherence to any rigid schema. `autoground` will run it and
-return either *entailed*, *contradicted*, or *unsupported*, indicating whether the model is
-both internally consistent and grounded in the reality of the codebase.
-
-Each response includes provenance: the databases in the codebase supporting or contradicting
-base facts, and the logical deductions that were performed on top.
+S-expression language, without adherence to any rigid schema. `autoground check` revalidates
+that model as the code changes. A witness is a sentence judged against the files it cites.
+A detail is discharged only when its body is discharged and those sentences entail the head.
 
 ## Concepts
 
@@ -90,27 +86,25 @@ Search leverages the oracle to construct a candidate view: the paths in the univ
 should be explored in order to evaluate a proposition. For every path, it asks the oracle
 whether that path is *irrelevant* to the given proposition. Only a confident "irrelevant"
 results in the path getting pruned from the candidate view. This keeps search conservative,
-while giving us a relevance signal in which to judge the remaining files. Because of this
-conservatism, the candidate view can be interpreted as a closed world, allowing the reader
-to short-circuit. Search never reads file contents.
+while giving us a relevance signal in which to judge the remaining files. Search never
+reads file contents.
 
-#### Read
+#### Check
 
-`autoground read` submits a proposition, searches, then judges the leaves of that view.
-`submit`
-enqueues and `wait` flushes every pending proposition together, the same batching shape as
-search and the oracle.
+`autoground check` is how a lect is judged. A witness cites one or more repo-relative
+files, and those bodies are judged together. A file longer than the body budget is sliced;
+the witness is discharged when one part entails the sentence. A detail is an inference
+step: the head is discharged when every body claim is discharged and the body sentences
+entail the head. A later citation of that head takes the proved value. `and`, `or`, and
+`not` stay Kleene. A bare sentence is unpinned.
 
-Files are judged in order of relevance (as determined by the search step). All propositions
-pending for a given file are packed into the same request.
+Exit status is 0 when every top-level claim is discharged, 1 otherwise, and 3 on a
+compile, IO, or oracle failure. Each check writes `trace.jsonl`, `context.md`, and
+`diagram.mmd` into a new directory under `/tmp/autoground/`. `--out` chooses a different
+parent. On a terminal the finished view is the lect itself.
 
-Each body is a choice of entailed, contradicted, or neutral. A confident "entailed"
-short-circuits to true, a confident "contradicted" to false. Weak judgements are kept until
-there is a conflict or the window runs out. Conflicting judgments are escalated once more to
-the oracle to resolve. Because search is conservative, we make a closed world assumption.
-Exhausting the candidate view with no witness is false.
-
-Returns the truth value plus the evidence view: the databases the value depends on.
+`autoground search` remains a separate walk over a repository or a transcript. A
+transcript is evidence for check only when a witness cites it as a file.
 
 ### The `lect` Language
 
@@ -174,36 +168,23 @@ namespace by the name it declares. A `.lect` file can sit anywhere in the reposi
 The filesystem universe implementation filters out `.lect` files to make sure unvalidated
 claims are never treated as evidence.
 
-### Verbalization
+### Check
 
-TBD verbalization is how we go from symbolic atoms to unstructured propositions.
+A sense application compiles to its sentence. `autoground check <model>` judges the
+compiled claims against the files their witnesses cite.
 
-```clojure
-;; Fully ground senses verbalize as themselves.
-("X has an identifier") ;; => "X has an identifier"
-
-(sense component "{Name} is a part of the system")
-(sense part_of "{Name} is a part of {Name}")
-
-(component X) ;; => "X is a part of the system"
-(part_of X Y) ;; => ("{Name} is a part of {Name}" X Y) => "X is a part of Y"
 ```
-
-### Symbolic Evaluation
-
-`autoground plan` decomposes a model into positive atomic sentences. It does not
-render a file body and does not call the reader. `autoground run` reads those
-sentences and combines the findings with Kleene `and`, `or`, and `not`.
+autoground check examples/search-calls-oracle.lect --repo .
+autoground check examples/sqrt2.lect --repo .
+```
 
 
 ## Implementation
 
 ### Milestones
 
-- [x] `autoground search "<arbitrary verbalized proposition>"`
-- [x] `autoground read "<arbitrary verbalized proposition>"`
-- [x] `autoground plan xyz.lect`: list the atomic sentences in a model
-- [x] `autoground run xyz.lect`: read those sentences and combine them per claim
+- [x] `autoground search "<proposition>"`
+- [x] `autoground check xyz.lect`: re-check a lect against the files it cites
 
 ### Interfaces
 
@@ -227,16 +208,16 @@ A database with a summary is classified from that text. A database without one i
 - wait for a ticket when the label is required; pending questions that share a `state` go in one request, independent states overlap
 - report usage on this instance so far: spend, input tokens, request count, latency percentiles, mean batch size (questions per request / max questions per request), and mean fill factor (input tokens / the 32k state-side cap)
 
-The oracle hashes the `state` it is given (a listing tree, a file body). Universe itself has no digest method. Search and the reader use this interface. The 3VL engine does not hold an oracle.
+The oracle hashes the `state` it is given (a listing tree, a file body). Universe itself has no digest method. Search and check use this interface.
 
 **Search**: takes a universe, an oracle, and a natural language proposition, returns the
 pruned universe that is relevant to answering the proposition. Same auto-batching behaviour
 as the oracle: multiple search requests can be submitted that then get batched up
 appropriately.
 
-**Reader**: takes a universe, an oracle, and a natural language proposition, returns a truth
-value and the evidence view inside the search window. Same auto-batching: `submit` enqueues;
-`wait` flushes every pending proposition so file bodies are shared across propositions.
+**Check**: takes the compiled claims, a repository, and an oracle. Each witness is one
+judgement of its cited bodies. Each detail is one judgement that the body sentences entail
+the head. Lemma uses copy the proved value and are not asked again.
 
 ### jev best practices
 

@@ -356,8 +356,8 @@ fn kind_word(kind: Kind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::Plan;
     use crate::syntax::parse;
+    use crate::Proposition;
 
     fn loaded(path: &str, src: &str) -> Loaded {
         Loaded {
@@ -595,8 +595,10 @@ mod tests {
             &[sound],
         )
         .unwrap();
-        let plan = Plan::of(&compiled);
-        assert_eq!(plan.atoms, vec!["Frontend is part of Backend".to_string()]);
+        assert_eq!(
+            compiled.claims,
+            vec![Proposition::Sentence("Frontend is part of Backend".into())]
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
-use autoground::{compile, parse, print_program, verbalize_source};
+use autoground::{compile, parse, print_program, Proposition};
 
 #[test]
-fn diagram_parses_compiles_and_verbalizes() {
+fn diagram_parses_and_compiles() {
     let src = std::fs::read_to_string("examples/diagram.lect").unwrap();
     let program = parse(&src).expect("parse diagram.lect");
     let printed = print_program(&program);
@@ -9,13 +9,11 @@ fn diagram_parses_compiles_and_verbalizes() {
     assert_eq!(program, again);
 
     let compiled = compile(&program).expect("compile");
-    assert_eq!(compiled.claims.len(), verbalize_source(&src).unwrap().len());
-    let lines = verbalize_source(&src).unwrap();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == "(\"Frontend depends on Backend\")"),
-        "{lines:?}"
-    );
-    assert!(lines.iter().any(|line| line.contains("not")), "{lines:?}");
+    assert!(compiled.claims.iter().any(|claim| {
+        matches!(claim, Proposition::Sentence(text) if text == "Frontend depends on Backend")
+    }));
+    assert!(compiled
+        .claims
+        .iter()
+        .any(|claim| matches!(claim, Proposition::Not(_))));
 }
