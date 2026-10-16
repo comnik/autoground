@@ -450,9 +450,9 @@ fn resolve_witness(
     };
     let mut seen = HashSet::new();
     for path in paths {
-        if !is_repo_path(path) {
+        if !is_lect_path(path) {
             return Err(CompileError {
-                message: format!("`{path}` is not a path inside the repository"),
+                message: format!("`{path}` is not a path relative to the lect"),
             });
         }
         if !seen.insert(path.clone()) {
@@ -467,16 +467,21 @@ fn resolve_witness(
     })
 }
 
-/// A pin is a relative path of normal components: no absolute path, no `..`.
-fn is_repo_path(path: &str) -> bool {
+/// A witness path is relative to the lect file. `..` is a parent of that file.
+fn is_lect_path(path: &str) -> bool {
     if path.is_empty() || path.starts_with('/') || path.contains('\\') {
         return false;
     }
     let path = std::path::Path::new(path);
     path.is_relative()
-        && path
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_)
+                    | std::path::Component::CurDir
+                    | std::path::Component::ParentDir
+            )
+        })
 }
 
 /// Names and senses declared in `body`, added to the enclosing scope.
@@ -858,15 +863,19 @@ mod tests {
     }
 
     #[test]
-    fn a_witness_path_stays_inside_the_repository() {
+    fn a_witness_path_is_relative_to_the_lect() {
+        let compiled = compiled("(witness (\"a\") \"../notes.txt\")");
+        assert_eq!(
+            compiled.claims,
+            vec![Proposition::Witness {
+                sentence: "a".into(),
+                paths: vec!["../notes.txt".into()],
+            }]
+        );
         for (src, needle) in [
             (
                 "(witness (\"a\") \"/etc/passwd\")",
-                "`/etc/passwd` is not a path inside the repository",
-            ),
-            (
-                "(witness (\"a\") \"src/../secret\")",
-                "`src/../secret` is not a path inside the repository",
+                "`/etc/passwd` is not a path relative to the lect",
             ),
             (
                 "(witness (\"a\") \"src/a.rs\" \"src/a.rs\")",

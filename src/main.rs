@@ -40,27 +40,23 @@ enum JudgeKind {
 enum Commands {
     /// Re-check a lect against the files its witnesses cite.
     ///
-    /// A witness is one sentence judged on those bodies together. A file
-    /// longer than the body budget is sent in parts, and the sentence is
-    /// discharged when one part entails it. A detail is discharged when its
-    /// body is discharged and those sentences entail the head. `--budget`
-    /// caps this run in cents and defaults to 1. On a terminal the
-    /// spinner names the sentence in flight, and the finished view is the
-    /// lect: each judged clause carries its own mark, and an undischarged
-    /// clause carries its failure comment. The trace, the context, and the
-    /// diagram are written in a new directory under `/tmp/autoground/`, or
-    /// under `--out`. Exit status is 1 when a top-level claim is not
-    /// discharged.
+    /// A witness path is relative to the lect file. A file longer than the
+    /// body budget is sent in parts, and the sentence is discharged when one
+    /// part entails it. A detail is discharged when its body is discharged
+    /// and those sentences entail the head. `--budget` caps this run in cents
+    /// and defaults to 1. On a terminal the spinner names the sentence in
+    /// flight, and the finished view is the lect: each judged clause carries
+    /// its own mark, and an undischarged clause carries its failure comment.
+    /// The trace, the context, and the diagram are written in a new directory
+    /// under `/tmp/autoground/`, or under `--out`. Exit status is 1 when a
+    /// top-level claim is not discharged.
     ///
     /// Examples:
-    ///   autoground check examples/search-calls-oracle.lect --repo .
-    ///   autoground check examples/sqrt2.lect --repo .
+    ///   autoground check examples/search-calls-oracle.lect
+    ///   autoground check examples/sqrt2.lect
     Check {
         /// Model source, a `.lect` file, or a Markdown file of `lect` blocks.
         input: String,
-        /// Repository the witness paths are relative to. Defaults to the current directory.
-        #[arg(long, default_value = ".")]
-        repo: PathBuf,
         /// Cost cap for this check, in cents. The request that crosses the
         /// cap still finishes. Later requests are refused.
         #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
@@ -111,12 +107,7 @@ enum Commands {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Check {
-            input,
-            repo,
-            budget,
-            out,
-        } => match check_cmd(&input, &repo, budget, out.as_deref()) {
+        Commands::Check { input, budget, out } => match check_cmd(&input, budget, out.as_deref()) {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
                 eprintln!("{err}");
@@ -277,7 +268,6 @@ fn run_search<U: Universe + Clone, O: Oracle>(
 
 fn check_cmd(
     input: &str,
-    repo: &Path,
     budget_cents: u64,
     out: Option<&Path>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
@@ -289,7 +279,8 @@ fn check_cmd(
     } else {
         None
     };
-    let (src, program, compiled, vocab) = load_compiled(input, repo)?;
+    let base = lect_dir(input);
+    let (src, program, compiled, vocab) = load_compiled(input, &base)?;
     let mut diagram = diagram_of(&program, &vocab);
     let log = Log::create_under(out.unwrap_or_else(|| Path::new(DEFAULT_TRACE_DIR)))?;
     if let Some(live) = &live {
@@ -302,7 +293,7 @@ fn check_cmd(
         &src,
         &program,
         &compiled.claims,
-        repo,
+        &base,
         &mut oracle,
         &mut diagram,
         &log,
@@ -315,14 +306,14 @@ fn finish_check<O: Oracle>(
     src: &str,
     program: &autoground::Program,
     claims: &[Proposition],
-    repo: &Path,
+    base: &Path,
     oracle: &mut O,
     diagram: &mut Diagram,
     log: &Log,
     live: Option<autoground::report::run::Live>,
     started: std::time::Instant,
 ) -> Result<u8, Box<dyn std::error::Error>> {
-    let report = check::check(claims, repo, DEFAULT_BODY_BYTES, oracle)?;
+    let report = check::check(claims, base, DEFAULT_BODY_BYTES, oracle)?;
     log.clear_hook();
     let context = autoground::report::context::render(&report);
     let styles = if diagram.has_style_questions() {
@@ -384,9 +375,23 @@ fn finish_check<O: Oracle>(
     Ok(if discharged { 0 } else { 1 })
 }
 
+/// Directory witness paths are relative to. A lect file uses its own directory.
+/// Source passed on the command line uses the current directory.
+fn lect_dir(input: &str) -> PathBuf {
+    let path = Path::new(input);
+    if path.is_file() {
+        match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+            _ => PathBuf::from("."),
+        }
+    } else {
+        PathBuf::from(".")
+    }
+}
+
 fn load_compiled(
     input: &str,
-    repo: &Path,
+    base: &Path,
 ) -> Result<
     (
         String,
@@ -403,9 +408,9 @@ fn load_compiled(
         .as_ref()
         .is_some_and(|ns| !ns.requires.is_empty())
     {
-        let files = scan_namespaces(repo)?;
+        let files = scan_namespaces(base)?;
         let entry = Path::new(input);
-        let entry_path = entry.is_file().then(|| display_path(repo, entry));
+        let entry_path = entry.is_file().then(|| display_path(base, entry));
         link_parts(&program, entry_path.as_deref(), &files)?
     } else {
         (compile(&program)?, Vocabulary::none())

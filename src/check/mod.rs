@@ -108,21 +108,21 @@ impl From<OracleError> for CheckError {
     }
 }
 
-/// Judge `claims` against the files they cite under `repo`.
+/// Judge `claims` against the files they cite. A witness path is relative to `base`.
 ///
 /// `budget` is the largest body, in bytes, sent in one request. A longer
 /// single file is sent in parts. A joint witness over bodies that do not fit
 /// is [`Failure::TooLarge`] and is not sent.
 pub fn check<O: Oracle>(
     claims: &[Proposition],
-    repo: &Path,
+    base: &Path,
     budget: usize,
     oracle: &mut O,
 ) -> Result<Report, CheckError> {
     let defs = defined_heads(claims);
     let mut work = Vec::with_capacity(claims.len());
     for claim in claims {
-        work.push(prepare(claim, &defs, repo, budget, oracle)?);
+        work.push(prepare(claim, &defs, base, budget, oracle)?);
     }
     let tickets = {
         let mut tickets = Vec::new();
@@ -234,7 +234,7 @@ enum Kind {
 fn prepare<O: Oracle>(
     proposition: &Proposition,
     defs: &HashSet<String>,
-    repo: &Path,
+    base: &Path,
     budget: usize,
     oracle: &mut O,
 ) -> Result<Work, CheckError> {
@@ -256,12 +256,12 @@ fn prepare<O: Oracle>(
             })
         }
         Proposition::Witness { sentence, paths } => {
-            prepare_witness(sentence, paths, repo, budget, oracle)
+            prepare_witness(sentence, paths, base, budget, oracle)
         }
         Proposition::Detail { head, body } => {
             let mut children = Vec::with_capacity(body.len());
             for claim in body {
-                children.push(prepare(claim, defs, repo, budget, oracle)?);
+                children.push(prepare(claim, defs, base, budget, oracle)?);
             }
             let implication = Box::new(prepare_implication(head, body, oracle));
             Ok(Work {
@@ -274,10 +274,10 @@ fn prepare<O: Oracle>(
                 kind: Kind::Detail,
             })
         }
-        Proposition::And(xs) => prepare_bool("and", Kind::And, xs, defs, repo, budget, oracle),
-        Proposition::Or(xs) => prepare_bool("or", Kind::Or, xs, defs, repo, budget, oracle),
+        Proposition::And(xs) => prepare_bool("and", Kind::And, xs, defs, base, budget, oracle),
+        Proposition::Or(xs) => prepare_bool("or", Kind::Or, xs, defs, base, budget, oracle),
         Proposition::Not(inner) => {
-            let child = prepare(inner, defs, repo, budget, oracle)?;
+            let child = prepare(inner, defs, base, budget, oracle)?;
             Ok(Work {
                 text: "not".to_string(),
                 failure: None,
@@ -296,13 +296,13 @@ fn prepare_bool<O: Oracle>(
     kind: Kind,
     xs: &[Proposition],
     defs: &HashSet<String>,
-    repo: &Path,
+    base: &Path,
     budget: usize,
     oracle: &mut O,
 ) -> Result<Work, CheckError> {
     let mut children = Vec::with_capacity(xs.len());
     for proposition in xs {
-        children.push(prepare(proposition, defs, repo, budget, oracle)?);
+        children.push(prepare(proposition, defs, base, budget, oracle)?);
     }
     Ok(Work {
         text: text.to_string(),
@@ -318,7 +318,7 @@ fn prepare_bool<O: Oracle>(
 fn prepare_witness<O: Oracle>(
     sentence: &str,
     paths: &[String],
-    repo: &Path,
+    base: &Path,
     budget: usize,
     oracle: &mut O,
 ) -> Result<Work, CheckError> {
@@ -333,7 +333,7 @@ fn prepare_witness<O: Oracle>(
     };
     let mut files = Vec::with_capacity(paths.len());
     for path in paths {
-        match locate(repo, path) {
+        match locate(base, path) {
             Locate::Missing => {
                 work.failure = Some(Failure::MissingFile { path: path.clone() });
                 work.cites = vec![path.clone()];
@@ -524,16 +524,16 @@ enum Locate {
     File { full: PathBuf, len: u64 },
 }
 
-fn locate(repo: &Path, pin: &str) -> Locate {
+fn locate(base: &Path, pin: &str) -> Locate {
     let path = Path::new(pin);
     if path.is_absolute()
         || path
             .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+            .any(|component| matches!(component, Component::Prefix(_)))
     {
         return Locate::Missing;
     }
-    let full = repo.join(path);
+    let full = base.join(path);
     match fs::metadata(&full) {
         Ok(meta) if meta.is_file() => Locate::File {
             full,
@@ -982,6 +982,25 @@ mod tests {
                 path: "src/nope.rs".into()
             })
         );
+    }
+
+    #[test]
+    fn a_parent_path_is_read_from_the_lect_directory() {
+        let dir = scratch("parent");
+        let lect_dir = dir.join("examples");
+        fs::create_dir(&lect_dir).unwrap();
+        fs::write(dir.join("note.txt"), "alpha\n").unwrap();
+        let mut oracle = Rec::new(entailed);
+        let report = check(
+            &compiled("(witness (\"alpha\") \"../note.txt\")"),
+            &lect_dir,
+            DEFAULT_BODY_BYTES,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(report.claims[0].cites, vec!["../note.txt".to_string()]);
+        assert!(!oracle.seen.is_empty());
     }
 
     #[test]

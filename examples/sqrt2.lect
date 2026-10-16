@@ -7,10 +7,10 @@
 (detail (lemma-1)
   (witness
     ("The square of an odd whole number is odd.")
-    "examples/sqrt2-notes.txt")
+    "sqrt2-notes.txt")
   (witness
     ("No whole number is both even and odd.")
-    "examples/sqrt2-notes.txt"))
+    "sqrt2-notes.txt"))
 
 (sense lemma-2 "If the square of a whole number is even, then that whole number is not odd.")
 
@@ -23,7 +23,7 @@
   (lemma-2)
   (witness
     ("Every whole number is even or odd.")
-    "examples/sqrt2-notes.txt"))
+    "sqrt2-notes.txt"))
 
 (sense lemma-4 "If a ratio of two whole numbers equals the square root of two, then the first whole number is even.")
 
@@ -31,14 +31,14 @@
   (lemma-3)
   (witness
     ("Whenever a ratio of two whole numbers equals the square root of two, the square of the first equals twice the square of the second.")
-    "examples/sqrt2-notes.txt"))
+    "sqrt2-notes.txt"))
 
 (sense lemma-5 "If a whole number is even, then it is twice a whole number.")
 
 (detail (lemma-5)
   (witness
     ("A whole number is even exactly when it is twice a whole number.")
-    "examples/sqrt2-notes.txt"))
+    "sqrt2-notes.txt"))
 
 (sense lemma-6 "If a whole number is even, then its square is four times the square of some whole number.")
 
@@ -46,7 +46,7 @@
   (lemma-5)
   (witness
     ("The square of twice a whole number is four times the square of that whole number.")
-    "examples/sqrt2-notes.txt"))
+    "sqrt2-notes.txt"))
 
 (sense lemma-7 "If the first whole number is even, then its square is four times the square of some whole number.")
 
@@ -64,7 +64,7 @@
   (lemma-8)
   (witness
     ("Whenever a ratio of two whole numbers equals the square root of two, the square of the first equals twice the square of the second.")
-    "examples/sqrt2-notes.txt"))
+    "sqrt2-notes.txt"))
 
 (sense lemma-10 "If a ratio of two whole numbers equals the square root of two and the first whole number is even, then the square of the second is twice a whole number.")
 
@@ -72,17 +72,17 @@
   (lemma-9)
   (witness
     ("If four times a whole number equals twice another whole number, then that other whole number is twice the first.")
-    "examples/sqrt2-notes.txt")
+    "sqrt2-notes.txt")
   (witness
     ("The square of a whole number is a whole number.")
-    "examples/sqrt2-notes.txt"))
+    "sqrt2-notes.txt"))
 
 (sense lemma-11 "A whole number that is twice a whole number is even.")
 
 (detail (lemma-11)
   (witness
     ("A whole number is even exactly when it is twice a whole number.")
-    "examples/sqrt2-notes.txt"))
+    "sqrt2-notes.txt"))
 
 (sense lemma-12 "If a ratio of two whole numbers equals the square root of two and the first whole number is even, then the square of the second is even.")
 
@@ -102,23 +102,23 @@
   (lemma-13)
   (witness
     ("The square of an even whole number is even.")
-    "examples/sqrt2-notes.txt")
+    "sqrt2-notes.txt")
   (witness
     ("The square of an odd whole number is odd.")
-    "examples/sqrt2-notes.txt")
+    "sqrt2-notes.txt")
   (witness
     ("Every whole number is even or odd.")
-    "examples/sqrt2-notes.txt"))
+    "sqrt2-notes.txt"))
 
 (sense lemma-15 "No fraction in lowest terms equals the square root of two.")
 
 (detail (lemma-15)
   (witness
     ("A fraction in lowest terms is a ratio of two whole numbers that share no common divisor greater than one.")
-    "examples/sqrt2-notes.txt")
+    "sqrt2-notes.txt")
   (witness
     ("Two even whole numbers share two as a common divisor.")
-    "examples/sqrt2-notes.txt")
+    "sqrt2-notes.txt")
   (lemma-14))
 
 (sense theorem "The square root of two is not a ratio of two whole numbers.")
@@ -126,5 +126,5 @@
 (detail (theorem)
   (witness
     ("Every ratio of two whole numbers equals some fraction in lowest terms.")
-    "examples/sqrt2-notes.txt")
+    "sqrt2-notes.txt")
   (lemma-15))

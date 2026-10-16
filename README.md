@@ -91,8 +91,8 @@ reads file contents.
 
 #### Check
 
-`autoground check` is how a lect is judged. A witness cites one or more repo-relative
-files, and those bodies are judged together. A file longer than the body budget is sliced;
+`autoground check` is how a lect is judged. A witness cites one or more files relative
+to the lect, and those bodies are judged together. A file longer than the body budget is sliced;
 the witness is discharged when one part entails the sentence. `--budget` is the cost cap
 in cents and defaults to 1. The request that crosses the cap still finishes; later
 requests are refused. A detail is an inference step: the head is discharged when every
@@ -175,8 +175,8 @@ A sense application compiles to its sentence. `autoground check <model>` judges 
 compiled claims against the files their witnesses cite.
 
 ```
-autoground check examples/search-calls-oracle.lect --repo .
-autoground check examples/sqrt2.lect --repo .
+autoground check examples/search-calls-oracle.lect
+autoground check examples/sqrt2.lect
 ```
 
 

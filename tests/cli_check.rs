@@ -39,12 +39,7 @@ fn check_discharges_a_quoted_witness() {
     let dir = scratch("quote");
     let lect = quoted_witness(&dir);
     let out = bin()
-        .args([
-            "check",
-            lect.to_str().unwrap(),
-            "--repo",
-            dir.to_str().unwrap(),
-        ])
+        .args(["check", lect.to_str().unwrap()])
         .output()
         .expect("run autoground");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -96,12 +91,7 @@ fn check_exits_nonzero_when_a_claim_is_undischarged() {
     let lect = dir.join("model.lect");
     std::fs::write(&lect, "(\"nothing cites this\")\n").unwrap();
     let out = bin()
-        .args([
-            "check",
-            lect.to_str().unwrap(),
-            "--repo",
-            dir.to_str().unwrap(),
-        ])
+        .args(["check", lect.to_str().unwrap()])
         .output()
         .expect("run autoground");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -135,8 +125,6 @@ fn check_out_writes_the_session_there() {
         .args([
             "check",
             lect.to_str().unwrap(),
-            "--repo",
-            dir.to_str().unwrap(),
             "--out",
             out_dir.to_str().unwrap(),
         ])
@@ -195,12 +183,7 @@ fn check_reads_lect_blocks_from_markdown() {
     )
     .unwrap();
     let out = bin()
-        .args([
-            "check",
-            path.to_str().unwrap(),
-            "--repo",
-            dir.to_str().unwrap(),
-        ])
+        .args(["check", path.to_str().unwrap()])
         .output()
         .expect("run autoground");
     let stdout = String::from_utf8_lossy(&out.stdout);
