@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 
-use crate::syntax::{lect_source, mentions_namespace, parse, Program};
+use crate::syntax::{brief_source, mentions_namespace, parse, Program};
 
 /// A model file that declares a namespace. `path` is relative to the repo
 /// when the file lives inside it.
@@ -40,7 +40,7 @@ fn canonicalize(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Read `.lect` files and Markdown `lect` fences under `root`.
+/// Read `.brief` files and Markdown `brief` fences under `root`.
 ///
 /// Gitignored paths and `.git` are skipped. A file with no `ns` is left out.
 /// A file that declares `ns` and does not parse is an error. The directory
@@ -100,14 +100,14 @@ pub fn scan_namespaces(root: &Path) -> Result<Vec<Loaded>, LoadError> {
         };
         let owned;
         let src = if has_ext(path, "md") {
-            match lect_source(&text) {
+            match brief_source(&text) {
                 Ok(src) => {
                     owned = src;
                     owned.as_str()
                 }
                 Err(_) => continue,
             }
-        } else if has_ext(path, "lect") {
+        } else if has_ext(path, "brief") {
             text.as_str()
         } else {
             continue;
@@ -174,7 +174,7 @@ mod tests {
         std::fs::create_dir_all(root.join("secret")).unwrap();
         std::fs::write(root.join(".gitignore"), "secret/\n").unwrap();
         std::fs::write(
-            root.join("weird/place/notes.lect"),
+            root.join("weird/place/notes.brief"),
             r#"
 (ns com.acme.product)
 (name Frontend)
@@ -187,7 +187,7 @@ mod tests {
             r#"
 # Guide
 
-```lect
+```brief
 (ns com.acme.client
   (:require [com.acme.product :as product]))
 (name Backend)
@@ -200,8 +200,8 @@ mod tests {
 "#,
         )
         .unwrap();
-        std::fs::write(root.join("secret/hidden.lect"), "(ns com.acme.hidden)\n").unwrap();
-        std::fs::write(root.join("legacy.lect"), "(declare component \"{X}\")\n").unwrap();
+        std::fs::write(root.join("secret/hidden.brief"), "(ns com.acme.hidden)\n").unwrap();
+        std::fs::write(root.join("legacy.brief"), "(declare component \"{X}\")\n").unwrap();
         std::fs::write(root.join("plain.md"), "no fences\n").unwrap();
 
         let files = scan_namespaces(&root).unwrap();
@@ -214,11 +214,11 @@ mod tests {
         assert!(
             files
                 .iter()
-                .any(|file| file.path == "weird/place/notes.lect"),
+                .any(|file| file.path == "weird/place/notes.brief"),
             "{:?}",
             files.iter().map(|file| &file.path).collect::<Vec<_>>()
         );
-        assert!(files.iter().all(|file| file.path != "secret/hidden.lect"));
+        assert!(files.iter().all(|file| file.path != "secret/hidden.brief"));
         assert_eq!(
             compiled.claims,
             vec![crate::syntax::Proposition::Sentence(
@@ -234,11 +234,11 @@ mod tests {
         std::fs::create_dir_all(root.join("weird/place")).unwrap();
         std::fs::write(
             root.join("docs/guide.md"),
-            "```lect\n(ns com.acme.product)\n```\n",
+            "```brief\n(ns com.acme.product)\n```\n",
         )
         .unwrap();
         std::fs::write(
-            root.join("weird/place/notes.lect"),
+            root.join("weird/place/notes.brief"),
             "(ns com.acme.product)\n",
         )
         .unwrap();
@@ -247,7 +247,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(
             err.message.contains("docs/guide.md")
-                && err.message.contains("weird/place/notes.lect")
+                && err.message.contains("weird/place/notes.brief")
                 && err.message.contains("com.acme.product"),
             "{err}"
         );

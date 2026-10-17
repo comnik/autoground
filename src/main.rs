@@ -12,7 +12,7 @@ use autoground::report::context::write_context;
 use autoground::report::mermaid::{diagram_of, write_diagram, Diagram, Styles};
 use autoground::report::summary::{print_run_summary, print_sweep_summary};
 use autoground::sweep;
-use autoground::{compile, display_path, lect_source, parse, scan_namespaces, Proposition};
+use autoground::{compile, display_path, brief_source, parse, scan_namespaces, Proposition};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
@@ -28,22 +28,22 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Re-check a lect against the files its witnesses cite.
+    /// Re-check a brief against the files its witnesses cite.
     ///
-    /// A witness path is relative to the lect file. A file longer than the
+    /// A witness path is relative to the brief file. A file longer than the
     /// body budget is sent in parts, and the sentence is discharged when one
     /// part entails it. A detail is discharged when its body is discharged
     /// and those sentences entail the head. `--budget` caps this run in cents
     /// and defaults to 1. On a terminal the spinner names the sentence in
-    /// flight, and the finished view is the lect: each judged clause carries
+    /// flight, and the finished view is the brief: each judged clause carries
     /// its own mark, and an undischarged clause carries its failure comment.
     /// The trace, the context, and the diagram are written in a new directory
     /// under `/tmp/autoground/`, or under `--out`. Exit status is 1 when a
     /// top-level claim is not discharged.
     ///
     /// Examples:
-    ///   autoground check examples/search-calls-oracle.lect
-    ///   autoground check examples/sqrt2.lect
+    ///   autoground check examples/search-calls-oracle.brief
+    ///   autoground check examples/sqrt2.brief
     Check {
         /// Brief source, a `.brief` file, or a Markdown file of `brief` blocks.
         input: String,
@@ -60,9 +60,9 @@ enum Commands {
     Sweep(SweepArgs),
 }
 
-/// Judge a lect against the filesystem in the current directory.
+/// Judge a brief against the filesystem in the current directory.
 ///
-/// The lect has no witness and no detail. `--filter` keeps paths that
+/// The brief has no witness and no detail. `--filter` keeps paths that
 /// match it, from the listing alone, before any file is read. Each
 /// remaining file is judged until `--budget` cents are spent. A file
 /// matches when any top-level claim is true. Stdout is `CLEAN`, or the
@@ -72,14 +72,14 @@ enum Commands {
 /// `INCOMPLETE`. The trace is `/tmp/autoground/sweep-<id>.jsonl`.
 ///
 /// `sweep transcript` judges a session. `sweep diff` judges each change
-/// in `git diff`. Arguments after that lect are passed to `git diff`.
+/// in `git diff`. Arguments after that brief are passed to `git diff`.
 ///
 /// Examples:
-///   autoground sweep examples/no-historic-comment.lect --filter "source file"
-///   autoground sweep transcript examples/no-historic-comment.lect chat_history.jsonl
-///   autoground sweep diff examples/no-historic-comment.lect
-///   autoground sweep diff examples/no-historic-comment.lect --cached
-///   autoground sweep diff examples/no-historic-comment.lect HEAD~3..HEAD
+///   autoground sweep examples/no-historic-comment.brief --filter "source file"
+///   autoground sweep transcript examples/no-historic-comment.brief chat_history.jsonl
+///   autoground sweep diff examples/no-historic-comment.brief
+///   autoground sweep diff examples/no-historic-comment.brief --cached
+///   autoground sweep diff examples/no-historic-comment.brief HEAD~3..HEAD
 #[derive(Parser, Debug)]
 #[command(
     args_conflicts_with_subcommands = true,
@@ -103,15 +103,15 @@ struct SweepArgs {
 
 #[derive(Subcommand, Debug)]
 enum SweepUniverse {
-    /// Judge the lect against a session transcript.
+    /// Judge the brief against a session transcript.
     ///
     /// `path` is `chat_history.jsonl`, or a directory that contains it.
     /// A match prints the database id.
     ///
     /// Example:
-    ///   autoground sweep transcript examples/no-historic-comment.lect chat_history.jsonl
+    ///   autoground sweep transcript examples/no-historic-comment.brief chat_history.jsonl
     Transcript {
-        /// Model source, a `.lect` file, or a Markdown file of `lect` blocks.
+        /// Model source, a `.brief` file, or a Markdown file of `brief` blocks.
         input: String,
         /// Session directory or `chat_history.jsonl`.
         path: PathBuf,
@@ -120,19 +120,19 @@ enum SweepUniverse {
         #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
         budget: u64,
     },
-    /// Judge the lect against each change in `git diff`.
+    /// Judge the brief against each change in `git diff`.
     ///
-    /// Arguments after the lect are passed to `git diff`. With no arguments
+    /// Arguments after the brief are passed to `git diff`. With no arguments
     /// this is the worktree against the index. A match prints the path of
     /// the change.
     ///
     /// Examples:
-    ///   autoground sweep diff examples/no-historic-comment.lect
-    ///   autoground sweep diff examples/no-historic-comment.lect --cached
-    ///   autoground sweep diff examples/no-historic-comment.lect HEAD~3..HEAD
-    ///   autoground sweep diff examples/no-historic-comment.lect origin/main...HEAD -- src/
+    ///   autoground sweep diff examples/no-historic-comment.brief
+    ///   autoground sweep diff examples/no-historic-comment.brief --cached
+    ///   autoground sweep diff examples/no-historic-comment.brief HEAD~3..HEAD
+    ///   autoground sweep diff examples/no-historic-comment.brief origin/main...HEAD -- src/
     Diff {
-        /// Model source, a `.lect` file, or a Markdown file of `lect` blocks.
+        /// Model source, a `.brief` file, or a Markdown file of `brief` blocks.
         input: String,
         /// Cost cap for this sweep, in cents. The request that crosses the
         /// cap still finishes. Later requests are refused.
@@ -172,7 +172,7 @@ fn sweep_from(args: &SweepArgs) -> Result<u8, Box<dyn std::error::Error>> {
     match &args.universe {
         None => {
             let Some(input) = args.input.as_deref() else {
-                return Err("a lect is required".into());
+                return Err("a brief is required".into());
             };
             let model = Path::new(input);
             let hide = model.is_file().then_some(model);
@@ -234,7 +234,7 @@ fn sweep_cmd(
     traced: Traced<'_>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let started = Instant::now();
-    let base = lect_dir(input);
+    let base = brief_dir(input);
     let (_src, _program, compiled, _vocab) = load_compiled(input, &base)?;
     sweep::ensure_constraints(&compiled.claims)?;
     let log = Log::create_sweep()?;
@@ -351,7 +351,7 @@ fn check_cmd(
     } else {
         None
     };
-    let base = lect_dir(input);
+    let base = brief_dir(input);
     let (src, program, compiled, vocab) = load_compiled(input, &base)?;
     let mut diagram = diagram_of(&program, &vocab);
     let log = Log::create_under(out.unwrap_or_else(|| Path::new(DEFAULT_TRACE_DIR)))?;
@@ -447,9 +447,9 @@ fn finish_check<O: Oracle>(
     Ok(if discharged { 0 } else { 1 })
 }
 
-/// Directory witness paths are relative to. A lect file uses its own directory.
+/// Directory witness paths are relative to. A brief file uses its own directory.
 /// Source passed on the command line uses the current directory.
-fn lect_dir(input: &str) -> PathBuf {
+fn brief_dir(input: &str) -> PathBuf {
     let path = Path::new(input);
     if path.is_file() {
         match path.parent() {
@@ -492,13 +492,13 @@ fn load_compiled(
 
 /// Read `input` as a model file when it names one, otherwise treat it as source.
 ///
-/// A `.lect` file is the model. A Markdown file contributes every fenced `lect` block.
+/// A `.brief` file is the model. A Markdown file contributes every fenced `brief` block.
 fn model_source(input: &str) -> Result<String, Box<dyn std::error::Error>> {
     let path = Path::new(input);
     if path.is_file() {
         let text = std::fs::read_to_string(path)?;
         if has_ext(path, "md") {
-            return Ok(lect_source(&text).map_err(|err| format!("{err} in {input}"))?);
+            return Ok(brief_source(&text).map_err(|err| format!("{err} in {input}"))?);
         }
         return Ok(text);
     }
@@ -506,7 +506,7 @@ fn model_source(input: &str) -> Result<String, Box<dyn std::error::Error>> {
     if trimmed.starts_with('(') {
         return Ok(input.to_string());
     }
-    if has_ext(path, "lect") || has_ext(path, "md") || path.exists() {
+    if has_ext(path, "brief") || has_ext(path, "md") || path.exists() {
         return Err(format!("model file not found: {input}").into());
     }
     Ok(input.to_string())
@@ -529,7 +529,7 @@ mod tests {
             "sweep",
             "--budget",
             "2",
-            "model.lect",
+            "model.brief",
             "--filter",
             "source file",
         ])
@@ -537,7 +537,7 @@ mod tests {
         match files.command {
             Commands::Sweep(args) => {
                 assert!(args.universe.is_none());
-                assert_eq!(args.input.as_deref(), Some("model.lect"));
+                assert_eq!(args.input.as_deref(), Some("model.brief"));
                 assert_eq!(args.filter.as_deref(), Some("source file"));
                 assert_eq!(args.budget, 2);
             }
@@ -550,7 +550,7 @@ mod tests {
             "transcript",
             "--budget",
             "3",
-            "model.lect",
+            "model.brief",
             "chat_history.jsonl",
         ])
         .unwrap();
@@ -561,7 +561,7 @@ mod tests {
                     path,
                     budget,
                 }) => {
-                    assert_eq!(input, "model.lect");
+                    assert_eq!(input, "model.brief");
                     assert_eq!(path, PathBuf::from("chat_history.jsonl"));
                     assert_eq!(budget, 3);
                 }
@@ -576,7 +576,7 @@ mod tests {
             "diff",
             "--budget",
             "5",
-            "model.lect",
+            "model.brief",
             "--cached",
             "-U0",
             "origin/main...HEAD",
@@ -591,7 +591,7 @@ mod tests {
                     budget,
                     git_args,
                 }) => {
-                    assert_eq!(input, "model.lect");
+                    assert_eq!(input, "model.brief");
                     assert_eq!(budget, 5);
                     assert_eq!(
                         git_args,
@@ -607,7 +607,7 @@ mod tests {
             "autoground",
             "sweep",
             "diff",
-            "model.lect",
+            "model.brief",
             "--budget",
             "5",
             "--cached",
@@ -635,7 +635,7 @@ mod tests {
             "--filter",
             "source",
             "diff",
-            "model.lect",
+            "model.brief",
         ])
         .unwrap_err();
         let text = err.to_string();

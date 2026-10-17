@@ -39,6 +39,10 @@ Aligning mental models requires using the same name for things that relate in th
 so consistent naming is the biggest lever for preserving understanding. `brief` is a
 language for establishing shared terminology.
 
+> **[brief](https://www.merriam-webster.com/dictionary/brief)**<br/>
+> *"a formal written presentation of an argument that sets forth the main points with
+> supporting precedents and evidence"*
+
 A brief consists of *names*, *senses*, and *witnesses*:
 
 ```brief
@@ -146,7 +150,7 @@ validated claims, and a `diagram.mmd` of the validated names and senses.
 ## `autoground sweep`
 
 ```
-autoground sweep examples/no-historic-comment.lect --filter "source file"
+autoground sweep examples/no-historic-comment.brief --filter "source file"
 ```
 
 `sweep` is the counterpart to `check`. Where `check` starts from specific files to validate
@@ -162,16 +166,16 @@ writes a detailed trace file that records all calls to the oracle.
 `sweep transcript` judges the tool calls and responses of an agent's session transcript.
 
 ```
-autoground sweep transcript examples/no-historic-comment.lect chat_history.jsonl
+autoground sweep transcript examples/no-historic-comment.brief chat_history.jsonl
 ```
 
 `sweep diff` judges each change in a git diff.
 
 ```
-autoground sweep diff examples/no-historic-comment.lect
-autoground sweep diff examples/no-historic-comment.lect --cached
-autoground sweep diff examples/no-historic-comment.lect HEAD~3..HEAD
-autoground sweep diff examples/no-historic-comment.lect origin/main...HEAD -- src/
+autoground sweep diff examples/no-historic-comment.brief
+autoground sweep diff examples/no-historic-comment.brief --cached
+autoground sweep diff examples/no-historic-comment.brief HEAD~3..HEAD
+autoground sweep diff examples/no-historic-comment.brief origin/main...HEAD -- src/
 ```
 
 

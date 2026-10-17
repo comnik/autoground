@@ -6,7 +6,7 @@
   "evidence": [
     "Cargo.toml",
     "README.md",
-    "evals/madeup-concepts.lect",
+    "evals/madeup-concepts.brief",
     "plans/overview.md",
     "src/eval/mod.rs",
     "src/lib.rs",

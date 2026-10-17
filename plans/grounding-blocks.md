@@ -16,7 +16,7 @@ Requires stay an unordered set of assertions. The DAG is over **argument readine
 
 Compile already stratifies IDB (no negative cycles). This is a coarser, second DAG in front of eval.
 
-On `examples/layered.lect`:
+On `examples/layered.brief`:
 
 | Stratum | Work | Jev? |
 |---|---|---|

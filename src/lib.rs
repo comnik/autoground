@@ -16,7 +16,7 @@ pub use compiler::{
 pub use edb::Store;
 pub use log::Log;
 pub use syntax::{
-    extract_lects, lect_source, parse, print_formula, print_program, Form, Formula, MarkdownError,
+    extract_briefs, brief_source, parse, print_formula, print_program, Form, Formula, MarkdownError,
     ParseError, Program, Proposition, Reading, Sense,
 };
 pub use value::Value;

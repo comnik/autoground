@@ -57,7 +57,7 @@ pub enum Formula {
         reading: Reading,
         args: Vec<Arg>,
     },
-    /// A sentence established by the claims of a lect local to this detail.
+    /// A sentence established by the claims of a brief local to this detail.
     ///
     /// Names and senses in `body` are visible to the head and to those claims,
     /// and nowhere else.
@@ -105,7 +105,7 @@ pub enum Proposition {
     Or(Vec<Proposition>),
     Not(Box<Proposition>),
     Sentence(String),
-    /// `head` is the sentence being detailed. `body` is the lect's claims, in
+    /// `head` is the sentence being detailed. `body` is the brief's claims, in
     /// order, and the detail holds when every one of them holds.
     Detail {
         head: String,

@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn alias_reaches_a_name_and_a_sense_only_when_qualified() {
-        let files = vec![loaded("weird/place/product.lect", PRODUCT)];
+        let files = vec![loaded("weird/place/product.brief", PRODUCT)];
         let compiled = linked(
             r#"
 (ns com.acme.client
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn refer_and_refer_all_import_names_and_senses() {
-        let files = vec![loaded("a.lect", PRODUCT)];
+        let files = vec![loaded("a.brief", PRODUCT)];
         let referred = linked(
             r#"
 (ns com.acme.client
@@ -465,9 +465,9 @@ mod tests {
     #[test]
     fn refer_clash_missing_symbol_missing_namespace_and_self_require() {
         let files = vec![
-            loaded("a.lect", PRODUCT),
+            loaded("a.brief", PRODUCT),
             loaded(
-                "b.lect",
+                "b.brief",
                 r#"
 (ns com.acme.other)
 (name Frontend)
@@ -547,12 +547,12 @@ mod tests {
     fn a_duplicate_namespace_names_both_paths() {
         let files = vec![
             loaded("notes/readme.md", "(ns com.acme.product)\n"),
-            loaded("other/place.lect", "(ns com.acme.product)\n"),
+            loaded("other/place.brief", "(ns com.acme.product)\n"),
         ];
         let err = link(&files[0].program, Some("notes/readme.md"), &files).unwrap_err();
         assert!(
             err.message.contains("notes/readme.md")
-                && err.message.contains("other/place.lect")
+                && err.message.contains("other/place.brief")
                 && err.message.contains("com.acme.product"),
             "{err}"
         );
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn a_bad_dependency_claim_fails_and_its_sentences_stay_out() {
         let broken = loaded(
-            "product.lect",
+            "product.brief",
             r#"
 (ns com.acme.product)
 (name Frontend)
@@ -584,7 +584,7 @@ mod tests {
             "{err}"
         );
 
-        let sound = loaded("product.lect", PRODUCT);
+        let sound = loaded("product.brief", PRODUCT);
         let compiled = linked(
             r#"
 (ns com.acme.client
@@ -605,7 +605,7 @@ mod tests {
     fn cycles_are_allowed() {
         let files = vec![
             loaded(
-                "a.lect",
+                "a.brief",
                 r#"
 (ns com.acme.a
   (:require [com.acme.b :refer [Backend]]))
@@ -615,7 +615,7 @@ mod tests {
 "#,
             ),
             loaded(
-                "b.lect",
+                "b.brief",
                 r#"
 (ns com.acme.b
   (:require [com.acme.a :refer [Frontend part_of]]))
@@ -624,7 +624,7 @@ mod tests {
 "#,
             ),
         ];
-        let compiled = link(&files[0].program, Some("a.lect"), &files).unwrap();
+        let compiled = link(&files[0].program, Some("a.brief"), &files).unwrap();
         assert_eq!(
             compiled.claims,
             vec![crate::syntax::Proposition::Sentence(

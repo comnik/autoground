@@ -1,4 +1,4 @@
-//! Re-check a lect against the files it cites.
+//! Re-check a brief against the files it cites.
 //!
 //! A witness is one sentence judged against the bodies of its paths. A detail
 //! is discharged when its body is discharged and those immediate sentences
@@ -10,7 +10,7 @@
 //! discharged when one part entails the sentence, so the proof cites the file
 //! and the kernel finds the region. A joint witness that does not fit is too
 //! large: the agent splits it into single-file witnesses, and each of those
-//! can be sliced. A witness that cites a `.lect` file is not sent. A lect is a
+//! can be sliced. A witness that cites a `.brief` file is not sent. A brief is a
 //! model, not evidence.
 //!
 //! Check builds its own oracle requests. Sweep does not call these builders,
@@ -46,7 +46,7 @@ const IMPLICATION_TEXT: &str = "sentences entail this claim";
 /// Why a step did not discharge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
-    /// A sentence with no witness and no detail anywhere in the lect.
+    /// A sentence with no witness and no detail anywhere in the brief.
     Unpinned,
     /// A cited path does not resolve to a file.
     MissingFile { path: String },
@@ -56,8 +56,8 @@ pub enum Failure {
     NotEntailed,
     /// The files, or the body sentences, contradict the sentence at the bar.
     Contradicted,
-    /// A witness cites a `.lect` file. A lect is a model, not evidence.
-    LectWitness,
+    /// A witness cites a `.brief` file. A brief is a model, not evidence.
+    BriefWitness,
 }
 
 impl Failure {
@@ -68,7 +68,7 @@ impl Failure {
             Failure::TooLarge => "too large".to_string(),
             Failure::NotEntailed => "not entailed".to_string(),
             Failure::Contradicted => "contradicted".to_string(),
-            Failure::LectWitness => "lects can't be witnesses".to_string(),
+            Failure::BriefWitness => "briefs can't be witnesses".to_string(),
         }
     }
 }
@@ -86,7 +86,7 @@ pub struct Node {
     pub implication: Option<Box<Node>>,
 }
 
-/// A checked lect.
+/// A checked brief.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
     pub claims: Vec<Node>,
@@ -338,8 +338,8 @@ fn prepare_witness<O: Oracle>(
         asked: Vec::new(),
         kind: Kind::Leaf,
     };
-    if paths.iter().any(|path| is_lect_file(path)) {
-        work.failure = Some(Failure::LectWitness);
+    if paths.iter().any(|path| is_brief_file(path)) {
+        work.failure = Some(Failure::BriefWitness);
         return Ok(work);
     }
     let mut files = Vec::with_capacity(paths.len());
@@ -401,14 +401,14 @@ fn prepare_witness<O: Oracle>(
     Ok(work)
 }
 
-/// A `.lect` file is a model, not evidence a witness can cite.
-fn is_lect_file(path: &str) -> bool {
+/// A `.brief` file is a model, not evidence a witness can cite.
+fn is_brief_file(path: &str) -> bool {
     let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    name.eq_ignore_ascii_case(".lect")
-        || (name.len() > ".lect".len()
-            && name[name.len() - ".lect".len()..].eq_ignore_ascii_case(".lect"))
+    name.eq_ignore_ascii_case(".brief")
+        || (name.len() > ".brief".len()
+            && name[name.len() - ".brief".len()..].eq_ignore_ascii_case(".brief"))
 }
 
 fn prepare_implication<O: Oracle>(head: &str, body: &[Proposition], oracle: &mut O) -> Work {
@@ -589,7 +589,7 @@ fn push_tickets(work: &Work, tickets: &mut Vec<Ticket>) {
 
 /// A settled step, before lemma uses are filled in.
 ///
-/// A use names a detail that may be settled later in the lect, so its value
+/// A use names a detail that may be settled later in the brief, so its value
 /// waits until every detail has a value.
 struct Judged {
     text: String,
@@ -1006,38 +1006,38 @@ mod tests {
     }
 
     #[test]
-    fn a_witness_that_cites_a_lect_is_rejected() {
-        let dir = scratch("lect-witness");
-        let lect_dir = dir.join("examples");
-        fs::create_dir(&lect_dir).unwrap();
-        fs::write(dir.join("Notes.LECT"), "alpha\n").unwrap();
-        fs::write(lect_dir.join("notes.lect"), "alpha\n").unwrap();
-        fs::write(lect_dir.join("note.txt"), "alpha\n").unwrap();
-        fs::write(lect_dir.join("file.lecture"), "alpha\n").unwrap();
+    fn a_witness_that_cites_a_brief_is_rejected() {
+        let dir = scratch("brief-witness");
+        let brief_dir = dir.join("examples");
+        fs::create_dir(&brief_dir).unwrap();
+        fs::write(dir.join("Notes.BRIEF"), "alpha\n").unwrap();
+        fs::write(brief_dir.join("notes.brief"), "alpha\n").unwrap();
+        fs::write(brief_dir.join("note.txt"), "alpha\n").unwrap();
+        fs::write(brief_dir.join("file.briefing"), "alpha\n").unwrap();
         let mut oracle = Rec::new(entailed);
         for src in [
-            "(witness (\"alpha\") \"notes.lect\")",
-            "(witness (\"alpha\") \"../Notes.LECT\")",
-            "(witness (\"alpha\") \".lect\")",
-            "(witness (\"alpha\") \"note.txt\" \"notes.lect\")",
+            "(witness (\"alpha\") \"notes.brief\")",
+            "(witness (\"alpha\") \"../Notes.BRIEF\")",
+            "(witness (\"alpha\") \".brief\")",
+            "(witness (\"alpha\") \"note.txt\" \"notes.brief\")",
         ] {
-            let report = check(&compiled(src), &lect_dir, DEFAULT_BODY_BYTES, &mut oracle).unwrap();
+            let report = check(&compiled(src), &brief_dir, DEFAULT_BODY_BYTES, &mut oracle).unwrap();
             assert_eq!(report.claims[0].value, Value::Unknown, "{src}");
             assert_eq!(
                 report.claims[0].failure,
-                Some(Failure::LectWitness),
+                Some(Failure::BriefWitness),
                 "{src}"
             );
             assert!(
-                write_report(&report).contains(";; lects can't be witnesses"),
+                write_report(&report).contains(";; briefs can't be witnesses"),
                 "{src}"
             );
         }
         assert!(oracle.seen.is_empty());
 
         let report = check(
-            &compiled("(witness (\"alpha\") \"file.lecture\")"),
-            &lect_dir,
+            &compiled("(witness (\"alpha\") \"file.briefing\")"),
+            &brief_dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
         )
@@ -1047,15 +1047,15 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_path_is_read_from_the_lect_directory() {
+    fn a_parent_path_is_read_from_the_brief_directory() {
         let dir = scratch("parent");
-        let lect_dir = dir.join("examples");
-        fs::create_dir(&lect_dir).unwrap();
+        let brief_dir = dir.join("examples");
+        fs::create_dir(&brief_dir).unwrap();
         fs::write(dir.join("note.txt"), "alpha\n").unwrap();
         let mut oracle = Rec::new(entailed);
         let report = check(
             &compiled("(witness (\"alpha\") \"../note.txt\")"),
-            &lect_dir,
+            &brief_dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
         )

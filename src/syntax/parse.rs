@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_detail_that_cannot_be_a_lect() {
+    fn rejects_a_detail_that_cannot_be_a_brief() {
         for (src, needle) in [
             ("(detail)", "takes a sentence"),
             ("(detail (\"only the head\"))", "takes a sentence"),
@@ -1237,7 +1237,7 @@ mod tests {
 
     #[test]
     fn claim_spans_are_the_source_text() {
-        let src = include_str!("../../examples/diagram.lect");
+        let src = include_str!("../../examples/diagram.brief");
         let program = parse(src).unwrap();
         let spans = program.claim_spans();
         assert_eq!(spans.len(), 4);

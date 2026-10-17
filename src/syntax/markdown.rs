@@ -1,15 +1,15 @@
-/// The bodies of fenced `lect` blocks, in document order.
+/// The bodies of fenced `brief` blocks, in document order.
 ///
 /// A fence is a line of at least three backticks or tildes whose info string
-/// starts with `lect`. The body runs to the matching closer, or to the end of
+/// starts with `brief`. The body runs to the matching closer, or to the end of
 /// the document when the closer is missing. Up to three leading spaces on the
 /// fence are stripped from each body line.
-pub fn extract_lects(markdown: &str) -> Vec<String> {
+pub fn extract_briefs(markdown: &str) -> Vec<String> {
     let lines: Vec<&str> = markdown.lines().collect();
     let mut blocks = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        if let Some(open) = opening_lect_fence(lines[i]) {
+        if let Some(open) = opening_brief_fence(lines[i]) {
             i += 1;
             let start = i;
             while i < lines.len() && !closing_fence(lines[i], &open) {
@@ -26,9 +26,9 @@ pub fn extract_lects(markdown: &str) -> Vec<String> {
     blocks
 }
 
-/// Concatenate [`extract_lects`].
-pub fn lect_source(markdown: &str) -> Result<String, MarkdownError> {
-    let blocks = extract_lects(markdown);
+/// Concatenate [`extract_briefs`].
+pub fn brief_source(markdown: &str) -> Result<String, MarkdownError> {
+    let blocks = extract_briefs(markdown);
     if blocks.is_empty() {
         return Err(MarkdownError);
     }
@@ -40,7 +40,7 @@ pub struct MarkdownError;
 
 impl std::fmt::Display for MarkdownError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "no lect blocks")
+        write!(f, "no brief blocks")
     }
 }
 
@@ -52,7 +52,7 @@ struct OpenFence {
     indent: usize,
 }
 
-fn opening_lect_fence(line: &str) -> Option<OpenFence> {
+fn opening_brief_fence(line: &str) -> Option<OpenFence> {
     let indent = leading_spaces(line);
     if indent > 3 {
         return None;
@@ -67,7 +67,7 @@ fn opening_lect_fence(line: &str) -> Option<OpenFence> {
         return None;
     }
     let word = info.trim().split_whitespace().next().unwrap_or("");
-    if !word.eq_ignore_ascii_case("lect") {
+    if !word.eq_ignore_ascii_case("brief") {
         return None;
     }
     Some(OpenFence { ch, len, indent })
@@ -118,7 +118,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collects_lect_fences_and_skips_other_blocks() {
+    fn collects_brief_fences_and_skips_other_blocks() {
         let md = "\
 # notes
 
@@ -126,23 +126,23 @@ mod tests {
 fn main() {}
 ```
 
-```lect
+```brief
 (name Frontend)
 (\"Frontend is a component\")
 ```
 
-Prose with `lect` in it.
+Prose with `brief` in it.
 
-~~~lect title
+~~~brief title
 (name Backend)
 ~~~
 
-```lecture
+```briefing
 (name Nope)
 ```
 ";
         assert_eq!(
-            lect_source(md).unwrap(),
+            brief_source(md).unwrap(),
             "(name Frontend)\n(\"Frontend is a component\")\n(name Backend)\n"
         );
     }
@@ -150,30 +150,30 @@ Prose with `lect` in it.
     #[test]
     fn a_longer_fence_holds_a_shorter_one() {
         let md = "\
-````lect
+````brief
 ```
 (name Frontend)
 ```
 ````
 ";
-        assert_eq!(lect_source(md).unwrap(), "```\n(name Frontend)\n```\n");
+        assert_eq!(brief_source(md).unwrap(), "```\n(name Frontend)\n```\n");
     }
 
     #[test]
     fn fence_indent_is_stripped_from_the_body() {
-        let md = "  ```lect\n  (name Frontend)\n  ```\n";
-        assert_eq!(lect_source(md).unwrap(), "(name Frontend)\n");
+        let md = "  ```brief\n  (name Frontend)\n  ```\n";
+        assert_eq!(brief_source(md).unwrap(), "(name Frontend)\n");
     }
 
     #[test]
     fn an_unclosed_fence_runs_to_the_end() {
-        let md = "```lect\n(name Frontend)\n";
-        assert_eq!(lect_source(md).unwrap(), "(name Frontend)\n");
+        let md = "```brief\n(name Frontend)\n";
+        assert_eq!(brief_source(md).unwrap(), "(name Frontend)\n");
     }
 
     #[test]
-    fn prose_has_no_lect_blocks() {
-        let err = lect_source("# hello\n\n```rust\nfn main() {}\n```\n").unwrap_err();
-        assert_eq!(err.to_string(), "no lect blocks");
+    fn prose_has_no_brief_blocks() {
+        let err = brief_source("# hello\n\n```rust\nfn main() {}\n```\n").unwrap_err();
+        assert_eq!(err.to_string(), "no brief blocks");
     }
 }

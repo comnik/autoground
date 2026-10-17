@@ -2,7 +2,7 @@
 //!
 //! While requests are in flight, one status line names the sentence being
 //! judged. The working line stops short of the last column and leaves the
-//! last row free. When the check finishes, the view is the lect, printed
+//! last row free. When the check finishes, the view is the brief, printed
 //! once: each judged clause carries its own mark, and an undischarged clause
 //! carries its failure comment. Piped output never draws this.
 
@@ -120,7 +120,7 @@ impl CheckView {
         self.frame(width.max(20), usize::MAX)
     }
 
-    /// `max_rows` bounds the working line. The finished lect ignores it and
+    /// `max_rows` bounds the working line. The finished brief ignores it and
     /// is printed once, so a long file may scroll.
     fn frame(&self, width: usize, _max_rows: usize) -> Vec<Row> {
         let width = width.max(1);
@@ -131,7 +131,7 @@ impl CheckView {
     }
 }
 
-/// Columns and rows a working frame may occupy. The finished lect is not
+/// Columns and rows a working frame may occupy. The finished brief is not
 /// limited: it is drawn once.
 fn viewport(cols: usize, rows: usize, done: bool) -> (usize, usize) {
     let width = cols.saturating_sub(1).max(1);
@@ -699,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn finished_view_marks_the_lect() {
+    fn finished_view_marks_the_brief() {
         let src = "\
 (witness (\"search finds the window\") \"src/search.rs\")
 (\"bare sentence\")

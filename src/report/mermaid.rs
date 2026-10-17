@@ -1,4 +1,4 @@
-//! Mermaid diagram of a lect.
+//! Mermaid diagram of a brief.
 //!
 //! Names are nodes, binary sense applications are edges, and details are
 //! subgraphs. A closing `senses` subgraph verbalizes each reading. One oracle
@@ -38,7 +38,7 @@ pub fn write_diagram(trace: &Path, diagram: &Diagram, styles: &Styles) -> io::Re
     Ok(path)
 }
 
-/// The named picture of one lect.
+/// The named picture of one brief.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagram {
     root: Scope,
@@ -1144,8 +1144,8 @@ mod tests {
     }
 
     #[test]
-    fn a_diagram_lect_draws_binary_senses_and_skips_prose() {
-        let text = drawn(include_str!("../../examples/diagram.lect"));
+    fn a_diagram_brief_draws_binary_senses_and_skips_prose() {
+        let text = drawn(include_str!("../../examples/diagram.brief"));
         assert!(text.contains("n_Frontend[\"Frontend\"]:::normal"), "{text}");
         assert!(text.contains("n_Backend[\"Backend\"]:::normal"), "{text}");
         assert!(text.contains("n_Oracle[\"Oracle\"]:::normal"), "{text}");
@@ -1306,7 +1306,7 @@ flowchart TD
 
     #[test]
     fn priority_picks_the_cylinder_the_arrow_and_the_link_style() {
-        let program = parse(include_str!("../../examples/diagram.lect")).unwrap();
+        let program = parse(include_str!("../../examples/diagram.brief")).unwrap();
         let diagram = diagram_of(&program, &Vocabulary::none());
         let mut styles = Styles::plain();
         styles.kinds.insert("Frontend".into(), Kind::Data);
@@ -1358,7 +1358,7 @@ flowchart TD
     #[test]
     fn a_contradicted_sentence_dashes_its_edge_in_red() {
         let mut diagram = diagram_of(
-            &parse(include_str!("../../examples/diagram.lect")).unwrap(),
+            &parse(include_str!("../../examples/diagram.brief")).unwrap(),
             &Vocabulary::none(),
         );
         diagram.mark_contradicted(&HashSet::from([
@@ -1413,7 +1413,7 @@ LogicBlockBuilder produces LogicBlock
 
     #[test]
     fn style_questions_share_the_context_and_ask_per_name() {
-        let program = parse(include_str!("../../examples/diagram.lect")).unwrap();
+        let program = parse(include_str!("../../examples/diagram.brief")).unwrap();
         let diagram = diagram_of(&program, &Vocabulary::none());
         let context = "Frontend depends on Backend\n";
         let batch = style_questions(&diagram, context).unwrap();
@@ -1469,7 +1469,7 @@ LogicBlockBuilder produces LogicBlock
     }
 
     #[test]
-    fn a_prose_lect_is_only_the_legend_frame() {
+    fn a_prose_brief_is_only_the_legend_frame() {
         assert_eq!(
             drawn("(\"there is a GPU compiler\")"),
             "\
@@ -1488,7 +1488,7 @@ flowchart TD
     #[test]
     fn an_imported_sense_is_verbalized_when_an_edge_uses_it() {
         let files = vec![Loaded {
-            path: "product.lect".into(),
+            path: "product.brief".into(),
             program: parse(
                 r#"
 (ns com.acme.product)

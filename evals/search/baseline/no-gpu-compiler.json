@@ -6,8 +6,8 @@
   "evidence": [
     "Cargo.toml",
     "README.md",
-    "evals/concepts.lect",
-    "evals/madeup-concepts.lect",
+    "evals/concepts.brief",
+    "evals/madeup-concepts.brief",
     "src/core/mod.rs",
     "src/lib.rs",
     "src/navigator/jev.rs",

@@ -450,9 +450,9 @@ fn resolve_witness(
     };
     let mut seen = HashSet::new();
     for path in paths {
-        if !is_lect_path(path) {
+        if !is_brief_path(path) {
             return Err(CompileError {
-                message: format!("`{path}` is not a path relative to the lect"),
+                message: format!("`{path}` is not a path relative to the brief"),
             });
         }
         if !seen.insert(path.clone()) {
@@ -467,8 +467,8 @@ fn resolve_witness(
     })
 }
 
-/// A witness path is relative to the lect file. `..` is a parent of that file.
-fn is_lect_path(path: &str) -> bool {
+/// A witness path is relative to the brief file. `..` is a parent of that file.
+fn is_brief_path(path: &str) -> bool {
     if path.is_empty() || path.starts_with('/') || path.contains('\\') {
         return false;
     }
@@ -863,12 +863,12 @@ mod tests {
     }
 
     #[test]
-    fn a_witness_path_is_relative_to_the_lect() {
+    fn a_witness_path_is_relative_to_the_brief() {
         for (src, path) in [
             ("(witness (\"a\") \"../notes.txt\")", "../notes.txt"),
             (
-                "(witness (\"a\") \"examples/sqrt2.lect\")",
-                "examples/sqrt2.lect",
+                "(witness (\"a\") \"examples/sqrt2.brief\")",
+                "examples/sqrt2.brief",
             ),
         ] {
             let compiled = compiled(src);
@@ -883,7 +883,7 @@ mod tests {
         for (src, needle) in [
             (
                 "(witness (\"a\") \"/etc/passwd\")",
-                "`/etc/passwd` is not a path relative to the lect",
+                "`/etc/passwd` is not a path relative to the brief",
             ),
             (
                 "(witness (\"a\") \"src/a.rs\" \"src/a.rs\")",

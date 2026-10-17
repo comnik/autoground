@@ -1,4 +1,4 @@
-//! Judge a witness-free lect against every readable database in a universe.
+//! Judge a witness-free brief against every readable database in a universe.
 //!
 //! The universe is the current directory, a transcript, or a git diff. On the
 //! filesystem, sweep optionally keeps paths that match a natural-language
@@ -93,7 +93,7 @@ pub fn failed_message(failed: usize) -> String {
     }
 }
 
-/// `witness` and `detail` are check's forms. A sweep lect states claims.
+/// `witness` and `detail` are check's forms. A sweep brief states claims.
 pub fn ensure_constraints(claims: &[Proposition]) -> Result<(), SweepError> {
     for claim in claims {
         reject(claim)?;

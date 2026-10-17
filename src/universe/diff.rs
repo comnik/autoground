@@ -40,7 +40,7 @@ impl Diff {
     /// `git_args` are appended to `git diff`. An empty list is the worktree
     /// against the index.
     ///
-    /// A path ending in `.lect` is omitted. `hide`, when it lives under
+    /// A path ending in `.brief` is omitted. `hide`, when it lives under
     /// `root`, is omitted too.
     pub fn open(
         root: &Path,
@@ -277,7 +277,7 @@ fn split_patches(patch: &str) -> Vec<String> {
 
 fn visible(id: &str, model: Option<&str>) -> bool {
     let name = id.rsplit('/').next().unwrap_or(id);
-    if name.ends_with(".lect") {
+    if name.ends_with(".brief") {
         return false;
     }
     model != Some(id)
@@ -450,7 +450,7 @@ mod tests {
         std::fs::write(dir.join("gone.txt"), "gone\n").unwrap();
         std::fs::write(dir.join("oldname.txt"), "plain\n").unwrap();
         std::fs::write(dir.join("my file.txt"), "space\n").unwrap();
-        std::fs::write(dir.join("model.lect"), "(name X)\n").unwrap();
+        std::fs::write(dir.join("model.brief"), "(name X)\n").unwrap();
         std::fs::write(dir.join("notes.md"), "old notes\n").unwrap();
         commit(&dir, "init");
 
@@ -459,7 +459,7 @@ mod tests {
         git(&dir, &["mv", "oldname.txt", "new name.txt"]);
         std::fs::write(dir.join("src/a.txt"), "new line\n").unwrap();
         std::fs::write(dir.join("my file.txt"), "spaced\n").unwrap();
-        std::fs::write(dir.join("model.lect"), "(name Y)\n").unwrap();
+        std::fs::write(dir.join("model.brief"), "(name Y)\n").unwrap();
         std::fs::write(dir.join("notes.md"), "new notes\n").unwrap();
         std::fs::remove_file(dir.join("gone.txt")).unwrap();
         std::fs::write(dir.join("extra.txt"), "untracked\n").unwrap();

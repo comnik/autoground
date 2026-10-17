@@ -18,13 +18,13 @@ fn scratch(label: &str) -> PathBuf {
 /// A one-line file and a witness that quotes it.
 fn quoted_witness(dir: &Path) -> PathBuf {
     std::fs::write(dir.join("note.txt"), "alpha is the first letter.\n").unwrap();
-    let lect = dir.join("model.lect");
+    let brief = dir.join("model.brief");
     std::fs::write(
-        &lect,
+        &brief,
         "(witness (\"alpha is the first letter.\") \"note.txt\")\n",
     )
     .unwrap();
-    lect
+    brief
 }
 
 fn line<'a>(stdout: &'a str, prefix: &str) -> &'a str {
@@ -37,9 +37,9 @@ fn line<'a>(stdout: &'a str, prefix: &str) -> &'a str {
 #[test]
 fn check_discharges_a_quoted_witness() {
     let dir = scratch("quote");
-    let lect = quoted_witness(&dir);
+    let brief = quoted_witness(&dir);
     let out = bin()
-        .args(["check", lect.to_str().unwrap()])
+        .args(["check", brief.to_str().unwrap()])
         .output()
         .expect("run autoground");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -88,10 +88,10 @@ alpha is the first letter.
 #[test]
 fn check_exits_nonzero_when_a_claim_is_undischarged() {
     let dir = scratch("open");
-    let lect = dir.join("model.lect");
-    std::fs::write(&lect, "(\"nothing cites this\")\n").unwrap();
+    let brief = dir.join("model.brief");
+    std::fs::write(&brief, "(\"nothing cites this\")\n").unwrap();
     let out = bin()
-        .args(["check", lect.to_str().unwrap()])
+        .args(["check", brief.to_str().unwrap()])
         .output()
         .expect("run autoground");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -119,12 +119,12 @@ fn check_exits_nonzero_when_a_claim_is_undischarged() {
 #[test]
 fn check_out_writes_the_session_there() {
     let dir = scratch("out");
-    let lect = quoted_witness(&dir);
+    let brief = quoted_witness(&dir);
     let out_dir = dir.join("sessions");
     let out = bin()
         .args([
             "check",
-            lect.to_str().unwrap(),
+            brief.to_str().unwrap(),
             "--out",
             out_dir.to_str().unwrap(),
         ])
@@ -174,12 +174,12 @@ fn check_rejects_an_undeclared_name() {
 }
 
 #[test]
-fn check_reads_lect_blocks_from_markdown() {
+fn check_reads_brief_blocks_from_markdown() {
     let dir = scratch("md");
     let path = dir.join("notes.md");
     std::fs::write(
         &path,
-        "# notes\n\n```lect\n(\"Frontend is a component\")\n```\n",
+        "# notes\n\n```brief\n(\"Frontend is a component\")\n```\n",
     )
     .unwrap();
     let out = bin()
@@ -199,7 +199,7 @@ fn check_reads_lect_blocks_from_markdown() {
 }
 
 #[test]
-fn check_rejects_markdown_without_lect_blocks() {
+fn check_rejects_markdown_without_brief_blocks() {
     let dir = scratch("md-empty");
     let path = dir.join("notes.md");
     std::fs::write(&path, "# notes\n\n```rust\nfn main() {}\n```\n").unwrap();
@@ -210,5 +210,5 @@ fn check_rejects_markdown_without_lect_blocks() {
     let _ = std::fs::remove_dir_all(&dir);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(3), "{stderr}");
-    assert!(stderr.contains("no lect blocks"), "{stderr}");
+    assert!(stderr.contains("no brief blocks"), "{stderr}");
 }

@@ -18,11 +18,11 @@ fn scratch(label: &str) -> PathBuf {
 #[test]
 fn sweep_rejects_a_witness_before_the_oracle() {
     let dir = scratch("witness");
-    let lect = dir.join("model.lect");
-    std::fs::write(&lect, "(witness (\"alpha\") \"note.txt\")\n").unwrap();
+    let brief = dir.join("model.brief");
+    std::fs::write(&brief, "(witness (\"alpha\") \"note.txt\")\n").unwrap();
     let out = bin()
         .current_dir(&dir)
-        .args(["sweep", "model.lect"])
+        .args(["sweep", "model.brief"])
         .output()
         .unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();

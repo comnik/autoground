@@ -6,7 +6,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use super::{Universe, UniverseError};
 
-/// Gitignored paths, `.git` / `.gitignore`, `.lect` files, plus the model file
+/// Gitignored paths, `.git` / `.gitignore`, `.brief` files, plus the model file
 /// when it lives inside the repo.
 #[derive(Default, Clone)]
 pub struct ListingFilter {
@@ -38,7 +38,7 @@ impl ListingFilter {
         if self.outside(rel) {
             return true;
         }
-        if is_git_meta(rel) || (!is_dir && is_lect(rel)) {
+        if is_git_meta(rel) || (!is_dir && is_brief(rel)) {
             return true;
         }
         if self.model_rel.as_deref() == Some(rel) {
@@ -69,12 +69,12 @@ fn is_git_meta(rel: &str) -> bool {
         .any(|part| part == ".git" || part == ".gitignore")
 }
 
-/// A `.lect` file is a model, not evidence. The namespace scan still reads these.
-fn is_lect(rel: &str) -> bool {
+/// A `.brief` file is a model, not evidence. The namespace scan still reads these.
+fn is_brief(rel: &str) -> bool {
     rel.rsplit_once('/')
         .map(|(_, name)| name)
         .unwrap_or(rel)
-        .ends_with(".lect")
+        .ends_with(".brief")
 }
 
 fn load_gitignore(root: &Path) -> Option<Gitignore> {
@@ -460,10 +460,10 @@ mod tests {
     }
 
     #[test]
-    fn lect_files_are_hidden() {
-        let root = scratch_dir("lect");
+    fn brief_files_are_hidden() {
+        let root = scratch_dir("brief");
         std::fs::create_dir_all(root.join("models")).unwrap();
-        std::fs::write(root.join("models/map.lect"), "(name X)\n").unwrap();
+        std::fs::write(root.join("models/map.brief"), "(name X)\n").unwrap();
         std::fs::write(root.join("keep.txt"), "yes\n").unwrap();
         std::fs::write(root.join("notes.md"), "# hi\n").unwrap();
         let filter = ListingFilter::from_repo(&root);
@@ -477,7 +477,7 @@ mod tests {
         assert!(names.contains(&"models"), "{names:?}");
         assert!(nested.is_empty(), "{nested:?}");
         assert!(
-            !leaves.iter().any(|path| path.ends_with(".lect")),
+            !leaves.iter().any(|path| path.ends_with(".brief")),
             "{leaves:?}"
         );
     }
@@ -665,10 +665,10 @@ mod tests {
         let model = root.join("model.md");
         std::fs::write(&model, "# model\n").unwrap();
         std::fs::write(root.join("keep.txt"), "yes\n").unwrap();
-        std::fs::write(root.join("claims.lect"), "(name X)\n").unwrap();
+        std::fs::write(root.join("claims.brief"), "(name X)\n").unwrap();
         let mut fs = Filesystem::at_root(&root).unwrap();
         assert!(fs.databases().contains(&"model.md".to_string()));
-        assert!(!fs.databases().iter().any(|id| id.ends_with(".lect")));
+        assert!(!fs.databases().iter().any(|id| id.ends_with(".brief")));
         fs.hide_model(&model);
         assert_eq!(fs.databases(), &["keep.txt".to_string()]);
         assert_eq!(fs.children("").unwrap(), vec!["keep.txt".to_string()]);
