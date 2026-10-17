@@ -1,6 +1,5 @@
-//! Closing lines of `autoground check`: where the trace, the context, and the
-//! diagram went, how full the in-flight cap stayed, the shape of round-trip
-//! latency, and what the run cost.
+//! Closing lines of a run: where the trace went, how full the in-flight cap
+//! stayed, the shape of round-trip latency, and what the run cost.
 
 use std::io::{self, stdout, IsTerminal, Write};
 use std::path::Path;
@@ -37,24 +36,6 @@ struct Painted {
     bold: bool,
 }
 
-/// `requests`, `tokens`, `spend`, `batch`, and `fill`, without latency.
-pub fn format_usage_stats(usage: &Usage) -> String {
-    let batch = match usage.batch_size {
-        Some(factor) => format!("{:.1}%", factor * 100.0),
-        None => "none".to_string(),
-    };
-    let fill = match usage.fill_factor {
-        Some(factor) => format!("{:.1}%", factor * 100.0),
-        None => "none".to_string(),
-    };
-    format!(
-        "requests={} tokens={} spend={} batch={batch} fill={fill}",
-        usage.requests,
-        usage.input_tokens,
-        super::format_usd(usage.spend_usd),
-    )
-}
-
 pub fn print_run_summary(
     usage: &Usage,
     flights: &[Flight],
@@ -85,6 +66,90 @@ pub fn print_run_summary(
         write_line(&mut out, &line, color)?;
     }
     out.flush()
+}
+
+/// Throughput, latency, and how many files were judged. Written to stderr so a
+/// sweep's `CLEAN` line and its matches stay the whole of stdout.
+pub fn print_sweep_summary(
+    usage: &Usage,
+    flights: &[Flight],
+    flight_limit: Option<usize>,
+    judged: usize,
+    candidates: usize,
+    elapsed: Duration,
+    trace: &Path,
+    note: Option<&str>,
+) -> io::Result<()> {
+    let color = std::io::stderr().is_terminal();
+    let width = terminal::size()
+        .map(|(columns, _)| columns as usize)
+        .unwrap_or(80);
+    let mut out = std::io::stderr();
+    if color {
+        writeln!(out)?;
+    }
+    for line in sweep_lines(
+        usage,
+        flights,
+        flight_limit,
+        judged,
+        candidates,
+        elapsed,
+        trace,
+        note,
+        width,
+    ) {
+        write_line(&mut out, &line, color)?;
+    }
+    out.flush()
+}
+
+fn sweep_lines(
+    usage: &Usage,
+    flights: &[Flight],
+    flight_limit: Option<usize>,
+    judged: usize,
+    candidates: usize,
+    elapsed: Duration,
+    trace: &Path,
+    note: Option<&str>,
+    width: usize,
+) -> Vec<Painted> {
+    let mut lines = vec![
+        rule(width),
+        plain(format!("trace available at {}", trace.display())),
+        throughput_line(usage, flights, flight_limit),
+    ];
+    if let Some(text) = latency_line(usage, flights) {
+        lines.push(plain(text));
+    }
+    lines.push(plain(utilization_line(usage)));
+    lines.push(files_judged(judged, candidates, elapsed, usage));
+    if let Some(note) = note {
+        lines.push(plain(note.to_string()));
+    }
+    lines
+}
+
+fn files_judged(judged: usize, candidates: usize, elapsed: Duration, usage: &Usage) -> Painted {
+    let text = format!(
+        "{judged}/{candidates} files judged in {} for {} ({} tokens)",
+        super::format_duration(elapsed),
+        super::format_usd(usage.spend_usd),
+        format_tokens(usage.input_tokens),
+    );
+    let paint = if candidates > 0 && judged == candidates {
+        Paint::Green
+    } else if candidates > 0 {
+        Paint::Red
+    } else {
+        Paint::Plain
+    };
+    Painted {
+        text,
+        paint,
+        bold: candidates > 0,
+    }
 }
 
 fn painted(
@@ -542,6 +607,59 @@ mod tests {
                 "0/0 claims validated in 4ms for $0.000000 (0 tokens)".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn a_sweep_summary_plots_throughput_and_names_the_files() {
+        let flights = vec![flight(0, 257), flight(10, 360), flight(20, 460)];
+        let lines = sweep_lines(
+            &Usage {
+                spend_usd: 0.0057,
+                input_tokens: 135_682,
+                requests: 54,
+                batch_size: Some(0.025),
+                fill_factor: Some(0.079),
+                latency: Some(LatencyPercentiles {
+                    p50: Duration::from_millis(257),
+                    p95: Duration::from_millis(356),
+                    p99: Duration::from_millis(440),
+                }),
+            },
+            &flights,
+            Some(16),
+            53,
+            53,
+            Duration::from_millis(4_200),
+            Path::new("/tmp/autoground/sweep-1.jsonl"),
+            None,
+            40,
+        )
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>();
+        let throughput = lines
+            .iter()
+            .find(|line| line.starts_with("throughput"))
+            .unwrap();
+        let latency = lines
+            .iter()
+            .find(|line| line.starts_with("latency"))
+            .unwrap();
+        assert_eq!(&throughput[..11], "throughput ");
+        assert!(throughput.contains("54 requests averaging"), "{throughput}");
+        assert_eq!(&latency[..11], "latency    ", "{latency}");
+        assert!(latency.contains("p50 257ms"), "{latency}");
+        assert!(latency.contains("p95 356ms"), "{latency}");
+        assert!(latency.contains("p99 440ms"), "{latency}");
+        assert!(lines.iter().any(|line| line.starts_with("utilization")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "53/53 files judged in 4.20s for $0.0057 (135k tokens)"),
+            "{lines:?}"
+        );
+        assert!(lines.iter().all(|line| !line.contains("context")));
+        assert!(lines.iter().all(|line| !line.contains("diagram")));
     }
 
     #[test]

@@ -12,6 +12,9 @@
 //! large: the agent splits it into single-file witnesses, and each of those
 //! can be sliced. A witness that cites a `.lect` file is not sent. A lect is a
 //! model, not evidence.
+//!
+//! Check builds its own oracle requests. Sweep does not call these builders,
+//! so the two commands can be calibrated apart.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -32,7 +35,7 @@ pub const DEFAULT_BODY_BYTES: usize = 128 * 1024;
 ///
 /// Sixty-four parts at the default body budget. Each part is its own request,
 /// and the run cap is one cent.
-const MAX_SLICED_BYTES: usize = DEFAULT_BODY_BYTES.saturating_mul(64);
+pub(crate) const MAX_SLICED_BYTES: usize = DEFAULT_BODY_BYTES.saturating_mul(64);
 
 const DOCUMENT_QUESTION: &str = "How does `body` at `path` ground the proposition?";
 const PART_QUESTION: &str = "How does this part of `body` at `path` ground the proposition? Text outside this part is not visible.";

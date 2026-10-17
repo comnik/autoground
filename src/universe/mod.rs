@@ -1,21 +1,16 @@
 //! A refinable view over a tree of databases.
 //!
-//! Files, directories, tool call results, and other databases are all serializable.
-//! Only some (e.g. directories) have true summaries. A database with a summary
-//! is classified from that text. A database without one is read.
+//! Files and directories are serializable. A directory has a summary: its
+//! listing. A file does not, and is read.
 //!
-//! Database ids are path-like strings, e.g. POSIX relative paths for a filesystem
-//! (`frontend/app.py`, root `""`), or synthetic ids like `p0/c0/00-call-read_file` for a
-//! tool call in an agent transcript.
+//! Database ids are POSIX relative paths (`frontend/app.py`, root `""`).
 
 pub mod fs;
-pub mod transcript;
 
 use std::fmt;
 use std::io;
 
 pub use fs::Filesystem;
-pub use transcript::Transcript;
 
 pub trait Universe {
     /// IDs of all databases in the current view.

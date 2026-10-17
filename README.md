@@ -77,17 +77,25 @@ $$ \mathbf{U}(p) := \Omega((\mathbf{U}, p), \lbrace \text{entailed} \mid \text{c
 \mid \text{neutral} \rbrace) $$
 
 The oracle, however, is limited to a single context window worth of input for any single
-call. To work around this limitation, we effectively do a oracle-guided *search* to find
-relevant context windows, followed by a map-reduce-like evaluation on all of those.
+call. Sweep lists the tree, optionally keeps paths that match a natural-language filter,
+and then judges the lect against each remaining file. The filter sees the listing only.
+The file judgement sees that file's body.
 
-#### Search
+#### Sweep
 
-Search leverages the oracle to construct a candidate view: the paths in the universe that
-should be explored in order to evaluate a proposition. For every path, it asks the oracle
-whether that path is *irrelevant* to the given proposition. Only a confident "irrelevant"
-results in the path getting pruned from the candidate view. This keeps search conservative,
-while giving us a relevance signal in which to judge the remaining files. Search never
-reads file contents.
+`autoground sweep` judges a lect that has no witnesses. It lists every file in the
+current directory, asks the oracle which paths match `--filter` when one is given,
+and evaluates the lect against each file that remains. A file matches when any
+top-level claim is true. A complete sweep with no match prints `CLEAN`. `--budget`
+is the cost cap in cents and defaults to 1. The trace is `sweep-<id>.jsonl` under
+`/tmp/autoground/`. Stderr shows the same throughput and latency plots as `check`,
+and how many files were judged. A sweep that hits the cap ends with `INCOMPLETE`.
+
+```
+autoground sweep examples/no-historic-comment.lect --filter "source file"
+```
+
+A match prints the absolute path and one `Matched:` line per true claim.
 
 #### Check
 
@@ -104,9 +112,6 @@ Exit status is 0 when every top-level claim is discharged, 1 otherwise, and 3 on
 compile, IO, or oracle failure. Each check writes `trace.jsonl`, `context.md`, and
 `diagram.mmd` into a new directory under `/tmp/autoground/`. `--out` chooses a different
 parent. On a terminal the finished view is the lect itself.
-
-`autoground search` remains a separate walk over a repository or a transcript. A
-transcript is evidence for check only when a witness cites it as a file.
 
 ### The `lect` Language
 
@@ -185,7 +190,7 @@ autoground check examples/sqrt2.lect
 
 ### Milestones
 
-- [x] `autoground search "<proposition>"`
+- [x] `autoground sweep <lect>`: judge a lect against every file and report matches
 - [x] `autoground check xyz.lect`: re-check a lect against the files it cites
 
 ### Interfaces
@@ -210,14 +215,14 @@ A database with a summary is classified from that text. A database without one i
 - wait for a ticket when the label is required; pending questions that share a `state` go in one request, independent states overlap
 - report usage on this instance so far: spend, input tokens, request count, latency percentiles, mean batch size (questions per request / max questions per request), and mean fill factor (input tokens / the 32k state-side cap)
 
-The oracle hashes the `state` it is given (a listing tree, a file body). Universe itself has no digest method. Search and check use this interface.
+The oracle hashes the `state` it is given (a listing of paths, a file body). Universe itself has no digest method. Sweep and check use this interface.
 
-**Search**: takes a universe, an oracle, and a natural language proposition, returns the
-pruned universe that is relevant to answering the proposition. Same auto-batching behaviour
-as the oracle: multiple search requests can be submitted that then get batched up
-appropriately.
+**Sweep**: takes a lect, the current directory, an optional filter, and an oracle.
+Filter questions share one listing state and ask whether each path matches the filter. File questions share that file's body. The oracle
+batches questions on a state and overlaps independent states. A file matches when any
+top-level claim is true.
 
-**Check**: takes the compiled claims, a repository, and an oracle. Each witness is one
+**Check**: takes the compiled claims, the lect's directory, and an oracle. Each witness is one
 judgement of its cited bodies. Each detail is one judgement that the body sentences entail
 the head. Lemma uses copy the proved value and are not asked again.
 

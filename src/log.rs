@@ -19,6 +19,10 @@ pub const DEFAULT_TRACE_DIR: &str = "/tmp/autoground";
 
 /// Create a new uniquely named file under `dir` and return its path.
 pub fn allocate_unique_file(dir: &Path, ext: &str) -> std::io::Result<PathBuf> {
+    allocate_named(dir, "trace", ext)
+}
+
+fn allocate_named(dir: &Path, stem: &str, ext: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let pid = std::process::id();
     let nanos = SystemTime::now()
@@ -27,7 +31,7 @@ pub fn allocate_unique_file(dir: &Path, ext: &str) -> std::io::Result<PathBuf> {
         .unwrap_or(0);
     let ext = ext.trim_start_matches('.');
     for n in 0u32..10_000 {
-        let path = dir.join(format!("trace-{nanos}-{pid}-{n}.{ext}"));
+        let path = dir.join(format!("{stem}-{nanos}-{pid}-{n}.{ext}"));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(_) => return Ok(path),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -79,6 +83,12 @@ impl Log {
     /// `trace-{nanos}-{pid}-{n}.jsonl` under [`DEFAULT_TRACE_DIR`].
     pub fn create() -> std::io::Result<Self> {
         let path = allocate_unique_file(Path::new(DEFAULT_TRACE_DIR), "jsonl")?;
+        Self::open(path)
+    }
+
+    /// `sweep-{nanos}-{pid}-{n}.jsonl` under [`DEFAULT_TRACE_DIR`].
+    pub fn create_sweep() -> std::io::Result<Self> {
+        let path = allocate_named(Path::new(DEFAULT_TRACE_DIR), "sweep", "jsonl")?;
         Self::open(path)
     }
 

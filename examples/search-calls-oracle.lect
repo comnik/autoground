@@ -1,16 +1,12 @@
-(name Search)
+(name Sweep)
 (name Oracle)
-(name P)
-(name NP)
 (sense calls "{caller} calls {callee}")
-(sense equals "{X} = {Y}")
 
-;; (detail (equals P NP)
-(detail (calls Search Oracle)
+(detail (calls Sweep Oracle)
   (witness
-    ("Search asks the oracle to classify directory listings")
-    "../src/search/mod.rs")
+    ("Sweep asks the oracle whether a path matches the filter")
+    "../src/sweep/mod.rs")
   (witness
-    ("Search's oracle posts are the Jev HTTP call")
-    "../src/search/mod.rs"
+    ("Sweep's oracle posts are the Jev HTTP call")
+    "../src/sweep/mod.rs"
     "../src/oracle/jev.rs"))

@@ -1,11 +1,10 @@
 //! Classification oracle: enqueue questions, batch on wait.
 //!
-//! `check` and `search` `submit` one classification at a time and `wait`
+//! `check` and `sweep` `submit` one classification at a time and `wait`
 //! when they need the label. Grouping is over the [`State`] the caller
-//! passed — typically a listing tree or a file body.
+//! passed — typically a listing of paths or a file body.
 
 pub mod jev;
-mod mock;
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
@@ -17,7 +16,6 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 pub use jev::{JevOracle, Transport, UreqTransport};
-pub use mock::HeuristicOracle;
 
 /// Which System One primitive a [`Classification`] asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +227,49 @@ impl std::error::Error for OracleError {}
 pub struct Flight {
     pub started: SystemTime,
     pub ended: SystemTime,
+}
+
+/// [`Usage`] as a log record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageRecord {
+    pub spend_usd: f64,
+    pub input_tokens: u64,
+    pub requests: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_factor: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p50_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p95_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p99_ms: Option<u64>,
+}
+
+impl UsageRecord {
+    pub fn from_usage(usage: &Usage) -> Self {
+        let (p50, p95, p99) = usage
+            .latency
+            .map(|lat| {
+                (
+                    Some(lat.p50.as_millis() as u64),
+                    Some(lat.p95.as_millis() as u64),
+                    Some(lat.p99.as_millis() as u64),
+                )
+            })
+            .unwrap_or((None, None, None));
+        Self {
+            spend_usd: usage.spend_usd,
+            input_tokens: usage.input_tokens,
+            requests: usage.requests,
+            batch_size: usage.batch_size,
+            fill_factor: usage.fill_factor,
+            latency_p50_ms: p50,
+            latency_p95_ms: p95,
+            latency_p99_ms: p99,
+        }
+    }
 }
 
 /// Cumulative usage for one oracle instance. Local impls stay at zero.

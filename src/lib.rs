@@ -5,7 +5,7 @@ pub mod edb;
 pub mod log;
 pub mod oracle;
 pub mod report;
-pub mod search;
+pub mod sweep;
 pub mod syntax;
 pub mod universe;
 pub mod value;
