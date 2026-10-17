@@ -1021,7 +1021,8 @@ mod tests {
             "(witness (\"alpha\") \".brief\")",
             "(witness (\"alpha\") \"note.txt\" \"notes.brief\")",
         ] {
-            let report = check(&compiled(src), &brief_dir, DEFAULT_BODY_BYTES, &mut oracle).unwrap();
+            let report =
+                check(&compiled(src), &brief_dir, DEFAULT_BODY_BYTES, &mut oracle).unwrap();
             assert_eq!(report.claims[0].value, Value::Unknown, "{src}");
             assert_eq!(
                 report.claims[0].failure,

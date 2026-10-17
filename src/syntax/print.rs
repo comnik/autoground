@@ -52,13 +52,6 @@ fn print_ns(ns: &Ns, out: &mut String) {
     out.push_str("))\n");
 }
 
-/// Pretty-print a formula at indent 0.
-pub fn print_formula(formula: &Formula) -> String {
-    let mut out = String::new();
-    write_formula(formula, 0, &mut out);
-    out
-}
-
 fn print_form(form: &Form, indent: usize, out: &mut String) {
     match form {
         Form::Name(name) => {

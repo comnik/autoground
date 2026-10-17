@@ -33,10 +33,6 @@ impl Value {
             Value::Unknown => Value::Unknown,
         }
     }
-
-    pub fn implies(self, other: Value) -> Value {
-        self.not().or(other)
-    }
 }
 
 impl std::fmt::Display for Value {

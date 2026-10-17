@@ -12,9 +12,6 @@ use super::{Universe, UniverseError};
 pub struct ListingFilter {
     gitignore: Option<Gitignore>,
     model_rel: Option<String>,
-    /// When set, listings omit paths outside this directory. Ancestors stay
-    /// visible so a walk can enter it.
-    only: Option<String>,
 }
 
 impl ListingFilter {
@@ -22,12 +19,7 @@ impl ListingFilter {
         Self {
             gitignore: load_gitignore(root),
             model_rel: None,
-            only: None,
         }
-    }
-
-    pub fn set_only(&mut self, prefix: impl Into<String>) {
-        self.only = Some(prefix.into());
     }
 
     pub fn set_model(&mut self, root: &Path, model: &Path) {
@@ -35,9 +27,6 @@ impl ListingFilter {
     }
 
     pub fn hide(&self, rel: &str, is_dir: bool) -> bool {
-        if self.outside(rel) {
-            return true;
-        }
         if is_git_meta(rel) || (!is_dir && is_brief(rel)) {
             return true;
         }
@@ -48,18 +37,6 @@ impl ListingFilter {
             Some(gi) => gi.matched(rel, is_dir).is_ignore(),
             None => false,
         }
-    }
-
-    fn outside(&self, rel: &str) -> bool {
-        let Some(prefix) = &self.only else {
-            return false;
-        };
-        if rel.is_empty() {
-            return false;
-        }
-        let under = rel == prefix.as_str() || rel.starts_with(&format!("{prefix}/"));
-        let ancestor = prefix.starts_with(&format!("{rel}/"));
-        !under && !ancestor
     }
 }
 
@@ -201,34 +178,12 @@ impl Filesystem {
         })
     }
 
-    /// Children of the repo root. Search starts here; it does not list every leaf.
-    pub fn at_root(root: impl Into<PathBuf>) -> Result<Self, UniverseError> {
-        let root = root.into();
-        let filter = ListingFilter::from_repo(&root);
-        let mut databases: Vec<String> = list_entries(&root, "", &filter)?
-            .into_iter()
-            .map(|entry| entry.rel_path)
-            .collect();
-        databases.sort();
-        Ok(Self {
-            root,
-            filter,
-            databases,
-        })
-    }
-
     /// Drop `model` from listings when it lives inside this repo.
     pub fn hide_model(&mut self, model: &Path) {
         self.filter.set_model(&self.root, model);
         if let Some(rel) = self.filter.model_rel.clone() {
             self.databases.retain(|id| id != &rel);
         }
-    }
-
-    /// Hide every path outside `prefix`. The prefix and its ancestors remain.
-    pub fn set_only(&mut self, prefix: &str) {
-        self.filter.set_only(prefix);
-        self.databases.retain(|id| !self.filter.outside(id));
     }
 
     fn lookup(&self, id: &str) -> Result<Entry, UniverseError> {
@@ -546,38 +501,6 @@ mod tests {
     }
 
     #[test]
-    fn set_only_hides_paths_outside_the_prefix() {
-        let root = std::env::temp_dir().join(format!("autoground-only-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::create_dir_all(root.join("evals")).unwrap();
-        std::fs::write(root.join("src/a.txt"), "a").unwrap();
-        std::fs::write(root.join("evals/b.txt"), "b").unwrap();
-        std::fs::write(root.join("README.md"), "r").unwrap();
-        let mut fs = Filesystem::at_root(&root).unwrap();
-        fs.set_only("src");
-        let children = fs.children("").unwrap();
-        assert!(children.contains(&"src".to_string()), "{children:?}");
-        assert!(!children.iter().any(|id| id == "evals"), "{children:?}");
-        assert!(!children.iter().any(|id| id == "README.md"), "{children:?}");
-        assert_eq!(fs.children("src").unwrap(), vec!["src/a.txt".to_string()]);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn at_root_opens_on_children() {
-        let fs = Filesystem::at_root("examples/toy-layered").unwrap();
-        assert_eq!(
-            fs.databases(),
-            &[
-                "backend".to_string(),
-                "decoy".to_string(),
-                "frontend".to_string()
-            ]
-        );
-    }
-
-    #[test]
     fn directory_view_is_smaller_than_leaves() {
         let mut fs = Filesystem::open("examples/toy-layered").unwrap();
         let leaf_size = fs.size().unwrap();
@@ -666,7 +589,7 @@ mod tests {
         std::fs::write(&model, "# model\n").unwrap();
         std::fs::write(root.join("keep.txt"), "yes\n").unwrap();
         std::fs::write(root.join("claims.brief"), "(name X)\n").unwrap();
-        let mut fs = Filesystem::at_root(&root).unwrap();
+        let mut fs = Filesystem::open(&root).unwrap();
         assert!(fs.databases().contains(&"model.md".to_string()));
         assert!(!fs.databases().iter().any(|id| id.ends_with(".brief")));
         fs.hide_model(&model);

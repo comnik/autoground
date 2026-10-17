@@ -12,15 +12,12 @@ use autoground::report::context::write_context;
 use autoground::report::mermaid::{diagram_of, write_diagram, Diagram, Styles};
 use autoground::report::summary::{print_run_summary, print_sweep_summary};
 use autoground::sweep;
-use autoground::{compile, display_path, brief_source, parse, scan_namespaces, Proposition};
+use autoground::{brief_source, compile, display_path, parse, scan_namespaces, Proposition};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "autoground",
-    about = "Check a brief, or sweep for matches"
-)]
+#[command(name = "autoground", about = "Check a brief, or sweep for matches")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

@@ -1,7 +1,7 @@
 //! Append-only session log.
 //!
-//! One JSON object per line. [`Log::create`] writes
-//! `trace-{nanos}-{pid}-{n}.jsonl` under `/tmp/autoground`. [`Log::create_under`]
+//! One JSON object per line. [`Log::create_sweep`] writes
+//! `sweep-{nanos}-{pid}-{n}.jsonl` under `/tmp/autoground`. [`Log::create_under`]
 //! writes `trace.jsonl` inside a fresh `{nanos}-{pid}-{n}` directory.
 //! [`Log`] is cheap to clone and safe to share across threads: each append
 //! takes the mutex, writes one line, and flushes.
@@ -16,11 +16,6 @@ use serde::Serialize;
 use serde_json::Value;
 
 pub const DEFAULT_TRACE_DIR: &str = "/tmp/autoground";
-
-/// Create a new uniquely named file under `dir` and return its path.
-pub fn allocate_unique_file(dir: &Path, ext: &str) -> std::io::Result<PathBuf> {
-    allocate_named(dir, "trace", ext)
-}
 
 fn allocate_named(dir: &Path, stem: &str, ext: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
@@ -80,12 +75,6 @@ pub struct Log {
 }
 
 impl Log {
-    /// `trace-{nanos}-{pid}-{n}.jsonl` under [`DEFAULT_TRACE_DIR`].
-    pub fn create() -> std::io::Result<Self> {
-        let path = allocate_unique_file(Path::new(DEFAULT_TRACE_DIR), "jsonl")?;
-        Self::open(path)
-    }
-
     /// `sweep-{nanos}-{pid}-{n}.jsonl` under [`DEFAULT_TRACE_DIR`].
     pub fn create_sweep() -> std::io::Result<Self> {
         let path = allocate_named(Path::new(DEFAULT_TRACE_DIR), "sweep", "jsonl")?;
@@ -299,18 +288,6 @@ mod tests {
             seen.lock().unwrap().as_slice(),
             ["search_step", "read_step"]
         );
-    }
-
-    #[test]
-    fn allocate_unique_file_uses_distinct_names() {
-        let dir =
-            std::env::temp_dir().join(format!("autoground-trace-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let a = allocate_unique_file(&dir, "json").unwrap();
-        let b = allocate_unique_file(&dir, "json").unwrap();
-        assert_ne!(a, b);
-        assert!(a.extension().is_some_and(|ext| ext == "json"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
