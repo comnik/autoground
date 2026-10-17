@@ -1,161 +1,90 @@
 # ⏚ autoground
 
-`autoground` compiles a lect and checks it against the files the lect cites.
+`autoground` helps you (re-)establish and maintain an accurate mental model of a codebase.
 
-**Neurosymbolic**, because models are written as unordered collections of logical
-propositions. But those propositions can be "handwavy" — they don't need to adhere to any
-fixed schema, can reference abstract concepts, be imprecise or qualitative, and generally
-don't need to be aware of any specifics about _how_ the codebase is implemented:
+At the rapid pace of agentic development, you can often feel your understanding of a
+codebase — your mental model — drifting further and further away from ground truth. And even
+though your agents excel at digging up information and answering your questions about the
+implementation, reclaiming a sense of understanding takes a surprising amount of effort.
 
-```
-(sense calls "{caller} calls {callee}")
-(sense contains "{X} contains {Y}")
+At the speed agents are moving, any dormant misunderstandings you have with your human or
+machine collaborators gets amplified much more quickly than before. Agents also aren't bound
+by [Miller's law](https://en.wikipedia.org/wiki/The_Magical_Number_Seven,_Plus_or_Minus_Two)
+in the same way we are. They happily juggle different terminology for the same concept, and
+this proclivity for inventing new names leaks into your codebase at every level of
+granularity. As a result, your mental model of the system ends up no longer aligning with
+the conceptual model that is actually implemented.
 
-(name Oracle)
-(name Universe)
-(name Search)
-(name Read)
+The process you are likely running to re-align the two is:
 
-;; Claims
+1. Re-establish shared terminology: what concepts are we talking about?
+2. Validate relationships: how do these concepts relate in the codebase?
+3. Detect mis-alignment: where do nominally identical concepts relate in different ways?
+4. Take corrective action, either by updating your mental model or by instructing your
+agents to change the code to match it.
+5. Rinse and repeat.
 
-("An Oracle is a general classifier leveraging a system-one model like jev.")
+In doing so, you've become what you fear most: the human in the loop slowing everything
+down. And by the time that you're done the codebase has already changed out from under you.
 
-("autoground emits a log of structured events")
+`autoground` lets your agents document the outcomes of the above process in so called
+`brief`s, that can then be validated against the current state of the codebase via the
+`autoground check` utility. Validation is fast and cheap, often completing in seconds and
+for fractions of a cent.
 
-(not (calls Universe Oracle))
 
-(and
-  ("Search prunes a Universe to a window of relevant objects along with a signal score.")
-  (calls Search Universe)
-  (calls Search Oracle))
-```
+## The `brief` language
 
-**Self-validating** simply means that all claims in the model are evaluated and so can catch
-misconceptions and violated assumptions.
+Aligning mental models requires using the same name for things that relate in the same way,
+so consistent naming is the biggest lever for preserving understanding. `brief` is a
+language for establishing shared terminology.
 
-## North Star
+A brief consists of *names*, *senses*, and *witnesses*:
 
-A developer can express their mental model of a heavily vibe-engineered codebase in a simple
-S-expression language, without adherence to any rigid schema. `autoground check` revalidates
-that model as the code changes. A witness is a sentence judged against the files it cites.
-A detail is discharged only when its body is discharged and those sentences entail the head.
+```brief
+;; A namespace globally disambiguates this brief.
+(ns autoground)
 
-## Concepts
+;; Names identify concrete or abstract concepts. Components and data structures in the
+;; codebase, mathematical objects, or things in the real world.
+(name Frontend)
+(name Backend)
+(name Program)
+(name AST)
 
-### Universes
+;; Senses express a claim about a name, or the relationship between names.
+;; Unambiguous senses can be written as plain text sentences.
+Program is a data structure
+AST is a data structure
+Frontend accepts Program
+Frontend returns AST
+The system convers Program to AST via Frontend
 
-We are working with a fixed *context window* of size $C$ and are interacting with a finite
-*universe* of *databases* $\mathbf{U} = \lbrace \Gamma_1,...,\Gamma_n \rbrace$. While the
-overall universe can be large, each database is assumed to be serializable, and for that
-serializable representation to fit into a single context window, i.e. $|\Gamma_i|<C$.
+;; The explicit syntax for a sense requires quotes and parentheses.
+("Program is a data structure")
+("Frontend accepts Program")
 
-Additionally, we assume that the databases are arranged in a tree. This hierarchy lets us
-consume the universe at different *levels of detail*. Databases higher up in the tree
-abstract over their subtrees.
+;; Senses can have free variables, in which case the claim is not fully formulated yet.
+("{Name} is a data structure")                      ;; single free variable
+("{Name} returns {Name}")                           ;; two free variables
 
-Concretely, the particular kind of universe we care about for now is a codebase — a set of
-files (the leaf databases) arranged in a hierarchy (the repository's directory structure).
-But other practically relevant data structures fit this pattern: an agent trace grouped by
-tool-calling cycle, or a Slack archive with messages grouped into threads and channels.
+;; Senses can be named as well, to not have to fully spell them out everywhere.
+(sense is_data "{Name} is a part of the system")    ;; single free variable
+(sense is_component "{X} is a part of the system")  ;; single free variable
+(sense returns "{Name} returns {Name}")             ;; two free variables
 
-### Neural Evaluation
-
-The most fundamental operation that we need to support is a user giving us a proposition
-$p$, e.g. a fact they are asserting about their codebase. We need to determine whether the
-given universe supports ($\mathbf{U} \vdash p$) or contradicts ($\mathbf{U} \nvdash p$) the
-user's proposition, or whether no conclusion can be drawn. We refer to the process of
-computing $\mathbf{U}(p) = \lbrace \text{true} \mid \text{false} \mid \text{unknown}
-\rbrace$ as *evaluation*.
-
-Because user propositions can be imprecise, abstract, or qualitative, we cannot rely on
-traditional deterministic methods for evaluation. Instead, we use a [system one
-model](https://docs.typesafe.ai/concepts/system-one), which will simply refer to as the
-*oracle* $\Omega$. We can translate the evaluation of any proposition into a classification
-problem for the oracle
-
-$$ \mathbf{U}(p) := \Omega((\mathbf{U}, p), \lbrace \text{entailed} \mid \text{contradicted}
-\mid \text{neutral} \rbrace) $$
-
-The oracle, however, is limited to a single context window worth of input for any single
-call. Sweep lists the tree, optionally keeps paths that match a natural-language filter,
-and then judges the lect against each remaining file. The filter sees the listing only.
-The file judgement sees that file's body.
-
-#### Sweep
-
-`autoground sweep` judges a lect that has no witnesses. It lists every file in the
-current directory, asks the oracle which paths match `--filter` when one is given,
-and evaluates the lect against each file that remains. A file matches when any
-top-level claim is true. A complete sweep with no match prints `CLEAN`. `--budget`
-is the cost cap in cents and defaults to 1. The trace is `sweep-<id>.jsonl` under
-`/tmp/autoground/`. Stderr shows the same throughput and latency plots as `check`,
-and how many files were judged. A sweep that hits the cap ends with `INCOMPLETE`.
-
-```
-autoground sweep examples/no-historic-comment.lect --filter "source file"
-```
-
-A match prints the absolute path and one `Matched:` line per true claim.
-
-#### Check
-
-`autoground check` is how a lect is judged. A witness cites one or more files relative
-to the lect, and those bodies are judged together. A witness that cites a `.lect` file
-is rejected: lects can't be witnesses. A file longer than the body budget is sliced;
-the witness is discharged when one part entails the sentence. `--budget` is the cost cap
-in cents and defaults to 1. The request that crosses the cap still finishes; later
-requests are refused. A detail is an inference step: the head is discharged when every
-body claim is discharged and the body sentences entail the head. A later citation of that head takes the proved value. `and`, `or`, and
-`not` stay Kleene. A bare sentence is unpinned.
-
-Exit status is 0 when every top-level claim is discharged, 1 otherwise, and 3 on a
-compile, IO, or oracle failure. Each check writes `trace.jsonl`, `context.md`, and
-`diagram.mmd` into a new directory under `/tmp/autoground/`. `--out` chooses a different
-parent. On a terminal the finished view is the lect itself.
-
-### The `lect` Language
-
-`autoground` is ultimately a tool for (re-)establishing shared context between the author
-and the reader of a codebase. Shared context is:
-
-1. Shared ontology. (<- our current focus)
-2. Shared definitions.
-3. Shared constraints.
-4. Shared motivation.
-
-Aligning ontologies means using the same name for things that relate in the same way.
-Consistent naming is the biggest lever for keeping complexity in check. This is what the
-`lect` modeling language is meant to help with.
-
-A model consists of *names*, *senses*, and *claims*:
-
-```lect
-;; A namespace is the name declared here. This file can live anywhere
-;; in the repository.
-(ns autoground.examples
-  (:require [autoground.core :as core]
-            [autoground.names :refer [Oracle]]
-            [autoground.api :refer :all]))
-
-;; Names
-(name X)
-(name Y)
-
-;; Senses are readings of a relationship, potentially with holes.
-("X has an identifier")                             ;; nullary, unnamed
-X has an identifier                                 ;; the same sentence, one line
-("{Name} has an identifier" X)                      ;; unary, unnamed
-("{Name} has a {Name}" X foo)                       ;; binary, unnamed
-(sense component "{Name} is a part of the system")  ;; unary, named
-(sense part_of "{Name} is a part of {Name}")        ;; binary, named
-
-;; Roles name the holes on a sense, to disambiguate.
+;; Roles name the free variables on a sense, to disambiguate.
+(sense returns "{Component} returns {Data}")
 (sense property "{object} has a {property}")
 (sense borrowed_from "{borrower} borrowed from {lender}")
 
-;; Claims are logical propositions without quantifiers.
-(component X)
-(part_of X Y)
+;; A claim becomes verifiable when its tied to one or more witnesses.
+(witness
+  ("Sweep asks the oracle whether a path matches the filter")
+  "src/sweep/mod.rs")
+
+;; Atomic claims can be negated, or composed into conjunctions and disjunctions. 
+(not (depends_on X Y))
 
 (and
   (component X)
@@ -166,92 +95,141 @@ X has an identifier                                 ;; the same sentence, one li
   (part_of X Y)
   (part_of Y X))
 
-(not (depends_on X Y))
+;; Any claim that can't be validated as a whole, can be decomposed.
+(detail (calls Sweep Oracle)
+  (witness
+    ("Sweep asks the oracle whether a path matches the filter")
+    "src/sweep/mod.rs")
+  (witness
+    ("Sweep's oracle posts are the Jev HTTP call")
+    "src/sweep/mod.rs"
+    "src/oracle/jev.rs"))
 ```
 
-Wherever a `.lect` file is accepted, a `.md` file is too: every fenced `lect` block is
-taken, in order, and the rest of the document is left out. `(:require ...)` finds another
-namespace by the name it declares. A `.lect` file can sit anywhere in the repository.
+The ordering of the top-level declarations is irrelevant.
 
-The filesystem universe implementation filters out `.lect` files to make sure unvalidated
-claims are never treated as evidence.
+Briefs are written to `*.brief` files. Wherever a `*.brief` file is accepted, a `.md` file
+is too: every fenced `brief` block is taken, in order, and the rest of the document is left
+out.
 
-### Check
+Briefs are not accepted as witnesses for other briefs, to make sure unvalidated claims are
+never treated as evidence.
 
-A sense application compiles to its sentence. `autoground check <model>` judges the
-compiled claims against the files their witnesses cite.
+
+## `autoground check`
 
 ```
-autoground check examples/search-calls-oracle.lect
-autoground check examples/sqrt2.lect
+autoground check examples/search-calls-oracle.brief
+autoground check examples/sqrt2.brief
+```
+
+Think of the `autoground check` utility as a natural language proof assistant.
+
+Briefs compile to a set of inter-dependent claims, which `check` then validates starting
+from the referenced witnesses. Claims are in natural language, and so can be imprecise,
+handwavy, or subjective. We therefore cannot rely on traditional formal proof kernels.
+Instead, we use a [system one model](https://docs.typesafe.ai/concepts/system-one) as an
+oracle, a sort of neural proof kernel.
+
+At every step in the proof the oracle is provided with the relevant hypotheses and is asked
+to judge the proposed conclusion as "supported", "contradicted", or "neutral". This starts
+with the files referenced by witnesses. Every `detail` is a deductive step. Only logical
+operators are resolved determinisitically, without involving the oracle. Each unique claim
+is only proved once, no matter how often it is referred to.
+
+Exit status is 0 when every top-level claim is discharged, 1 otherwise, and 3 on a compile,
+IO, or oracle failure. Each check writes a detailed trace of all proof steps along with the
+requests sent to the oracle, a `context.md` containing the fully spelled out version of all
+validated claims, and a `diagram.mmd` of the validated names and senses.
+
+
+## `autoground sweep`
+
+```
+autoground sweep examples/no-historic-comment.lect --filter "source file"
+```
+
+`sweep` is the counterpart to `check`. Where `check` starts from specific files to validate
+a claim, `sweep` scours the entire codebase to look for files that match an as-of-yet
+unwitnessed claim.
+
+Use `check` to continuously validate your mental model, and `sweep` to identify areas that
+might deserve more attention.
+
+Every matching file is printed along with the specific claims it matched. `sweep` also
+writes a detailed trace file that records all calls to the oracle.
+
+`sweep transcript` judges the tool calls and responses of an agent's session transcript.
+
+```
+autoground sweep transcript examples/no-historic-comment.lect chat_history.jsonl
+```
+
+`sweep diff` judges each change in a git diff.
+
+```
+autoground sweep diff examples/no-historic-comment.lect
+autoground sweep diff examples/no-historic-comment.lect --cached
+autoground sweep diff examples/no-historic-comment.lect HEAD~3..HEAD
+autoground sweep diff examples/no-historic-comment.lect origin/main...HEAD -- src/
 ```
 
 
 ## Implementation
 
-### Milestones
+### Concepts
 
-- [x] `autoground sweep <lect>`: judge a lect against every file and report matches
-- [x] `autoground check xyz.lect`: re-check a lect against the files it cites
+**Witness:** any piece of context that bears on a proposition: a file in a codebase, a
+screenshot, a web resource, or really any other serializable information. The witness can
+entail or contradict a proposition, or be neutral towards it.
 
-### Interfaces
+**Universe:** `autoground sweep` can currently operate on codebases, agent session
+transcripts, or git diffs. We refer to these generically as the *universe* $\mathbf{U}$.
+Other implementations are conceivable.
+
+**Oracle:** the fundamental operation in `autoground` is determining how a witness $\Gamma$
+bears on a proposition $p$. Does it support ($\Gamma \vdash p$) or contradict ($\Gamma
+\nvdash p$) it? Or is the witness irrelevant and no conclusion can be drawn? Propositions
+are in natural language, and so can be imprecise, handwavy, or subjective. We cannot rely on
+traditional formal proof kernels. Instead, we use a [system one
+model](https://docs.typesafe.ai/concepts/system-one) as a classification *oracle* $\Omega$,
+a sort of neural proof kernel:
+
+$$ \Gamma(p) := \Omega((\Gamma, p), \lbrace \text{entailed} \mid \text{contradicted}
+\mid \text{neutral} \rbrace) $$
+
+**Plan:** the oracle performs best when it is judging an atomic claim. The `brief` language
+supports operators like `and`, `or`, and `not`, to decompose complex claims. A *plan*
+encodes how to evaluate the overall brief from its atomic claims.
+
+### Interfaces and components
 
 **Log**: a unified log / session trace available to all components. Any `autoground` run
 keeps a log in `/tmp/autoground`. The log interface allows all other components to append
 their own structured events, as JSON lines, in a thread-safe way.
 
-**Universe**: a view over the universe.
-- compute the size of the current view (a summary's length, or the content length of a database that has no summary; bodies are not read)
-- read one database that has no summary
-- sampling from the next level of detail to provide additional context
-- methods to add and remove databases from the view explicitly, based on oracle classification
-- whether a database has a summary
+**Universe**: a filterable view over the universe.
 
-As the README hopefully makes clear, the universe abstraction would treat files and
-directories as the same thing — a "database". Files would be the leaf databases in the tree.
-A database with a summary is classified from that text. A database without one is read.
+**Oracle**: a classification oracle. Jev is the first implementation. Callers submit
+classification tickets that they can wait on. Oracle implementations are free to batch and
+paralellize pending tickets. Report usage statistics like spend, input tokens, request
+count, latency percentiles, mean batch size (questions per request / max questions per
+request), and mean fill factor (input tokens / the 32k state-side cap).
 
-**Oracle**: a classification oracle. Jev is the first implementation.
-- submit a classification `(state, proposition, labels)` as soon as a need is known
-- wait for a ticket when the label is required; pending questions that share a `state` go in one request, independent states overlap
-- report usage on this instance so far: spend, input tokens, request count, latency percentiles, mean batch size (questions per request / max questions per request), and mean fill factor (input tokens / the 32k state-side cap)
+**Sweep**: takes a brief, a universe, and an oracle. The filesystem universe takes an
+optional filter, based on which the oracle prunes the listing. Every remaining file is
+judged against the brief. A file matches when any top-level claim is true. All matching
+files are reported along with the corresponding claims.
 
+**Check**: takes the compiled claims and an oracle. Each witness is judged and the rest of
+the plan evaluated deterministically.
+
+```brief
 The oracle hashes the `state` it is given (a listing of paths, a file body). Universe itself has no digest method. Sweep and check use this interface.
-
-**Sweep**: takes a lect, the current directory, an optional filter, and an oracle.
-Filter questions share one listing state and ask whether each path matches the filter. File questions share that file's body. The oracle
-batches questions on a state and overlaps independent states. A file matches when any
-top-level claim is true.
-
-**Check**: takes the compiled claims, the lect's directory, and an oracle. Each witness is one
-judgement of its cited bodies. Each detail is one judgement that the body sentences entail
-the head. Lemma uses copy the proved value and are not asked again.
+```
 
 ### jev best practices
 
-- Leverage structured inputs. There should be no need for string templating.
 - Bias towards asking more questions over the same state. Really, really decompose.
-- Break things down into the smallest semantic unit.
-
-### Notes
-
-No baked-in assumptions about schema.
-
-Three-valued logic, so we can distinguish "entailed", "unsupported", _and_ "contradicted".
-
-Neural EDB / symbolic IDB.
-
-Top-down evaluation to guide which parts of the codebase to include in-context.
-
-Stateless, optionally with EDB cached per revision, like a build artefact.
-
-We'll use jev (https://docs.typesafe.ai/) as the system one model for now, behind an
-abstract oracle interface.
-
-For memoization and symbolic evaluation, we should consider DuckDB.
-
-Its not a requirement to use top-down evaluation, but it seems sensible, because it allows
-us to refine where to spend effort grounding.
-
-Classification tasks are phrased in terms of entailed / contradicted / neutral; evaluation
-uses true / false / unknown.
+- Break questions down into the smallest semantic unit.
+- Leverage structured inputs. There should be no need for string templating.
