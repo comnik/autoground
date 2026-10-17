@@ -864,14 +864,22 @@ mod tests {
 
     #[test]
     fn a_witness_path_is_relative_to_the_lect() {
-        let compiled = compiled("(witness (\"a\") \"../notes.txt\")");
-        assert_eq!(
-            compiled.claims,
-            vec![Proposition::Witness {
-                sentence: "a".into(),
-                paths: vec!["../notes.txt".into()],
-            }]
-        );
+        for (src, path) in [
+            ("(witness (\"a\") \"../notes.txt\")", "../notes.txt"),
+            (
+                "(witness (\"a\") \"examples/sqrt2.lect\")",
+                "examples/sqrt2.lect",
+            ),
+        ] {
+            let compiled = compiled(src);
+            assert_eq!(
+                compiled.claims,
+                vec![Proposition::Witness {
+                    sentence: "a".into(),
+                    paths: vec![path.into()],
+                }]
+            );
+        }
         for (src, needle) in [
             (
                 "(witness (\"a\") \"/etc/passwd\")",

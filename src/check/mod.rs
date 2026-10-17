@@ -10,7 +10,8 @@
 //! discharged when one part entails the sentence, so the proof cites the file
 //! and the kernel finds the region. A joint witness that does not fit is too
 //! large: the agent splits it into single-file witnesses, and each of those
-//! can be sliced.
+//! can be sliced. A witness that cites a `.lect` file is not sent. A lect is a
+//! model, not evidence.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -52,6 +53,8 @@ pub enum Failure {
     NotEntailed,
     /// The files, or the body sentences, contradict the sentence at the bar.
     Contradicted,
+    /// A witness cites a `.lect` file. A lect is a model, not evidence.
+    LectWitness,
 }
 
 impl Failure {
@@ -62,6 +65,7 @@ impl Failure {
             Failure::TooLarge => "too large".to_string(),
             Failure::NotEntailed => "not entailed".to_string(),
             Failure::Contradicted => "contradicted".to_string(),
+            Failure::LectWitness => "lects can't be witnesses".to_string(),
         }
     }
 }
@@ -331,6 +335,10 @@ fn prepare_witness<O: Oracle>(
         asked: Vec::new(),
         kind: Kind::Leaf,
     };
+    if paths.iter().any(|path| is_lect_file(path)) {
+        work.failure = Some(Failure::LectWitness);
+        return Ok(work);
+    }
     let mut files = Vec::with_capacity(paths.len());
     for path in paths {
         match locate(base, path) {
@@ -388,6 +396,16 @@ fn prepare_witness<O: Oracle>(
         part: None,
     });
     Ok(work)
+}
+
+/// A `.lect` file is a model, not evidence a witness can cite.
+fn is_lect_file(path: &str) -> bool {
+    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.eq_ignore_ascii_case(".lect")
+        || (name.len() > ".lect".len()
+            && name[name.len() - ".lect".len()..].eq_ignore_ascii_case(".lect"))
 }
 
 fn prepare_implication<O: Oracle>(head: &str, body: &[Proposition], oracle: &mut O) -> Work {
@@ -982,6 +1000,47 @@ mod tests {
                 path: "src/nope.rs".into()
             })
         );
+    }
+
+    #[test]
+    fn a_witness_that_cites_a_lect_is_rejected() {
+        let dir = scratch("lect-witness");
+        let lect_dir = dir.join("examples");
+        fs::create_dir(&lect_dir).unwrap();
+        fs::write(dir.join("Notes.LECT"), "alpha\n").unwrap();
+        fs::write(lect_dir.join("notes.lect"), "alpha\n").unwrap();
+        fs::write(lect_dir.join("note.txt"), "alpha\n").unwrap();
+        fs::write(lect_dir.join("file.lecture"), "alpha\n").unwrap();
+        let mut oracle = Rec::new(entailed);
+        for src in [
+            "(witness (\"alpha\") \"notes.lect\")",
+            "(witness (\"alpha\") \"../Notes.LECT\")",
+            "(witness (\"alpha\") \".lect\")",
+            "(witness (\"alpha\") \"note.txt\" \"notes.lect\")",
+        ] {
+            let report = check(&compiled(src), &lect_dir, DEFAULT_BODY_BYTES, &mut oracle).unwrap();
+            assert_eq!(report.claims[0].value, Value::Unknown, "{src}");
+            assert_eq!(
+                report.claims[0].failure,
+                Some(Failure::LectWitness),
+                "{src}"
+            );
+            assert!(
+                write_report(&report).contains(";; lects can't be witnesses"),
+                "{src}"
+            );
+        }
+        assert!(oracle.seen.is_empty());
+
+        let report = check(
+            &compiled("(witness (\"alpha\") \"file.lecture\")"),
+            &lect_dir,
+            DEFAULT_BODY_BYTES,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(oracle.seen.len(), 1);
     }
 
     #[test]

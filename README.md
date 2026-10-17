@@ -92,7 +92,8 @@ reads file contents.
 #### Check
 
 `autoground check` is how a lect is judged. A witness cites one or more files relative
-to the lect, and those bodies are judged together. A file longer than the body budget is sliced;
+to the lect, and those bodies are judged together. A witness that cites a `.lect` file
+is rejected: lects can't be witnesses. A file longer than the body budget is sliced;
 the witness is discharged when one part entails the sentence. `--budget` is the cost cap
 in cents and defaults to 1. The request that crosses the cap still finishes; later
 requests are refused. A detail is an inference step: the head is discharged when every
