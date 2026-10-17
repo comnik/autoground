@@ -1,6 +1,0 @@
-You are looking at this repository. Decide which files a careful reader would need to open to support or contradict the proposition below. The proposition is one atomic claim. Do not split it into other claims.
-
-Directory listings and text search are for locating those files. Open every file you rely on with the read tool. Do not edit anything. Do not open anything under evals/search. Stop when the files you have opened are enough to settle the claim.
-
-Proposition:
-{proposition}
