@@ -275,6 +275,10 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
 
 /// Parse a model: an optional `ns`, then `name` and `sense` declarations
 /// and claims built with `and`, `or`, `not`, and relation application.
+///
+/// A top-level line that does not start a list is one nullary sentence, the
+/// same claim as `("those words")`. A form still needs its parentheses, and a
+/// sentence inside `and`, `or`, or `not` does too.
 pub fn parse(src: &str) -> Result<Program, ParseError> {
     let tokens = tokenize(src)?;
     if tokens.is_empty() {
@@ -291,6 +295,12 @@ pub fn parse(src: &str) -> Result<Program, ParseError> {
     let mut spans = Vec::new();
     let mut clauses = Vec::new();
     while p.peek().is_some() {
+        if let Some((form, clause, span)) = bare_sentence(&mut p)? {
+            forms.push(form);
+            spans.push(span);
+            clauses.push(clause);
+            continue;
+        }
         let start = p.peek().map(|token| token.start).unwrap_or(0);
         let s = p.sexp()?;
         let end = p.tokens[p.i - 1].end;
@@ -314,6 +324,99 @@ pub fn parse(src: &str) -> Result<Program, ParseError> {
         spans,
         clauses,
     })
+}
+
+/// A top-level line of words, or one string, as a nullary sentence.
+///
+/// Returns `None` when the next token opens a list or a vector. The line is
+/// one sentence: a later line is a later claim, and a parenthesis or a second
+/// string on the line is quoted instead.
+fn bare_sentence(p: &mut Parser) -> Result<Option<(Form, ClauseSpan, Range<usize>)>, ParseError> {
+    let Some(first) = p.peek().cloned() else {
+        return Ok(None);
+    };
+    match first.kind {
+        TokenKind::Symbol(word) if needs_parentheses(&word) => Err(err(
+            first.line,
+            first.col,
+            format!("`{word}` needs parentheses"),
+        )),
+        TokenKind::Symbol(word) => {
+            p.bump();
+            let mut text = word;
+            let mut end = first.end;
+            while let Some(token) = p.peek().cloned() {
+                if token.line != first.line {
+                    break;
+                }
+                match token.kind {
+                    TokenKind::Symbol(word) => {
+                        text.push(' ');
+                        text.push_str(&word);
+                        end = token.end;
+                        p.bump();
+                    }
+                    _ => {
+                        return Err(err(
+                            token.line,
+                            token.col,
+                            "quote a sentence that uses parentheses or a string",
+                        ));
+                    }
+                }
+            }
+            Ok(Some(nullary_sentence(
+                text,
+                first.start..end,
+                first.line,
+                first.col,
+            )?))
+        }
+        TokenKind::String(text) => {
+            p.bump();
+            if let Some(token) = p.peek() {
+                if token.line == first.line {
+                    return Err(err(
+                        token.line,
+                        token.col,
+                        "quote a sentence that uses parentheses or a string",
+                    ));
+                }
+            }
+            Ok(Some(nullary_sentence(
+                text,
+                first.start..first.end,
+                first.line,
+                first.col,
+            )?))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn needs_parentheses(word: &str) -> bool {
+    matches!(
+        word,
+        "name" | "sense" | "ns" | "and" | "or" | "not" | "detail" | "witness"
+    )
+}
+
+fn nullary_sentence(
+    template: String,
+    span: Range<usize>,
+    line: usize,
+    col: usize,
+) -> Result<(Form, ClauseSpan, Range<usize>), ParseError> {
+    let holes = hole_names(&template).map_err(|message| err(line, col, message))?;
+    let formula = Formula::Apply {
+        reading: Reading::Inline { template, holes },
+        args: Vec::new(),
+    };
+    let clause = ClauseSpan {
+        span: span.clone(),
+        children: Vec::new(),
+    };
+    Ok((Form::Claim(formula), clause, span))
 }
 
 /// Whether a top-level form is `(ns ...)`, including one that fails to parse.
@@ -855,6 +958,46 @@ fn err_at(s: &Sexp, message: impl Into<String>) -> ParseError {
 mod tests {
     use super::*;
     use crate::syntax::{Arg, Form, Formula, Reading, Refer};
+
+    #[test]
+    fn a_line_of_words_is_a_nullary_sentence() {
+        let bare = "defines a trait\n\nmakes a network request\n";
+        let quoted = "(\"defines a trait\")\n(\"makes a network request\")\n";
+        assert_eq!(parse(bare).unwrap(), parse(quoted).unwrap());
+        let src = "  defines a trait ;; note\n";
+        let program = parse(src).unwrap();
+        let span = program.clauses[0].span.clone();
+        assert_eq!(&src[span], "defines a trait");
+        assert_eq!(
+            parse("(name Oracle)\nOracle calls jev\n").unwrap(),
+            parse("(name Oracle)\n(\"Oracle calls jev\")\n").unwrap()
+        );
+        assert_eq!(
+            parse("\"defines a trait\"\n").unwrap(),
+            parse("(\"defines a trait\")\n").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_bare_line_stops_at_a_form_or_a_parenthesis() {
+        for src in [
+            "name Oracle",
+            "not a trait",
+            "and a b",
+            "or a b",
+            "sense calls \"{a} calls {b}\"",
+            "detail something",
+            "witness a \"b.rs\"",
+            "ns com.acme",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(err.message.contains("needs parentheses"), "{src}: {err}");
+        }
+        let err = parse("defines a (trait)").unwrap_err();
+        assert!(err.message.contains("quote a sentence"), "{err}");
+        let err = parse("(and defines a trait)").unwrap_err();
+        assert!(err.message.contains("a form must be a list"), "{err}");
+    }
 
     #[test]
     fn parses_declarations_and_applications() {

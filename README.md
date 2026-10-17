@@ -143,6 +143,7 @@ A model consists of *names*, *senses*, and *claims*:
 
 ;; Senses are readings of a relationship, potentially with holes.
 ("X has an identifier")                             ;; nullary, unnamed
+X has an identifier                                 ;; the same sentence, one line
 ("{Name} has an identifier" X)                      ;; unary, unnamed
 ("{Name} has a {Name}" X foo)                       ;; binary, unnamed
 (sense component "{Name} is a part of the system")  ;; unary, named
