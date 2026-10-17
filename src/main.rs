@@ -63,11 +63,15 @@ enum Commands {
     /// match it, from the listing alone, before any file is read. Each
     /// remaining file is judged until `--budget` cents are spent. A file
     /// matches when any top-level claim is true. Stdout is `CLEAN`, or the
-    /// absolute path of each match. A run that hits the cap ends with
-    /// `INCOMPLETE`. The trace is `/tmp/autoground/sweep-<id>.jsonl`.
+    /// absolute path of each match. `--transcript` judges a session instead,
+    /// and each match is a database id. `--diff` stays on the filesystem and
+    /// keeps only files `git diff HEAD` names. A run that hits the cap ends
+    /// with `INCOMPLETE`. The trace is `/tmp/autoground/sweep-<id>.jsonl`.
     ///
     /// Examples:
     ///   autoground sweep examples/no-historic-comment.lect --filter "source file"
+    ///   autoground sweep examples/no-historic-comment.lect --diff
+    ///   autoground sweep examples/no-historic-comment.lect --transcript chat_history.jsonl
     Sweep {
         /// Model source, a `.lect` file, or a Markdown file of `lect` blocks.
         input: String,
@@ -78,6 +82,12 @@ enum Commands {
         /// cap still finishes. Later requests are refused.
         #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
         budget: u64,
+        /// Session directory or `chat_history.jsonl`, in place of the tree.
+        #[arg(long, value_name = "PATH", conflicts_with = "diff")]
+        transcript: Option<PathBuf>,
+        /// Judge only files `git diff HEAD` names. Staged and unstaged.
+        #[arg(long, conflicts_with = "transcript")]
+        diff: bool,
     },
 }
 
@@ -95,7 +105,15 @@ fn main() -> ExitCode {
             input,
             filter,
             budget,
-        } => match sweep_cmd(&input, filter.as_deref(), budget) {
+            transcript,
+            diff,
+        } => match sweep_cmd(
+            &input,
+            filter.as_deref(),
+            budget,
+            transcript.as_deref(),
+            diff,
+        ) {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
                 eprintln!("{err}");
@@ -109,6 +127,8 @@ fn sweep_cmd(
     input: &str,
     filter: Option<&str>,
     budget_cents: u64,
+    transcript: Option<&Path>,
+    diff: bool,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let started = Instant::now();
     let base = lect_dir(input);
@@ -119,7 +139,15 @@ fn sweep_cmd(
     oracle.set_run_cost_limit_usd(budget_cents as f64 / 100.0);
     let model = Path::new(input);
     let hide = model.is_file().then_some(model);
-    let outcome = sweep::sweep(&compiled.claims, Path::new("."), hide, filter, &mut oracle)
+    let scope = match transcript {
+        Some(path) => sweep::Scope::Transcript(path),
+        None => sweep::Scope::Files {
+            root: Path::new("."),
+            hide,
+            diff,
+        },
+    };
+    let outcome = sweep::sweep(&compiled.claims, scope, filter, &mut oracle)
         .map_err(|err| format!("{err}\ntrace: {}", log.path().display()))?;
     let matches: Vec<_> = outcome
         .matches
@@ -135,6 +163,8 @@ fn sweep_cmd(
         "sweep",
         &json!({
             "filter": filter,
+            "diff": diff,
+            "transcript": transcript.map(|path| path.display().to_string()),
             "incomplete": outcome.incomplete,
             "judged": outcome.judged,
             "candidates": outcome.candidates,

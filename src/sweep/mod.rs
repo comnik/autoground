@@ -1,17 +1,19 @@
 //! Judge a witness-free lect against every file in a tree.
 //!
-//! Sweep lists the filesystem universe, optionally keeps paths that match a
-//! natural-language filter, then judges each remaining file. Filter questions
-//! share a listing state, so the oracle batches them. File questions share
-//! that file's body. Different bodies are independent states and overlap.
-//! A file matches when any top-level claim is true.
+//! Sweep lists a universe, optionally keeps paths that match a natural-language
+//! filter, then judges each remaining file. The universe is the current
+//! directory, that directory limited to `git diff HEAD`, or a transcript.
+//! Filter questions share a listing state, so the oracle batches them. File
+//! questions share that file's body. Different bodies are independent states
+//! and overlap. A file matches when any top-level claim is true.
 //!
 //! Sweep builds its own oracle requests. The file Choice matches check's
 //! wording today, and the two are free to diverge.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::{json, Value as Json};
 
@@ -20,7 +22,7 @@ use crate::confidence::SUPPORT;
 use crate::oracle::jev::QUESTION_BUDGET;
 use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, State, Ticket};
 use crate::syntax::Proposition;
-use crate::universe::{Filesystem, Universe, UniverseError};
+use crate::universe::{Filesystem, Transcript, Universe, UniverseError};
 use crate::value::Value;
 
 const FILTER_QUESTION: &str = "Does `path` match `filter`?";
@@ -95,10 +97,21 @@ fn reject(proposition: &Proposition) -> Result<(), SweepError> {
     }
 }
 
+/// Where a sweep reads its files.
+pub enum Scope<'a> {
+    /// The filesystem at `root`. `diff` keeps only paths `git diff HEAD` names.
+    Files {
+        root: &'a Path,
+        hide: Option<&'a Path>,
+        diff: bool,
+    },
+    /// A `chat_history.jsonl`, or a directory that contains one.
+    Transcript(&'a Path),
+}
+
 pub fn sweep<O: Oracle>(
     claims: &[Proposition],
-    root: &Path,
-    hide: Option<&Path>,
+    scope: Scope<'_>,
     filter: Option<&str>,
     oracle: &mut O,
 ) -> Result<Outcome, SweepError> {
@@ -107,11 +120,8 @@ pub fn sweep<O: Oracle>(
     if sentences.is_empty() {
         return Ok(render(Vec::new(), false, 0, 0));
     }
-    let mut files = Filesystem::open(root).map_err(universe_io)?;
-    if let Some(model) = hide {
-        files.hide_model(model);
-    }
-    let paths = files.databases().to_vec();
+    let opened = open(scope)?;
+    let paths = opened.ids()?;
     let kept = match filter {
         Some(filter) => match filter_paths(&paths, filter, oracle)? {
             Filtered::Incomplete => {
@@ -121,7 +131,114 @@ pub fn sweep<O: Oracle>(
         },
         None => paths,
     };
-    judge(claims, &sentences, root, &kept, oracle)
+    let mut bodies = Vec::new();
+    for rel in &kept {
+        if let Some(body) = opened.load(rel)? {
+            bodies.push(body);
+        }
+    }
+    judge(claims, &sentences, bodies, oracle)
+}
+
+enum Opened<'a> {
+    Files { root: &'a Path, files: Filesystem },
+    Transcript(Transcript),
+}
+
+fn open(scope: Scope<'_>) -> Result<Opened<'_>, SweepError> {
+    match scope {
+        Scope::Files { root, hide, diff } => {
+            let mut files = Filesystem::open(root).map_err(universe_io)?;
+            if let Some(model) = hide {
+                files.hide_model(model);
+            }
+            if diff {
+                let listed: HashSet<String> = files.databases().iter().cloned().collect();
+                let mut ids: Vec<String> = diff_names(root)?
+                    .into_iter()
+                    .filter(|id| listed.contains(id))
+                    .collect();
+                ids.sort();
+                ids.dedup();
+                files.set(ids).map_err(universe_io)?;
+            }
+            Ok(Opened::Files { root, files })
+        }
+        Scope::Transcript(path) => Ok(Opened::Transcript(
+            Transcript::open(path).map_err(universe_io)?,
+        )),
+    }
+}
+
+impl Opened<'_> {
+    fn ids(&self) -> Result<Vec<String>, SweepError> {
+        match self {
+            Opened::Files { files, .. } => readable_ids(files),
+            Opened::Transcript(tree) => readable_ids(tree),
+        }
+    }
+
+    fn load(&self, rel: &str) -> Result<Option<Body>, SweepError> {
+        match self {
+            Opened::Files { root, .. } => load_body(root, rel),
+            Opened::Transcript(tree) => {
+                let text = tree.read(rel, usize::MAX).map_err(universe_io)?;
+                Ok(body_from_text(rel, PathBuf::from(rel), text))
+            }
+        }
+    }
+}
+
+/// Files in the current view. A summarized database contributes its readable descendants.
+fn readable_ids(universe: &impl Universe) -> Result<Vec<String>, SweepError> {
+    let mut out = Vec::new();
+    for id in universe.databases() {
+        collect_readable(universe, id, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn collect_readable(
+    universe: &impl Universe,
+    id: &str,
+    out: &mut Vec<String>,
+) -> Result<(), SweepError> {
+    match universe.summary(id).map_err(universe_io)? {
+        None => out.push(id.to_string()),
+        Some(_) => {
+            for child in universe.children(id).map_err(universe_io)? {
+                collect_readable(universe, &child, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Paths `git diff HEAD` names, relative to `root`. Staged and unstaged.
+fn diff_names(root: &Path) -> Result<Vec<String>, SweepError> {
+    let output = Command::new("git")
+        .arg("--no-pager")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--name-only", "--relative", "-z", "HEAD"])
+        .output()
+        .map_err(|err| SweepError::Io(format!("git diff: {err}")))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let err = err.trim();
+        return Err(SweepError::Io(if err.is_empty() {
+            format!("git diff exited {}", output.status)
+        } else {
+            format!("git diff: {err}")
+        }));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|_| SweepError::Io("git diff: path list is not utf-8".into()))?;
+    Ok(text
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 enum Filtered {
@@ -184,22 +301,16 @@ fn matches_filter(answer: &Answer) -> bool {
 
 struct Body {
     rel: String,
+    label: PathBuf,
     parts: Vec<String>,
 }
 
 fn judge<O: Oracle>(
     claims: &[Proposition],
     sentences: &[String],
-    root: &Path,
-    paths: &[String],
+    bodies: Vec<Body>,
     oracle: &mut O,
 ) -> Result<Outcome, SweepError> {
-    let mut bodies = Vec::new();
-    for rel in paths {
-        if let Some(body) = load_body(root, rel)? {
-            bodies.push(body);
-        }
-    }
     let candidates = bodies.len();
     let mut queued: Vec<Queued> = Vec::new();
     for body in &bodies {
@@ -243,7 +354,7 @@ fn judge<O: Oracle>(
             continue;
         }
         matches.push(Match {
-            path: absolute(root, &body.rel),
+            path: body.label.clone(),
             claims: matched,
         });
     }
@@ -420,10 +531,18 @@ fn load_body(root: &Path, rel: &str) -> Result<Option<Body>, SweepError> {
         return Ok(None);
     }
     let text = String::from_utf8(bytes).expect("utf-8 checked");
-    Ok(Some(Body {
+    Ok(body_from_text(rel, absolute(root, rel), text))
+}
+
+fn body_from_text(rel: &str, label: PathBuf, text: String) -> Option<Body> {
+    if text.len() > MAX_SLICED_BYTES || text.contains('\0') {
+        return None;
+    }
+    Some(Body {
         rel: rel.to_string(),
+        label,
         parts: split_body(&text, DEFAULT_BODY_BYTES),
-    }))
+    })
 }
 
 fn absolute(root: &Path, rel: &str) -> PathBuf {
@@ -484,6 +603,14 @@ mod tests {
 
     fn compiled(src: &str) -> Vec<Proposition> {
         compile(&parse(src).unwrap()).unwrap().claims
+    }
+
+    fn files(root: &Path) -> Scope<'_> {
+        Scope::Files {
+            root,
+            hide: None,
+            diff: false,
+        }
     }
 
     fn answer(choice: &str, confidence: f64) -> Answer {
@@ -577,7 +704,7 @@ mod tests {
             assert!(req.state.get("body").is_some());
             Ok(answer("contradicted", 0.9))
         });
-        let outcome = sweep(&compiled(NORTHSTAR), &dir, None, None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
         let a = fs::canonicalize(dir.join("a.txt")).unwrap();
         let b = fs::canonicalize(dir.join("b.txt")).unwrap();
         assert_eq!(
@@ -617,8 +744,7 @@ mod tests {
         });
         let outcome = sweep(
             &compiled(NORTHSTAR),
-            &dir,
-            None,
+            files(&dir),
             Some("source file"),
             &mut oracle,
         )
@@ -661,7 +787,7 @@ mod tests {
             };
             Ok(answer(choice, 0.9))
         });
-        let outcome = sweep(&compiled(NORTHSTAR), &dir, None, None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
         let path = fs::canonicalize(dir.join("new.rs")).unwrap();
         assert_eq!(outcome.text, matched_line(&path));
         assert!(!outcome.text.contains("old.rs"));
@@ -689,8 +815,7 @@ mod tests {
         });
         let outcome = sweep(
             &compiled("(\"alpha\")\n(\"beta\")\n"),
-            &dir,
-            None,
+            files(&dir),
             None,
             &mut oracle,
         )
@@ -715,7 +840,7 @@ mod tests {
             }
             Ok(answer("entailed", 0.9))
         });
-        let outcome = sweep(&compiled(NORTHSTAR), &dir, None, None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
         assert_eq!(outcome.text, "INCOMPLETE\n");
         assert!(!outcome.text.contains("CLEAN"));
         assert_eq!(outcome.judged, 1);
@@ -732,9 +857,113 @@ mod tests {
         fs::write(dir.join("a.txt"), "alpha\n").unwrap();
         fs::write(dir.join("b.txt"), "beta\n").unwrap();
         let mut oracle = Script::new(|_| Ok(answer("entailed", 0.9)));
-        let outcome = sweep(&compiled(NORTHSTAR), &dir, None, None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
         assert_eq!(outcome.text, "CLEAN\n");
         assert!(outcome.matches.is_empty());
         assert!(!outcome.incomplete);
+    }
+
+    #[test]
+    fn a_transcript_sweep_judges_readable_leaves() {
+        let dir = scratch("transcript");
+        let path = dir.join("chat_history.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"system","content":"SECRET_SYSTEM"}
+{"type":"user","prompt_index":0,"content":[{"type":"text","text":"<user_query>\nFind alpha\n</user_query>"}]}
+{"type":"assistant","content":"","tool_calls":[{"id":"c1","name":"read_file","arguments":"{\"target_file\":\"a.txt\"}"}]}
+{"type":"tool_result","tool_call_id":"c1","content":"alpha is here"}
+{"type":"assistant","content":"Found it."}
+"#,
+        )
+        .unwrap();
+        let mut oracle = Script::new(|req| {
+            let body = req.state["body"].as_str().unwrap();
+            let choice = if body.contains("alpha is here") {
+                "contradicted"
+            } else {
+                "entailed"
+            };
+            Ok(answer(choice, 0.9))
+        });
+        let outcome = sweep(
+            &compiled(NORTHSTAR),
+            Scope::Transcript(&path),
+            None,
+            &mut oracle,
+        )
+        .unwrap();
+        let paths: Vec<_> = oracle
+            .seen
+            .iter()
+            .map(|req| req.state["path"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "p0/c0/00-call-read_file",
+                "p0/c0/01-result-read_file",
+                "p0/c1/00-message",
+            ]
+        );
+        assert_eq!(
+            outcome.text,
+            format!("p0/c0/01-result-read_file\n  Matched: {NORTHSTAR_CLAIM}\n")
+        );
+        assert!(!outcome.text.contains("SECRET_SYSTEM"));
+    }
+
+    #[test]
+    fn diff_judges_files_changed_from_head() {
+        let dir = scratch("diff");
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["config", "user.email", "test@example.com"]);
+        git(&dir, &["config", "user.name", "test"]);
+        git(&dir, &["config", "commit.gpgsign", "false"]);
+        fs::write(dir.join("a.txt"), "a\n").unwrap();
+        fs::write(dir.join("b.txt"), "b\n").unwrap();
+        fs::write(dir.join("d.txt"), "d\n").unwrap();
+        git(&dir, &["add", "a.txt", "b.txt", "d.txt"]);
+        git(&dir, &["commit", "-qm", "init"]);
+        fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        fs::write(dir.join("b.txt"), "staged\n").unwrap();
+        git(&dir, &["add", "b.txt"]);
+        fs::write(dir.join("c.txt"), "untracked\n").unwrap();
+        fs::remove_file(dir.join("d.txt")).unwrap();
+        let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
+        let outcome = sweep(
+            &compiled(NORTHSTAR),
+            Scope::Files {
+                root: &dir,
+                hide: None,
+                diff: true,
+            },
+            None,
+            &mut oracle,
+        )
+        .unwrap();
+        let a = fs::canonicalize(dir.join("a.txt")).unwrap();
+        let b = fs::canonicalize(dir.join("b.txt")).unwrap();
+        assert_eq!(
+            outcome.text,
+            format!("{}{}", matched_line(&a), matched_line(&b))
+        );
+        assert!(!outcome.text.contains("c.txt"));
+        assert!(!outcome.text.contains("d.txt"));
+        assert_eq!(outcome.candidates, 2);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
