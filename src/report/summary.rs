@@ -69,7 +69,7 @@ pub fn print_run_summary(
 }
 
 /// Throughput, latency, and how many files were judged. Written to stderr so a
-/// sweep's `CLEAN` line and its matches stay the whole of stdout.
+/// sweep's report stays the whole of stdout.
 pub fn print_sweep_summary(
     usage: &Usage,
     flights: &[Flight],
@@ -78,7 +78,7 @@ pub fn print_sweep_summary(
     candidates: usize,
     elapsed: Duration,
     trace: &Path,
-    note: Option<&str>,
+    notes: &[&str],
 ) -> io::Result<()> {
     let color = std::io::stderr().is_terminal();
     let width = terminal::size()
@@ -96,7 +96,7 @@ pub fn print_sweep_summary(
         candidates,
         elapsed,
         trace,
-        note,
+        notes,
         width,
     ) {
         write_line(&mut out, &line, color)?;
@@ -112,7 +112,7 @@ fn sweep_lines(
     candidates: usize,
     elapsed: Duration,
     trace: &Path,
-    note: Option<&str>,
+    notes: &[&str],
     width: usize,
 ) -> Vec<Painted> {
     let mut lines = vec![
@@ -125,8 +125,8 @@ fn sweep_lines(
     }
     lines.push(plain(utilization_line(usage)));
     lines.push(files_judged(judged, candidates, elapsed, usage));
-    if let Some(note) = note {
-        lines.push(plain(note.to_string()));
+    for note in notes {
+        lines.push(plain((*note).to_string()));
     }
     lines
 }
@@ -631,7 +631,7 @@ mod tests {
             53,
             Duration::from_millis(4_200),
             Path::new("/tmp/autoground/sweep-1.jsonl"),
-            None,
+            &[],
             40,
         )
         .into_iter()
@@ -660,6 +660,33 @@ mod tests {
         );
         assert!(lines.iter().all(|line| !line.contains("context")));
         assert!(lines.iter().all(|line| !line.contains("diagram")));
+    }
+
+    #[test]
+    fn notes_follow_the_file_count() {
+        let lines = sweep_lines(
+            &Usage::default(),
+            &[],
+            None,
+            1,
+            2,
+            Duration::from_secs(1),
+            Path::new("/tmp/autoground/sweep-1.jsonl"),
+            &[
+                "1 file failed",
+                "sweep stopped at the cost cap of $0.01 (spent $0.0100); 1 of 2 files judged",
+            ],
+            40,
+        )
+        .into_iter()
+        .map(|line| line.text)
+        .collect::<Vec<_>>();
+        let judged = lines
+            .iter()
+            .position(|line| line.contains("files judged"))
+            .unwrap();
+        assert_eq!(lines[judged + 1], "1 file failed");
+        assert!(lines[judged + 2].starts_with("sweep stopped"), "{lines:?}");
     }
 
     #[test]

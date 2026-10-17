@@ -16,17 +16,17 @@ use autoground::{compile, display_path, lect_source, parse, scan_namespaces, Pro
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(
     name = "autoground",
-    about = "Check a lect, or sweep a tree for files that match one"
+    about = "Check a brief, or sweep for matches"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum Commands {
     /// Re-check a lect against the files its witnesses cite.
     ///
@@ -45,7 +45,7 @@ enum Commands {
     ///   autoground check examples/search-calls-oracle.lect
     ///   autoground check examples/sqrt2.lect
     Check {
-        /// Model source, a `.lect` file, or a Markdown file of `lect` blocks.
+        /// Brief source, a `.brief` file, or a Markdown file of `brief` blocks.
         input: String,
         /// Cost cap for this check, in cents. The request that crosses the
         /// cap still finishes. Later requests are refused.
@@ -57,37 +57,94 @@ enum Commands {
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
-    /// Judge a lect against every file in the current directory.
+    Sweep(SweepArgs),
+}
+
+/// Judge a lect against the filesystem in the current directory.
+///
+/// The lect has no witness and no detail. `--filter` keeps paths that
+/// match it, from the listing alone, before any file is read. Each
+/// remaining file is judged until `--budget` cents are spent. A file
+/// matches when any top-level claim is true. Stdout is `CLEAN`, or the
+/// absolute path of each match. A file whose request fails is reported
+/// with `Error:` and the sweep continues. On a terminal the report
+/// updates as files finish. A run that hits the cap ends with
+/// `INCOMPLETE`. The trace is `/tmp/autoground/sweep-<id>.jsonl`.
+///
+/// `sweep transcript` judges a session. `sweep diff` judges each change
+/// in `git diff`. Arguments after that lect are passed to `git diff`.
+///
+/// Examples:
+///   autoground sweep examples/no-historic-comment.lect --filter "source file"
+///   autoground sweep transcript examples/no-historic-comment.lect chat_history.jsonl
+///   autoground sweep diff examples/no-historic-comment.lect
+///   autoground sweep diff examples/no-historic-comment.lect --cached
+///   autoground sweep diff examples/no-historic-comment.lect HEAD~3..HEAD
+#[derive(Parser, Debug)]
+#[command(
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true,
+    subcommand_precedence_over_arg = true
+)]
+struct SweepArgs {
+    #[command(subcommand)]
+    universe: Option<SweepUniverse>,
+    /// Brief source, a `.brief` file, or a Markdown file of `brief` blocks.
+    #[arg(required = true, value_name = "BRIEF")]
+    input: Option<String>,
+    /// Natural-language filter for which paths to judge. Listing only.
+    #[arg(long)]
+    filter: Option<String>,
+    /// Cost cap for this sweep, in cents. The request that crosses the
+    /// cap still finishes. Later requests are refused.
+    #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
+    budget: u64,
+}
+
+#[derive(Subcommand, Debug)]
+enum SweepUniverse {
+    /// Judge the lect against a session transcript.
     ///
-    /// The lect has no witness and no detail. `--filter` keeps paths that
-    /// match it, from the listing alone, before any file is read. Each
-    /// remaining file is judged until `--budget` cents are spent. A file
-    /// matches when any top-level claim is true. Stdout is `CLEAN`, or the
-    /// absolute path of each match. `--transcript` judges a session instead,
-    /// and each match is a database id. `--diff` stays on the filesystem and
-    /// keeps only files `git diff HEAD` names. A run that hits the cap ends
-    /// with `INCOMPLETE`. The trace is `/tmp/autoground/sweep-<id>.jsonl`.
+    /// `path` is `chat_history.jsonl`, or a directory that contains it.
+    /// A match prints the database id.
     ///
-    /// Examples:
-    ///   autoground sweep examples/no-historic-comment.lect --filter "source file"
-    ///   autoground sweep examples/no-historic-comment.lect --diff
-    ///   autoground sweep examples/no-historic-comment.lect --transcript chat_history.jsonl
-    Sweep {
+    /// Example:
+    ///   autoground sweep transcript examples/no-historic-comment.lect chat_history.jsonl
+    Transcript {
         /// Model source, a `.lect` file, or a Markdown file of `lect` blocks.
         input: String,
-        /// Natural-language filter for which paths to judge. Listing only.
-        #[arg(long)]
-        filter: Option<String>,
+        /// Session directory or `chat_history.jsonl`.
+        path: PathBuf,
         /// Cost cap for this sweep, in cents. The request that crosses the
         /// cap still finishes. Later requests are refused.
         #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
         budget: u64,
-        /// Session directory or `chat_history.jsonl`, in place of the tree.
-        #[arg(long, value_name = "PATH", conflicts_with = "diff")]
-        transcript: Option<PathBuf>,
-        /// Judge only files `git diff HEAD` names. Staged and unstaged.
-        #[arg(long, conflicts_with = "transcript")]
-        diff: bool,
+    },
+    /// Judge the lect against each change in `git diff`.
+    ///
+    /// Arguments after the lect are passed to `git diff`. With no arguments
+    /// this is the worktree against the index. A match prints the path of
+    /// the change.
+    ///
+    /// Examples:
+    ///   autoground sweep diff examples/no-historic-comment.lect
+    ///   autoground sweep diff examples/no-historic-comment.lect --cached
+    ///   autoground sweep diff examples/no-historic-comment.lect HEAD~3..HEAD
+    ///   autoground sweep diff examples/no-historic-comment.lect origin/main...HEAD -- src/
+    Diff {
+        /// Model source, a `.lect` file, or a Markdown file of `lect` blocks.
+        input: String,
+        /// Cost cap for this sweep, in cents. The request that crosses the
+        /// cap still finishes. Later requests are refused.
+        #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
+        budget: u64,
+        /// Arguments forwarded to `git diff`.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
+        git_args: Vec<String>,
     },
 }
 
@@ -101,19 +158,7 @@ fn main() -> ExitCode {
                 ExitCode::from(3)
             }
         },
-        Commands::Sweep {
-            input,
-            filter,
-            budget,
-            transcript,
-            diff,
-        } => match sweep_cmd(
-            &input,
-            filter.as_deref(),
-            budget,
-            transcript.as_deref(),
-            diff,
-        ) {
+        Commands::Sweep(args) => match sweep_from(&args) {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
                 eprintln!("{err}");
@@ -123,12 +168,70 @@ fn main() -> ExitCode {
     }
 }
 
+fn sweep_from(args: &SweepArgs) -> Result<u8, Box<dyn std::error::Error>> {
+    match &args.universe {
+        None => {
+            let Some(input) = args.input.as_deref() else {
+                return Err("a lect is required".into());
+            };
+            let model = Path::new(input);
+            let hide = model.is_file().then_some(model);
+            sweep_cmd(
+                input,
+                args.budget,
+                args.filter.as_deref(),
+                sweep::Scope::Files {
+                    root: Path::new("."),
+                    hide,
+                },
+                Traced::Files,
+            )
+        }
+        Some(SweepUniverse::Transcript {
+            input,
+            path,
+            budget,
+        }) => sweep_cmd(
+            input,
+            *budget,
+            None,
+            sweep::Scope::Transcript(path),
+            Traced::Transcript(path),
+        ),
+        Some(SweepUniverse::Diff {
+            input,
+            budget,
+            git_args,
+        }) => {
+            let model = Path::new(input);
+            let hide = model.is_file().then_some(model);
+            sweep_cmd(
+                input,
+                *budget,
+                None,
+                sweep::Scope::Diff {
+                    root: Path::new("."),
+                    git_args,
+                    hide,
+                },
+                Traced::Diff(git_args),
+            )
+        }
+    }
+}
+
+enum Traced<'a> {
+    Files,
+    Transcript(&'a Path),
+    Diff(&'a [String]),
+}
+
 fn sweep_cmd(
     input: &str,
-    filter: Option<&str>,
     budget_cents: u64,
-    transcript: Option<&Path>,
-    diff: bool,
+    filter: Option<&str>,
+    scope: sweep::Scope<'_>,
+    traced: Traced<'_>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let started = Instant::now();
     let base = lect_dir(input);
@@ -137,18 +240,25 @@ fn sweep_cmd(
     let log = Log::create_sweep()?;
     let mut oracle = JevOracle::from_env(log.clone())?;
     oracle.set_run_cost_limit_usd(budget_cents as f64 / 100.0);
-    let model = Path::new(input);
-    let hide = model.is_file().then_some(model);
-    let scope = match transcript {
-        Some(path) => sweep::Scope::Transcript(path),
-        None => sweep::Scope::Files {
-            root: Path::new("."),
-            hide,
-            diff,
-        },
+    let mut live = if std::io::stdout().is_terminal() {
+        Some(autoground::report::sweep_view::Live::open()?)
+    } else {
+        None
     };
-    let outcome = sweep::sweep(&compiled.claims, scope, filter, &mut oracle)
-        .map_err(|err| format!("{err}\ntrace: {}", log.path().display()))?;
+    let outcome = sweep::sweep_watching(
+        &compiled.claims,
+        scope,
+        filter,
+        &mut oracle,
+        &mut |snapshot| {
+            if let Some(live) = live.as_mut() {
+                if let Some(status) = snapshot.status.as_deref() {
+                    let _ = live.show(&snapshot.report, status);
+                }
+            }
+        },
+    )
+    .map_err(|err| format!("{err}\ntrace: {}", log.path().display()))?;
     let matches: Vec<_> = outcome
         .matches
         .iter()
@@ -159,28 +269,56 @@ fn sweep_cmd(
             })
         })
         .collect();
-    log.append_event(
-        "sweep",
-        &json!({
-            "filter": filter,
-            "diff": diff,
-            "transcript": transcript.map(|path| path.display().to_string()),
-            "incomplete": outcome.incomplete,
-            "judged": outcome.judged,
-            "candidates": outcome.candidates,
-            "matches": matches,
-            "usage": UsageRecord::from_usage(&oracle.usage()),
-        }),
-    )?;
-    print!("{}", outcome.text);
-    let note = outcome.incomplete.then(|| {
-        sweep::stopped_message(
+    let errors: Vec<_> = outcome
+        .errors
+        .iter()
+        .map(|error| {
+            json!({
+                "path": error.path.display().to_string(),
+                "error": error.message,
+            })
+        })
+        .collect();
+    let mut event = json!({
+        "filter": filter,
+        "incomplete": outcome.incomplete,
+        "judged": outcome.judged,
+        "candidates": outcome.candidates,
+        "matches": matches,
+        "errors": errors,
+        "usage": UsageRecord::from_usage(&oracle.usage()),
+    });
+    match traced {
+        Traced::Files => event["universe"] = json!("files"),
+        Traced::Transcript(path) => {
+            event["universe"] = json!("transcript");
+            event["transcript"] = json!(path.display().to_string());
+        }
+        Traced::Diff(args) => {
+            event["universe"] = json!("diff");
+            event["git_diff"] = json!(args);
+        }
+    }
+    log.append_event("sweep", &event)?;
+    if let Some(live) = live.as_mut() {
+        live.finish(&outcome.text)?;
+    } else {
+        print!("{}", outcome.text);
+    }
+    drop(live);
+    let mut notes = Vec::new();
+    if !outcome.errors.is_empty() {
+        notes.push(sweep::failed_message(outcome.errors.len()));
+    }
+    if outcome.incomplete {
+        notes.push(sweep::stopped_message(
             budget_cents as f64 / 100.0,
             oracle.usage().spend_usd,
             outcome.judged,
             outcome.candidates,
-        )
-    });
+        ));
+    }
+    let note_refs: Vec<&str> = notes.iter().map(String::as_str).collect();
     print_sweep_summary(
         &oracle.usage(),
         oracle.flights(),
@@ -189,13 +327,15 @@ fn sweep_cmd(
         outcome.candidates,
         started.elapsed(),
         log.path(),
-        note.as_deref(),
+        &note_refs,
     )?;
-    Ok(if outcome.incomplete || !outcome.matches.is_empty() {
-        1
-    } else {
-        0
-    })
+    Ok(
+        if outcome.incomplete || !outcome.matches.is_empty() || !outcome.errors.is_empty() {
+            1
+        } else {
+            0
+        },
+    )
 }
 
 fn check_cmd(
@@ -376,4 +516,132 @@ fn has_ext(path: &Path, ext: &str) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case(ext))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_commands_select_a_universe() {
+        let files = Cli::try_parse_from([
+            "autoground",
+            "sweep",
+            "--budget",
+            "2",
+            "model.lect",
+            "--filter",
+            "source file",
+        ])
+        .unwrap();
+        match files.command {
+            Commands::Sweep(args) => {
+                assert!(args.universe.is_none());
+                assert_eq!(args.input.as_deref(), Some("model.lect"));
+                assert_eq!(args.filter.as_deref(), Some("source file"));
+                assert_eq!(args.budget, 2);
+            }
+            Commands::Check { .. } => panic!("check"),
+        }
+
+        let transcript = Cli::try_parse_from([
+            "autoground",
+            "sweep",
+            "transcript",
+            "--budget",
+            "3",
+            "model.lect",
+            "chat_history.jsonl",
+        ])
+        .unwrap();
+        match transcript.command {
+            Commands::Sweep(args) => match args.universe {
+                Some(SweepUniverse::Transcript {
+                    input,
+                    path,
+                    budget,
+                }) => {
+                    assert_eq!(input, "model.lect");
+                    assert_eq!(path, PathBuf::from("chat_history.jsonl"));
+                    assert_eq!(budget, 3);
+                }
+                other => panic!("transcript parse: {other:?}"),
+            },
+            Commands::Check { .. } => panic!("check"),
+        }
+
+        let diff = Cli::try_parse_from([
+            "autoground",
+            "sweep",
+            "diff",
+            "--budget",
+            "5",
+            "model.lect",
+            "--cached",
+            "-U0",
+            "origin/main...HEAD",
+            "--",
+            "src",
+        ])
+        .unwrap();
+        match diff.command {
+            Commands::Sweep(args) => match args.universe {
+                Some(SweepUniverse::Diff {
+                    input,
+                    budget,
+                    git_args,
+                }) => {
+                    assert_eq!(input, "model.lect");
+                    assert_eq!(budget, 5);
+                    assert_eq!(
+                        git_args,
+                        vec!["--cached", "-U0", "origin/main...HEAD", "--", "src",]
+                    );
+                }
+                other => panic!("diff parse: {other:?}"),
+            },
+            Commands::Check { .. } => panic!("check"),
+        }
+
+        let late = Cli::try_parse_from([
+            "autoground",
+            "sweep",
+            "diff",
+            "model.lect",
+            "--budget",
+            "5",
+            "--cached",
+        ])
+        .unwrap();
+        match late.command {
+            Commands::Sweep(args) => match args.universe {
+                Some(SweepUniverse::Diff {
+                    budget, git_args, ..
+                }) => {
+                    assert_eq!(budget, 5, "{git_args:?}");
+                    assert_eq!(git_args, vec!["--cached"]);
+                }
+                other => panic!("late budget: {other:?}"),
+            },
+            Commands::Check { .. } => panic!("check"),
+        }
+    }
+
+    #[test]
+    fn a_filter_belongs_to_the_filesystem_sweep() {
+        let err = Cli::try_parse_from([
+            "autoground",
+            "sweep",
+            "--filter",
+            "source",
+            "diff",
+            "model.lect",
+        ])
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("filter") || text.contains("conflict"),
+            "{text}"
+        );
+    }
 }

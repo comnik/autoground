@@ -1,11 +1,13 @@
-//! Judge a witness-free lect against every file in a tree.
+//! Judge a witness-free lect against every readable database in a universe.
 //!
-//! Sweep lists a universe, optionally keeps paths that match a natural-language
-//! filter, then judges each remaining file. The universe is the current
-//! directory, that directory limited to `git diff HEAD`, or a transcript.
-//! Filter questions share a listing state, so the oracle batches them. File
-//! questions share that file's body. Different bodies are independent states
-//! and overlap. A file matches when any top-level claim is true.
+//! The universe is the current directory, a transcript, or a git diff. On the
+//! filesystem, sweep optionally keeps paths that match a natural-language
+//! filter, then judges each remaining file. Filter questions share a listing
+//! state, so the oracle batches them. File questions share that file's body.
+//! A diff judges each change's patch. A transcript judges each readable leaf.
+//! Different bodies are independent states and overlap. A database matches
+//! when any top-level claim is true. A request that fails for one database is
+//! reported on that database. The others are still judged.
 //!
 //! Sweep builds its own oracle requests. The file Choice matches check's
 //! wording today, and the two are free to diverge.
@@ -13,7 +15,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{json, Value as Json};
 
@@ -22,7 +23,7 @@ use crate::confidence::SUPPORT;
 use crate::oracle::jev::QUESTION_BUDGET;
 use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, State, Ticket};
 use crate::syntax::Proposition;
-use crate::universe::{Filesystem, Transcript, Universe, UniverseError};
+use crate::universe::{Diff, Filesystem, Transcript, Universe, UniverseError};
 use crate::value::Value;
 
 const FILTER_QUESTION: &str = "Does `path` match `filter`?";
@@ -54,11 +55,26 @@ pub struct Match {
     pub claims: Vec<String>,
 }
 
+/// One file whose request failed. The other files are still judged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileError {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+/// The report so far, and a status line while the sweep is still running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub report: String,
+    pub status: Option<String>,
+}
+
 /// Stdout for an agent, plus how far the sweep got.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub text: String,
     pub matches: Vec<Match>,
+    pub errors: Vec<FileError>,
     pub incomplete: bool,
     pub judged: usize,
     pub candidates: usize,
@@ -68,6 +84,13 @@ pub fn stopped_message(cap_usd: f64, spent_usd: f64, judged: usize, candidates: 
     format!(
         "sweep stopped at the cost cap of ${cap_usd:.2} (spent ${spent_usd:.4}); {judged} of {candidates} files judged"
     )
+}
+
+pub fn failed_message(failed: usize) -> String {
+    match failed {
+        1 => "1 file failed".to_string(),
+        n => format!("{n} files failed"),
+    }
 }
 
 /// `witness` and `detail` are check's forms. A sweep lect states claims.
@@ -97,16 +120,21 @@ fn reject(proposition: &Proposition) -> Result<(), SweepError> {
     }
 }
 
-/// Where a sweep reads its files.
+/// Where a sweep reads its databases.
 pub enum Scope<'a> {
-    /// The filesystem at `root`. `diff` keeps only paths `git diff HEAD` names.
+    /// The filesystem at `root`.
     Files {
         root: &'a Path,
         hide: Option<&'a Path>,
-        diff: bool,
     },
     /// A `chat_history.jsonl`, or a directory that contains one.
     Transcript(&'a Path),
+    /// `git diff` at `root`. `git_args` are forwarded to git.
+    Diff {
+        root: &'a Path,
+        git_args: &'a [String],
+        hide: Option<&'a Path>,
+    },
 }
 
 pub fn sweep<O: Oracle>(
@@ -115,17 +143,36 @@ pub fn sweep<O: Oracle>(
     filter: Option<&str>,
     oracle: &mut O,
 ) -> Result<Outcome, SweepError> {
+    sweep_watching(claims, scope, filter, oracle, &mut |_| {})
+}
+
+/// Judge `claims` and call `watch` as the report changes.
+///
+/// `watch` sees the matches and errors so far, and a status line. The returned
+/// [`Outcome`] is the finished report.
+pub fn sweep_watching<O: Oracle>(
+    claims: &[Proposition],
+    scope: Scope<'_>,
+    filter: Option<&str>,
+    oracle: &mut O,
+    watch: &mut dyn FnMut(&Snapshot),
+) -> Result<Outcome, SweepError> {
     ensure_constraints(claims)?;
+    if filter.is_some() && !matches!(&scope, Scope::Files { .. }) {
+        return Err(SweepError::Constraint(
+            "`filter` applies to a filesystem sweep".into(),
+        ));
+    }
     let sentences = sentences_of(claims);
     if sentences.is_empty() {
-        return Ok(render(Vec::new(), false, 0, 0));
+        return Ok(render(Vec::new(), Vec::new(), false, 0, 0));
     }
     let opened = open(scope)?;
     let paths = opened.ids()?;
     let kept = match filter {
-        Some(filter) => match filter_paths(&paths, filter, oracle)? {
+        Some(filter) => match filter_paths(&paths, filter, oracle, watch)? {
             Filtered::Incomplete => {
-                return Ok(render(Vec::new(), true, 0, paths.len()));
+                return Ok(render(Vec::new(), Vec::new(), true, 0, paths.len()));
             }
             Filtered::Kept(paths) => paths,
         },
@@ -137,35 +184,33 @@ pub fn sweep<O: Oracle>(
             bodies.push(body);
         }
     }
-    judge(claims, &sentences, bodies, oracle)
+    judge(claims, &sentences, bodies, oracle, watch)
 }
 
 enum Opened<'a> {
     Files { root: &'a Path, files: Filesystem },
     Transcript(Transcript),
+    Diff(Diff),
 }
 
 fn open(scope: Scope<'_>) -> Result<Opened<'_>, SweepError> {
     match scope {
-        Scope::Files { root, hide, diff } => {
+        Scope::Files { root, hide } => {
             let mut files = Filesystem::open(root).map_err(universe_io)?;
             if let Some(model) = hide {
                 files.hide_model(model);
-            }
-            if diff {
-                let listed: HashSet<String> = files.databases().iter().cloned().collect();
-                let mut ids: Vec<String> = diff_names(root)?
-                    .into_iter()
-                    .filter(|id| listed.contains(id))
-                    .collect();
-                ids.sort();
-                ids.dedup();
-                files.set(ids).map_err(universe_io)?;
             }
             Ok(Opened::Files { root, files })
         }
         Scope::Transcript(path) => Ok(Opened::Transcript(
             Transcript::open(path).map_err(universe_io)?,
+        )),
+        Scope::Diff {
+            root,
+            git_args,
+            hide,
+        } => Ok(Opened::Diff(
+            Diff::open(root, git_args, hide).map_err(universe_io)?,
         )),
     }
 }
@@ -175,18 +220,22 @@ impl Opened<'_> {
         match self {
             Opened::Files { files, .. } => readable_ids(files),
             Opened::Transcript(tree) => readable_ids(tree),
+            Opened::Diff(diff) => readable_ids(diff),
         }
     }
 
     fn load(&self, rel: &str) -> Result<Option<Body>, SweepError> {
         match self {
             Opened::Files { root, .. } => load_body(root, rel),
-            Opened::Transcript(tree) => {
-                let text = tree.read(rel, usize::MAX).map_err(universe_io)?;
-                Ok(body_from_text(rel, PathBuf::from(rel), text))
-            }
+            Opened::Transcript(tree) => read_database(tree, rel),
+            Opened::Diff(diff) => read_database(diff, rel),
         }
     }
+}
+
+fn read_database(universe: &impl Universe, rel: &str) -> Result<Option<Body>, SweepError> {
+    let text = universe.read(rel, usize::MAX).map_err(universe_io)?;
+    Ok(body_from_text(rel, PathBuf::from(rel), text))
 }
 
 /// Files in the current view. A summarized database contributes its readable descendants.
@@ -214,33 +263,6 @@ fn collect_readable(
     Ok(())
 }
 
-/// Paths `git diff HEAD` names, relative to `root`. Staged and unstaged.
-fn diff_names(root: &Path) -> Result<Vec<String>, SweepError> {
-    let output = Command::new("git")
-        .arg("--no-pager")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--name-only", "--relative", "-z", "HEAD"])
-        .output()
-        .map_err(|err| SweepError::Io(format!("git diff: {err}")))?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        let err = err.trim();
-        return Err(SweepError::Io(if err.is_empty() {
-            format!("git diff exited {}", output.status)
-        } else {
-            format!("git diff: {err}")
-        }));
-    }
-    let text = String::from_utf8(output.stdout)
-        .map_err(|_| SweepError::Io("git diff: path list is not utf-8".into()))?;
-    Ok(text
-        .split('\0')
-        .filter(|path| !path.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
 enum Filtered {
     Kept(Vec<String>),
     Incomplete,
@@ -250,11 +272,12 @@ fn filter_paths<O: Oracle>(
     paths: &[String],
     filter: &str,
     oracle: &mut O,
+    watch: &mut dyn FnMut(&Snapshot),
 ) -> Result<Filtered, SweepError> {
     if paths.is_empty() {
         return Ok(Filtered::Kept(Vec::new()));
     }
-    let mut queued: Vec<(String, Ticket)> = Vec::new();
+    let mut pending: Vec<(Ticket, String)> = Vec::new();
     for chunk in paths.chunks(QUESTION_BUDGET) {
         let state = State::new(json!({ "paths": chunk }));
         for path in chunk {
@@ -272,20 +295,33 @@ fn filter_paths<O: Oracle>(
                     "false": "The path does not match the filter, or the path alone does not show that it matches.",
                 }),
             );
-            queued.push((path.clone(), oracle.submit(class)));
+            pending.push((oracle.submit(class), path.clone()));
         }
     }
-    let tickets: Vec<Ticket> = queued.iter().map(|(_, ticket)| *ticket).collect();
-    let answers = oracle.wait_many(&tickets);
+    let total = pending.len();
+    let mut done = 0usize;
     let mut kept = Vec::new();
     let mut limited = false;
-    for ((path, _), answer) in queued.into_iter().zip(answers) {
-        match answer {
-            Ok(answer) if matches_filter(&answer) => kept.push(path),
-            Ok(_) => {}
-            Err(OracleError::Limit(_)) => limited = true,
-            Err(err) => return Err(SweepError::Oracle(err)),
+    emit(
+        watch,
+        String::new(),
+        format!("filtering {done}/{total} paths"),
+    );
+    while !pending.is_empty() {
+        for (path, answer) in take_ready(oracle, &mut pending)? {
+            done += 1;
+            match answer {
+                Ok(answer) if matches_filter(&answer) => kept.push(path),
+                Ok(_) => {}
+                Err(OracleError::Limit(_)) => limited = true,
+                Err(err) => return Err(SweepError::Oracle(err)),
+            }
         }
+        emit(
+            watch,
+            String::new(),
+            format!("filtering {done}/{total} paths"),
+        );
     }
     if limited {
         Ok(Filtered::Incomplete)
@@ -310,62 +346,74 @@ fn judge<O: Oracle>(
     sentences: &[String],
     bodies: Vec<Body>,
     oracle: &mut O,
+    watch: &mut dyn FnMut(&Snapshot),
 ) -> Result<Outcome, SweepError> {
     let candidates = bodies.len();
-    let mut queued: Vec<Queued> = Vec::new();
-    for body in &bodies {
-        queue_body(body, sentences, oracle, &mut queued);
+    if candidates == 0 {
+        return Ok(render(Vec::new(), Vec::new(), false, 0, 0));
     }
-    let tickets: Vec<Ticket> = queued.iter().map(|item| item.ticket).collect();
-    let answers = if tickets.is_empty() {
-        Vec::new()
-    } else {
-        oracle.wait_many(&tickets)
-    };
-    let mut by_file: HashMap<String, Vec<PartAnswer>> = HashMap::new();
-    let mut incomplete = false;
-    for (item, answer) in queued.into_iter().zip(answers) {
-        match answer {
-            Ok(answer) => by_file.entry(item.rel).or_default().push(PartAnswer {
-                sentence: item.sentence,
-                answer,
-            }),
-            Err(OracleError::Limit(_)) => incomplete = true,
-            Err(err) => return Err(SweepError::Oracle(err)),
-        }
+    let mut files: HashMap<String, FileState> = HashMap::new();
+    let mut pending: Vec<(Ticket, Part)> = Vec::new();
+    for body in &bodies {
+        let expected = sentences.len() * body.parts.len();
+        files.insert(
+            body.rel.clone(),
+            FileState {
+                label: body.label.clone(),
+                expected,
+                left: expected,
+                got: Vec::new(),
+                errors: Vec::new(),
+                limited: false,
+            },
+        );
+        queue_body(body, sentences, oracle, &mut pending);
     }
     let mut matches = Vec::new();
-    let mut judged = 0;
-    for body in &bodies {
-        let got = by_file.remove(&body.rel).unwrap_or_default();
-        let expected = sentences.len() * body.parts.len();
-        if got.len() != expected {
-            incomplete = true;
-            continue;
+    let mut errors = Vec::new();
+    let mut incomplete = false;
+    let mut judged = 0usize;
+    let mut done = 0usize;
+    emit_progress(watch, &mut matches, &mut errors, done, candidates);
+    while !pending.is_empty() {
+        for (part, answer) in take_ready(oracle, &mut pending)? {
+            let state = files.get_mut(&part.rel).expect("queued file");
+            match answer {
+                Ok(answer) => state.got.push(PartAnswer {
+                    sentence: part.sentence,
+                    answer,
+                }),
+                Err(OracleError::Limit(_)) => state.limited = true,
+                Err(err) => note_error(&mut state.errors, &err),
+            }
+            state.left = state.left.saturating_sub(1);
         }
-        judged += 1;
-        let values = sentence_values(sentences, &got);
-        let matched: Vec<String> = claims
+        let finished: Vec<String> = files
             .iter()
-            .filter(|claim| value_of(claim, &values) == Value::True)
-            .map(statement)
+            .filter(|(_, state)| state.left == 0)
+            .map(|(rel, _)| rel.clone())
             .collect();
-        if matched.is_empty() {
-            continue;
+        for rel in finished {
+            let state = files.remove(&rel).expect("finished file");
+            settle(
+                state,
+                claims,
+                sentences,
+                &mut matches,
+                &mut errors,
+                &mut incomplete,
+                &mut judged,
+            );
+            done += 1;
         }
-        matches.push(Match {
-            path: body.label.clone(),
-            claims: matched,
-        });
+        emit_progress(watch, &mut matches, &mut errors, done, candidates);
     }
-    matches.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(render(matches, incomplete, judged, candidates))
+    Ok(render(matches, errors, incomplete, judged, candidates))
 }
 
-struct Queued {
+struct Part {
     rel: String,
     sentence: String,
-    ticket: Ticket,
 }
 
 struct PartAnswer {
@@ -373,11 +421,66 @@ struct PartAnswer {
     answer: Answer,
 }
 
+struct FileState {
+    label: PathBuf,
+    expected: usize,
+    left: usize,
+    got: Vec<PartAnswer>,
+    errors: Vec<String>,
+    limited: bool,
+}
+
+fn settle(
+    state: FileState,
+    claims: &[Proposition],
+    sentences: &[String],
+    matches: &mut Vec<Match>,
+    errors: &mut Vec<FileError>,
+    incomplete: &mut bool,
+    judged: &mut usize,
+) {
+    if state.limited {
+        *incomplete = true;
+    }
+    if !state.errors.is_empty() {
+        errors.push(FileError {
+            path: state.label,
+            message: state.errors.join("; "),
+        });
+        return;
+    }
+    if state.got.len() != state.expected {
+        *incomplete = true;
+        return;
+    }
+    *judged += 1;
+    let values = sentence_values(sentences, &state.got);
+    let matched: Vec<String> = claims
+        .iter()
+        .filter(|claim| value_of(claim, &values) == Value::True)
+        .map(statement)
+        .collect();
+    if matched.is_empty() {
+        return;
+    }
+    matches.push(Match {
+        path: state.label,
+        claims: matched,
+    });
+}
+
+fn note_error(errors: &mut Vec<String>, err: &OracleError) {
+    let message = err.to_string();
+    if !errors.contains(&message) {
+        errors.push(message);
+    }
+}
+
 fn queue_body<O: Oracle>(
     body: &Body,
     sentences: &[String],
     oracle: &mut O,
-    queued: &mut Vec<Queued>,
+    pending: &mut Vec<(Ticket, Part)>,
 ) {
     let total = body.parts.len() as u32;
     for (index, part) in body.parts.iter().enumerate() {
@@ -392,11 +495,13 @@ fn queue_body<O: Oracle>(
                 }),
                 criteria: document_criteria(),
             };
-            queued.push(Queued {
-                rel: body.rel.clone(),
-                sentence: sentence.clone(),
-                ticket: oracle.submit(class),
-            });
+            pending.push((
+                oracle.submit(class),
+                Part {
+                    rel: body.rel.clone(),
+                    sentence: sentence.clone(),
+                },
+            ));
         }
     }
 }
@@ -550,30 +655,144 @@ fn absolute(root: &Path, rel: &str) -> PathBuf {
     fs::canonicalize(&path).unwrap_or(path)
 }
 
-fn render(matches: Vec<Match>, incomplete: bool, judged: usize, candidates: usize) -> Outcome {
-    let mut text = String::new();
-    if matches.is_empty() && !incomplete {
+fn render(
+    mut matches: Vec<Match>,
+    mut errors: Vec<FileError>,
+    incomplete: bool,
+    judged: usize,
+    candidates: usize,
+) -> Outcome {
+    matches.sort_by(|left, right| left.path.cmp(&right.path));
+    errors.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut text = progress_report(&matches, &errors);
+    if matches.is_empty() && errors.is_empty() && !incomplete {
         text.push_str("CLEAN\n");
-    } else {
-        for matched in &matches {
-            text.push_str(&matched.path.display().to_string());
-            text.push('\n');
-            for claim in &matched.claims {
-                text.push_str("  Matched: ");
-                text.push_str(claim);
-                text.push('\n');
-            }
-        }
-        if incomplete {
-            text.push_str("INCOMPLETE\n");
-        }
+    } else if incomplete {
+        text.push_str("INCOMPLETE\n");
     }
     Outcome {
         text,
         matches,
+        errors,
         incomplete,
         judged,
         candidates,
+    }
+}
+
+fn progress_report(matches: &[Match], errors: &[FileError]) -> String {
+    let mut text = String::new();
+    write_matches(&mut text, matches);
+    write_errors(&mut text, errors);
+    text
+}
+
+fn write_matches(text: &mut String, matches: &[Match]) {
+    for matched in matches {
+        text.push_str(&matched.path.display().to_string());
+        text.push('\n');
+        for claim in &matched.claims {
+            text.push_str("  ");
+            text.push_str(claim);
+            text.push('\n');
+        }
+    }
+}
+
+fn write_errors(text: &mut String, errors: &[FileError]) {
+    for error in errors {
+        text.push_str("Error: ");
+        text.push_str(&error.path.display().to_string());
+        text.push('\n');
+        for line in error.message.lines() {
+            text.push_str("  ");
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+}
+
+fn emit(watch: &mut dyn FnMut(&Snapshot), report: String, status: String) {
+    watch(&Snapshot {
+        report,
+        status: Some(status),
+    });
+}
+
+fn emit_progress(
+    watch: &mut dyn FnMut(&Snapshot),
+    matches: &mut Vec<Match>,
+    errors: &mut Vec<FileError>,
+    done: usize,
+    candidates: usize,
+) {
+    matches.sort_by(|left, right| left.path.cmp(&right.path));
+    errors.sort_by(|left, right| left.path.cmp(&right.path));
+    emit(
+        watch,
+        progress_report(matches, errors),
+        format!("judging {done}/{candidates} files"),
+    );
+}
+
+/// Answers that have landed.
+///
+/// A sync oracle's `wait_any` returns the answer error for its first ticket
+/// instead of the ticket. That error belongs to the file. A failure of the
+/// wait itself names no ticket.
+fn take_ready<O: Oracle, T>(
+    oracle: &mut O,
+    pending: &mut Vec<(Ticket, T)>,
+) -> Result<Vec<(T, Result<Answer, OracleError>)>, SweepError> {
+    let tickets: Vec<Ticket> = pending.iter().map(|(ticket, _)| *ticket).collect();
+    let ready: HashSet<Ticket> = ready_tickets(oracle, &tickets)?.into_iter().collect();
+    let mut left = Vec::new();
+    let mut done = Vec::new();
+    for (ticket, item) in pending.drain(..) {
+        if ready.contains(&ticket) {
+            done.push((ticket, item));
+        } else {
+            left.push((ticket, item));
+        }
+    }
+    *pending = left;
+    let mut out = Vec::with_capacity(done.len());
+    for (ticket, item) in done {
+        out.push((item, oracle.wait(ticket)));
+    }
+    if out.is_empty() {
+        return Err(SweepError::Oracle(OracleError::Parse(
+            "oracle reported no finished ticket".into(),
+        )));
+    }
+    Ok(out)
+}
+
+fn ready_tickets<O: Oracle>(oracle: &mut O, tickets: &[Ticket]) -> Result<Vec<Ticket>, SweepError> {
+    match oracle.wait_any(tickets) {
+        Ok(ticket) => {
+            let ready = oracle.completed(tickets);
+            if ready.is_empty() {
+                Ok(vec![ticket])
+            } else {
+                Ok(ready)
+            }
+        }
+        Err(err) if is_wait_failure(&err) => Err(SweepError::Oracle(err)),
+        Err(_) => Ok(vec![tickets[0]]),
+    }
+}
+
+fn is_wait_failure(err: &OracleError) -> bool {
+    match err {
+        OracleError::Config(_) => true,
+        OracleError::Parse(message)
+            if message == "no tickets to wait for" || message.starts_with("unknown ticket") =>
+        {
+            true
+        }
+        OracleError::Http(message) if message.contains("ended without a result") => true,
+        OracleError::Limit(_) | OracleError::Http(_) | OracleError::Parse(_) => false,
     }
 }
 
@@ -606,11 +825,7 @@ mod tests {
     }
 
     fn files(root: &Path) -> Scope<'_> {
-        Scope::Files {
-            root,
-            hide: None,
-            diff: false,
-        }
+        Scope::Files { root, hide: None }
     }
 
     fn answer(choice: &str, confidence: f64) -> Answer {
@@ -672,7 +887,7 @@ mod tests {
         "not (Contains a comment that references a historic state of the codebase.)";
 
     fn matched_line(path: &std::path::Path) -> String {
-        format!("{}\n  Matched: {NORTHSTAR_CLAIM}\n", path.display())
+        format!("{}\n  {NORTHSTAR_CLAIM}\n", path.display())
     }
 
     #[test]
@@ -821,10 +1036,7 @@ mod tests {
         )
         .unwrap();
         let path = fs::canonicalize(dir.join("has-alpha.txt")).unwrap();
-        assert_eq!(
-            outcome.text,
-            format!("{}\n  Matched: alpha\n", path.display())
-        );
+        assert_eq!(outcome.text, format!("{}\n  alpha\n", path.display()));
         assert!(!outcome.text.contains("low.txt"));
         assert!(!outcome.text.contains("beta"));
     }
@@ -849,6 +1061,88 @@ mod tests {
             stopped_message(0.01, 0.0104, outcome.judged, outcome.candidates),
             "sweep stopped at the cost cap of $0.01 (spent $0.0104); 1 of 2 files judged"
         );
+    }
+
+    #[test]
+    fn an_oracle_error_reports_the_file_and_keeps_the_rest() {
+        let dir = scratch("http");
+        fs::write(dir.join("big.py"), "x\n").unwrap();
+        fs::write(dir.join("ok.py"), "y\n").unwrap();
+        let mut oracle = Script::new(|req| {
+            let path = req.state["path"].as_str().unwrap();
+            if path.ends_with("big.py") {
+                return Err(OracleError::Http(
+                    "HTTP 400: {\"detail\":{\"error_type\":\"max_tokens_exceeded\"}}".into(),
+                ));
+            }
+            let proposition = req.instructions["proposition"].as_str().unwrap();
+            if proposition == "alpha" {
+                Ok(answer("entailed", 0.9))
+            } else {
+                Ok(answer("contradicted", 0.9))
+            }
+        });
+        let mut statuses = Vec::new();
+        let outcome = sweep_watching(
+            &compiled("(\"alpha\")\n(\"beta\")\n"),
+            files(&dir),
+            None,
+            &mut oracle,
+            &mut |snapshot| {
+                if let Some(status) = &snapshot.status {
+                    statuses.push(status.clone());
+                }
+            },
+        )
+        .unwrap();
+        let ok = fs::canonicalize(dir.join("ok.py")).unwrap();
+        let big = fs::canonicalize(dir.join("big.py")).unwrap();
+        assert_eq!(
+            outcome.text,
+            format!(
+                "{}\n  alpha\nError: {}\n  HTTP 400: {{\"detail\":{{\"error_type\":\"max_tokens_exceeded\"}}}}\n",
+                ok.display(),
+                big.display()
+            )
+        );
+        assert_eq!(outcome.judged, 1);
+        assert_eq!(outcome.candidates, 2);
+        assert_eq!(outcome.errors.len(), 1);
+        assert_eq!(
+            outcome.errors[0].message,
+            "HTTP 400: {\"detail\":{\"error_type\":\"max_tokens_exceeded\"}}"
+        );
+        assert!(!outcome.incomplete);
+        assert!(!outcome.text.contains("CLEAN"));
+        assert!(statuses.contains(&"judging 0/2 files".to_string()));
+        assert!(statuses.contains(&"judging 1/2 files".to_string()));
+        assert!(statuses.contains(&"judging 2/2 files".to_string()));
+        assert_eq!(failed_message(1), "1 file failed");
+        assert_eq!(failed_message(2), "2 files failed");
+    }
+
+    #[test]
+    fn an_error_with_no_match_is_not_clean() {
+        let dir = scratch("only-error");
+        fs::write(dir.join("big.py"), "x\n").unwrap();
+        let mut oracle = Script::new(|_| {
+            Err(OracleError::Http(
+                "HTTP 400: {\"detail\":{\"error_type\":\"max_tokens_exceeded\"}}".into(),
+            ))
+        });
+        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        let big = fs::canonicalize(dir.join("big.py")).unwrap();
+        assert_eq!(
+            outcome.text,
+            format!(
+                "Error: {}\n  HTTP 400: {{\"detail\":{{\"error_type\":\"max_tokens_exceeded\"}}}}\n",
+                big.display()
+            )
+        );
+        assert!(outcome.matches.is_empty());
+        assert!(!outcome.incomplete);
+        assert_eq!(outcome.judged, 0);
+        assert_eq!(outcome.candidates, 1);
     }
 
     #[test]
@@ -908,49 +1202,80 @@ mod tests {
         );
         assert_eq!(
             outcome.text,
-            format!("p0/c0/01-result-read_file\n  Matched: {NORTHSTAR_CLAIM}\n")
+            format!("p0/c0/01-result-read_file\n  {NORTHSTAR_CLAIM}\n")
         );
         assert!(!outcome.text.contains("SECRET_SYSTEM"));
     }
 
     #[test]
-    fn diff_judges_files_changed_from_head() {
+    fn a_diff_sweep_judges_each_patch() {
         let dir = scratch("diff");
         git(&dir, &["init", "-q"]);
         git(&dir, &["config", "user.email", "test@example.com"]);
         git(&dir, &["config", "user.name", "test"]);
         git(&dir, &["config", "commit.gpgsign", "false"]);
-        fs::write(dir.join("a.txt"), "a\n").unwrap();
-        fs::write(dir.join("b.txt"), "b\n").unwrap();
-        fs::write(dir.join("d.txt"), "d\n").unwrap();
-        git(&dir, &["add", "a.txt", "b.txt", "d.txt"]);
+        fs::write(dir.join("a.txt"), "alpha\n").unwrap();
+        fs::write(dir.join("b.txt"), "beta\n").unwrap();
+        git(&dir, &["add", "a.txt", "b.txt"]);
         git(&dir, &["commit", "-qm", "init"]);
-        fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        fs::write(dir.join("a.txt"), "beta\n").unwrap();
         fs::write(dir.join("b.txt"), "staged\n").unwrap();
         git(&dir, &["add", "b.txt"]);
         fs::write(dir.join("c.txt"), "untracked\n").unwrap();
-        fs::remove_file(dir.join("d.txt")).unwrap();
-        let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
+        let mut oracle = Script::new(|req| {
+            let body = req.state["body"].as_str().unwrap();
+            let choice =
+                if body.contains("diff --git") && body.contains("-alpha") && body.contains("+beta")
+                {
+                    "contradicted"
+                } else {
+                    "entailed"
+                };
+            Ok(answer(choice, 0.9))
+        });
+        let git_args: &[String] = &[];
         let outcome = sweep(
             &compiled(NORTHSTAR),
-            Scope::Files {
+            Scope::Diff {
                 root: &dir,
+                git_args,
                 hide: None,
-                diff: true,
             },
             None,
             &mut oracle,
         )
         .unwrap();
-        let a = fs::canonicalize(dir.join("a.txt")).unwrap();
-        let b = fs::canonicalize(dir.join("b.txt")).unwrap();
+        assert_eq!(outcome.text, format!("a.txt\n  {NORTHSTAR_CLAIM}\n"));
+        assert_eq!(outcome.candidates, 1);
         assert_eq!(
-            outcome.text,
-            format!("{}{}", matched_line(&a), matched_line(&b))
+            oracle
+                .seen
+                .iter()
+                .map(|req| req.state["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a.txt"]
         );
-        assert!(!outcome.text.contains("c.txt"));
-        assert!(!outcome.text.contains("d.txt"));
-        assert_eq!(outcome.candidates, 2);
+    }
+
+    #[test]
+    fn a_filter_applies_to_the_filesystem_only() {
+        let git_args: &[String] = &[];
+        let err = sweep(
+            &compiled(NORTHSTAR),
+            Scope::Diff {
+                root: Path::new("."),
+                git_args,
+                hide: None,
+            },
+            Some("source"),
+            &mut Script::new(|_| Ok(answer("entailed", 0.9))),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("`filter` applies to a filesystem sweep"),
+            "{err}"
+        );
     }
 
     fn git(dir: &Path, args: &[&str]) {
