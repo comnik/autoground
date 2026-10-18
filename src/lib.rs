@@ -1,3 +1,4 @@
+pub mod align;
 pub mod check;
 pub mod compiler;
 pub mod confidence;

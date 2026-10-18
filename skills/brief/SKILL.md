@@ -20,23 +20,16 @@ Users will instruct about the concepts and relationships they want captured in t
 brief. Unless explicitly asked, don't include information about other concepts or 
 relationships that exist in the codebase.
 
-Complete this sentence before proceeding:
+Capture the user's intent for the brief with an `intent` declaration. Do the same for any `detail` scopes you might be adding to your brief. These should capture what a consumer of the brief is meant to take away from it.
 
-> The user should understand that __.
+Use the `autoground check` utility to validate your brief. Iterate until all claims are verified. A detail is verified when its body is. If you notice that a claim made by the user is incorrect, report this misalignment back to them. Remember, the goal is not to get your brief to pass, but to accurately capture the state of the codebase. If you are struggling to get a brief accepted, recheck your own assumptions.
 
-Then capture this intent behind your briefing in the `brief` you create, using the `intent` form. Do the same for any `detail` scopes you might be adding to your brief.
-
-Use the `autoground check` utility to validate your brief. Iterate until all claims are 
-verified. An assumption is taken as true. A detail is verified when its body is. If you
-notice that a claim made by the user is incorrect, report this misalignment back to them.
-Remember, the goal is not to get your brief to pass, but to accurately capture the state of the codebase. If your struggling to get a brief accepted, recheck your own assumptions.
+Once you have a valid brief, illustrate it with a mermaid diagram. Use `autoground align` to validate that the diagram accurately reflects the brief. Iterate on the diagram until it is accepted. Again, the goal is not to trick the judge, its to build an understanding of reality.
 
 
 ## Creating a `brief`
 
-Aligning mental models requires using the same name for things that relate in the same way,
-so consistent naming is the biggest lever for preserving understanding. `brief` is a
-language for establishing shared terminology.
+Aligning mental models requires using the same name for things that relate in the same way, so consistent naming is the biggest lever for preserving understanding. `brief` is a language for establishing shared terminology.
 
 A brief consists of *names*, *senses*, *claims*, and *witnesses*:
 

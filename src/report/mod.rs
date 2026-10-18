@@ -1,5 +1,4 @@
 pub mod context;
-pub mod mermaid;
 pub mod run;
 pub mod summary;
 pub mod sweep_view;

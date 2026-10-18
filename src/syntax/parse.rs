@@ -994,7 +994,23 @@ fn expect_symbol(s: &Sexp, message: &str) -> Result<String, ParseError> {
 }
 
 fn reject_reserved(s: &Sexp, spelling: &str) -> Result<(), ParseError> {
-    if matches!(
+    if is_reserved_word(spelling) {
+        Err(err_at(
+            s,
+            format!("`{spelling}` is reserved and cannot be declared"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// A spelling that can be declared with `(name …)` or `(sense …)`.
+pub(crate) fn is_declared_name(spelling: &str) -> bool {
+    is_clojure_identifier(spelling) && !is_reserved_word(spelling)
+}
+
+fn is_reserved_word(spelling: &str) -> bool {
+    matches!(
         spelling,
         "name"
             | "sense"
@@ -1007,14 +1023,7 @@ fn reject_reserved(s: &Sexp, spelling: &str) -> Result<(), ParseError> {
             | "assume"
             | "detail"
             | "intent"
-    ) {
-        Err(err_at(
-            s,
-            format!("`{spelling}` is reserved and cannot be declared"),
-        ))
-    } else {
-        Ok(())
-    }
+    )
 }
 
 fn err(line: usize, col: usize, message: impl Into<String>) -> ParseError {

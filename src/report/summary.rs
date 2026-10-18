@@ -14,7 +14,6 @@ use crossterm::{
 use crate::oracle::{Flight, Usage};
 
 use super::context::context_path;
-use super::mermaid::{diagram_path, svg_path};
 
 const FLIGHT_BUCKETS: usize = 24;
 const HIST_BINS: usize = 16;
@@ -177,11 +176,6 @@ fn painted(
             "context available at {}",
             context_path(trace).display()
         )),
-        plain(format!(
-            "diagram available at {}",
-            diagram_path(trace).display()
-        )),
-        plain(format!("svg available at {}", svg_path(trace).display())),
         throughput_line(usage, flights, flight_limit),
     ]);
     if let Some(text) = latency_line(usage, flights) {
@@ -581,8 +575,6 @@ mod tests {
                 "─".repeat(40),
                 "trace available at /tmp/trace.jsonl".to_string(),
                 "context available at /tmp/context.md".to_string(),
-                "diagram available at /tmp/diagram.mmd".to_string(),
-                "svg available at /tmp/diagram.svg".to_string(),
                 "throughput 111 requests".to_string(),
                 "utilization batch=5.0% fill=8.7%".to_string(),
                 "2/4 claims validated in 5.91s for $0.01 (307k tokens)".to_string(),
@@ -684,8 +676,6 @@ mod tests {
                 "─".repeat(40),
                 "trace available at /tmp/trace.jsonl".to_string(),
                 "context available at /tmp/context.md".to_string(),
-                "diagram available at /tmp/diagram.mmd".to_string(),
-                "svg available at /tmp/diagram.svg".to_string(),
                 "throughput 0 requests".to_string(),
                 "utilization batch=none fill=none".to_string(),
                 "0/0 claims validated in 4ms for $0.000000 (0 tokens)".to_string(),

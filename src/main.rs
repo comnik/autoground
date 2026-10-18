@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use autoground::align::{lower_mermaid, mismatch, model_of};
 use autoground::check::{self, write_report, DEFAULT_BODY_BYTES};
 use autoground::compiler::{link_parts, Vocabulary};
 use autoground::log::{Log, DEFAULT_TRACE_DIR};
 use autoground::oracle::jev::DEFAULT_RUN_COST_CENTS;
 use autoground::oracle::{JevOracle, Oracle, UsageRecord};
 use autoground::report::context::write_context;
-use autoground::report::mermaid::{diagram_of, write_diagram, Diagram, Styles};
 use autoground::report::summary::{print_run_summary, print_sweep_summary};
 use autoground::sweep;
 use autoground::{brief_source, compile, display_path, parse, scan_namespaces, Proposition};
@@ -35,10 +35,9 @@ enum Commands {
     /// `--budget` caps this run in cents and defaults to 1. On a terminal the
     /// spinner names the sentence in flight, and the finished view is the
     /// brief: each judged clause carries its own mark, and an undischarged
-    /// clause carries its failure comment. The trace, the context, and the
-    /// diagram are written in a new directory under `/tmp/autoground/`, or
-    /// under `--out`. Exit status is 1 when a top-level claim is not
-    /// discharged.
+    /// clause carries its failure comment. The trace and the context are
+    /// written in a new directory under `/tmp/autoground/`, or under `--out`.
+    /// Exit status is 1 when a top-level claim is not discharged.
     ///
     /// Examples:
     ///   autoground check examples/search-calls-oracle.brief
@@ -51,10 +50,29 @@ enum Commands {
         #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
         budget: u64,
         /// Parent directory for this check. A new subdirectory holds
-        /// `trace.jsonl`, `context.md`, `diagram.mmd`, and `diagram.svg`.
-        /// Defaults to `/tmp/autoground`.
+        /// `trace.jsonl` and `context.md`. Defaults to `/tmp/autoground`.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
+    },
+    /// Compare the names, senses, and statements of two models.
+    ///
+    /// Each argument is a `.brief` file, a Markdown file of `brief` blocks,
+    /// a `.mmd` flowchart, or brief source. A flowchart's node labels are
+    /// names. An edge labeled with a sense name is that sense applied to its
+    /// endpoints, and a leading `not ` negates it. Any other edge label is
+    /// the wording between the two names. A `%%` line that starts with `(`
+    /// is brief source, which is how a picture carries a sense template.
+    /// Exit status is 1 when a name, a sense, or a statement is on only one
+    /// side. The oracle is not asked.
+    ///
+    /// Examples:
+    ///   autoground align model.brief picture.mmd
+    ///   autoground align model.brief notes.md
+    Align {
+        /// A `.brief` file, Markdown `brief` blocks, a `.mmd` flowchart, or brief source.
+        left: String,
+        /// A `.brief` file, Markdown `brief` blocks, a `.mmd` flowchart, or brief source.
+        right: String,
     },
     Sweep(SweepArgs),
 }
@@ -157,6 +175,13 @@ fn main() -> ExitCode {
                 ExitCode::from(3)
             }
         },
+        Commands::Align { left, right } => match align_cmd(&left, &right) {
+            Ok(code) => ExitCode::from(code),
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::from(3)
+            }
+        },
         Commands::Sweep(args) => match sweep_from(&args) {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
@@ -234,7 +259,7 @@ fn sweep_cmd(
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let started = Instant::now();
     let base = brief_dir(input);
-    let (_src, _program, compiled, _vocab) = load_compiled(input, &base)?;
+    let (_src, _program, compiled) = load_compiled(input, &base)?;
     sweep::ensure_constraints(&compiled.claims)?;
     let log = Log::create_sweep()?;
     let mut oracle = JevOracle::from_env(log.clone())?;
@@ -351,8 +376,7 @@ fn check_cmd(
         None
     };
     let base = brief_dir(input);
-    let (src, program, compiled, vocab) = load_compiled(input, &base)?;
-    let mut diagram = diagram_of(&program, &vocab);
+    let (src, program, compiled) = load_compiled(input, &base)?;
     let log = Log::create_under(out.unwrap_or_else(|| Path::new(DEFAULT_TRACE_DIR)))?;
     if let Some(live) = &live {
         let ui = live.clone();
@@ -367,7 +391,6 @@ fn check_cmd(
         &compiled.assumptions,
         &base,
         &mut oracle,
-        &mut diagram,
         &log,
         live,
         started,
@@ -381,19 +404,12 @@ fn finish_check<O: Oracle>(
     assumptions: &[String],
     base: &Path,
     oracle: &mut O,
-    diagram: &mut Diagram,
     log: &Log,
     live: Option<autoground::report::run::Live>,
     started: std::time::Instant,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let report = check::check(claims, base, DEFAULT_BODY_BYTES, oracle)?;
     log.clear_hook();
-    let context = autoground::report::context::render(&report);
-    let styles = if diagram.has_style_questions() {
-        Styles::ask(oracle, diagram, &context)
-    } else {
-        Styles::plain()
-    };
     let usage = oracle.usage();
     let flights = oracle.flights().to_vec();
     let flight_limit = oracle.flight_limit();
@@ -420,8 +436,6 @@ fn finish_check<O: Oracle>(
         }),
     )?;
     write_context(log.path(), &report)?;
-    diagram.mark_contradicted(&check::contradicted_sentences(&report));
-    write_diagram(log.path(), diagram, &styles)?;
     if let Some(live) = live {
         live.finish(src, &program.clauses, &report)?;
     } else {
@@ -463,21 +477,58 @@ fn brief_dir(input: &str) -> PathBuf {
     }
 }
 
+fn align_cmd(left: &str, right: &str) -> Result<u8, Box<dyn std::error::Error>> {
+    let left = load_model(left)?;
+    let right = load_model(right)?;
+    match mismatch(&left, &right) {
+        None => Ok(0),
+        Some(report) => {
+            print!("{report}");
+            Ok(1)
+        }
+    }
+}
+
+fn load_model(input: &str) -> Result<autoground::align::Model, Box<dyn std::error::Error>> {
+    let src = align_source(input)?;
+    let program = parse(&src)?;
+    let base = brief_dir(input);
+    let (compiled, _) = compile_linked(&program, input, &base)?;
+    Ok(model_of(&program, &compiled))
+}
+
+/// `.mmd` lowers to a brief. Every other model is read the way `check` reads it.
+fn align_source(input: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let path = Path::new(input);
+    if has_ext(path, "mmd") {
+        if !path.is_file() {
+            return Err(format!("model file not found: {input}").into());
+        }
+        let text = std::fs::read_to_string(path)?;
+        return match lower_mermaid(&text) {
+            Ok(brief) => Ok(brief),
+            Err(err) => Err(format!("{err} in {input}").into()),
+        };
+    }
+    model_source(input)
+}
+
 fn load_compiled(
     input: &str,
     base: &Path,
-) -> Result<
-    (
-        String,
-        autoground::Program,
-        autoground::Compiled,
-        Vocabulary,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<(String, autoground::Program, autoground::Compiled), Box<dyn std::error::Error>> {
     let src = model_source(input)?;
     let program = parse(&src)?;
-    let (compiled, vocab) = if program
+    let (compiled, _) = compile_linked(&program, input, base)?;
+    Ok((src, program, compiled))
+}
+
+fn compile_linked(
+    program: &autoground::Program,
+    input: &str,
+    base: &Path,
+) -> Result<(autoground::Compiled, Vocabulary), Box<dyn std::error::Error>> {
+    if program
         .namespace
         .as_ref()
         .is_some_and(|ns| !ns.requires.is_empty())
@@ -485,11 +536,10 @@ fn load_compiled(
         let files = scan_namespaces(base)?;
         let entry = Path::new(input);
         let entry_path = entry.is_file().then(|| display_path(base, entry));
-        link_parts(&program, entry_path.as_deref(), &files)?
+        Ok(link_parts(program, entry_path.as_deref(), &files)?)
     } else {
-        (compile(&program)?, Vocabulary::none())
-    };
-    Ok((src, program, compiled, vocab))
+        Ok((compile(program)?, Vocabulary::none()))
+    }
 }
 
 /// Read `input` as a model file when it names one, otherwise treat it as source.
@@ -544,6 +594,7 @@ mod tests {
                 assert_eq!(args.budget, 2);
             }
             Commands::Check { .. } => panic!("check"),
+            Commands::Align { .. } => panic!("align"),
         }
 
         let transcript = Cli::try_parse_from([
@@ -570,6 +621,7 @@ mod tests {
                 other => panic!("transcript parse: {other:?}"),
             },
             Commands::Check { .. } => panic!("check"),
+            Commands::Align { .. } => panic!("align"),
         }
 
         let diff = Cli::try_parse_from([
@@ -603,6 +655,7 @@ mod tests {
                 other => panic!("diff parse: {other:?}"),
             },
             Commands::Check { .. } => panic!("check"),
+            Commands::Align { .. } => panic!("align"),
         }
 
         let late = Cli::try_parse_from([
@@ -626,6 +679,7 @@ mod tests {
                 other => panic!("late budget: {other:?}"),
             },
             Commands::Check { .. } => panic!("check"),
+            Commands::Align { .. } => panic!("align"),
         }
     }
 

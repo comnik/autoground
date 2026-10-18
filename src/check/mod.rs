@@ -866,28 +866,6 @@ fn judge_leaf(
     }
 }
 
-/// Sentences a file contradicted. A detail head stays out: a broken subproof
-/// leaves the head unknown, and that is not a contradiction of the head.
-pub fn contradicted_sentences(report: &Report) -> HashSet<String> {
-    let mut sentences = HashSet::new();
-    for claim in &report.claims {
-        collect_contradicted(claim, &mut sentences);
-    }
-    sentences
-}
-
-fn collect_contradicted(node: &Node, sentences: &mut HashSet<String>) {
-    if matches!(node.failure, Some(Failure::Contradicted)) && node.text != IMPLICATION_TEXT {
-        sentences.insert(node.text.clone());
-    }
-    for child in &node.children {
-        collect_contradicted(child, sentences);
-    }
-    if let Some(step) = &node.implication {
-        collect_contradicted(step, sentences);
-    }
-}
-
 /// Split `text` into the fewest pieces that each fit in `budget`.
 ///
 /// A piece ends on a newline when one fits. A line longer than `budget` is
@@ -1532,7 +1510,6 @@ mod tests {
         assert_eq!(claim.value, Value::False);
         assert_eq!(claim.failure, Some(Failure::Contradicted));
         assert_eq!(report.claims[0].value, Value::True);
-        assert!(contradicted_sentences(&report).contains("nope"));
     }
 
     #[test]
@@ -1551,43 +1528,5 @@ mod tests {
         assert_eq!(claim.children[0].value, Value::False);
         assert_eq!(claim.value, Value::Unknown);
         assert_eq!(claim.failure, None);
-        let struck = contradicted_sentences(&report);
-        assert!(struck.contains("nope too"), "{struck:?}");
-        assert!(!struck.contains("nope"), "{struck:?}");
-    }
-
-    #[test]
-    fn a_contradicted_witness_marks_its_sentence_and_the_head_stays_out() {
-        let report = Report {
-            claims: vec![Node {
-                text: "the head".into(),
-                value: Value::Unknown,
-                failure: None,
-                cites: Vec::new(),
-                children: vec![Node {
-                    text: "the file says otherwise".into(),
-                    value: Value::False,
-                    failure: Some(Failure::Contradicted),
-                    cites: vec!["a.rs".into()],
-                    children: Vec::new(),
-                    implication: None,
-                    assumed: false,
-                }],
-                implication: Some(Box::new(Node {
-                    text: IMPLICATION_TEXT.into(),
-                    value: Value::Unknown,
-                    failure: Some(Failure::NotEntailed),
-                    cites: Vec::new(),
-                    children: Vec::new(),
-                    implication: None,
-                    assumed: false,
-                })),
-                assumed: false,
-            }],
-        };
-        let struck = contradicted_sentences(&report);
-        assert!(struck.contains("the file says otherwise"), "{struck:?}");
-        assert!(!struck.contains("the head"), "{struck:?}");
-        assert!(!struck.contains(IMPLICATION_TEXT), "{struck:?}");
     }
 }

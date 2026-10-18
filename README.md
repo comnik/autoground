@@ -188,7 +188,7 @@ is only proved once, no matter how often it is referred to.
 Exit status is 0 when every top-level claim is discharged, 1 otherwise, and 3 on a compile,
 IO, or oracle failure. Each check writes a detailed trace of all proof steps along with the
 requests sent to the oracle, a `context.md` containing the fully spelled out version of all
-validated claims, and a `diagram.mmd` of the validated names and senses.
+validated claims.
 
 
 ## `autoground sweep`
