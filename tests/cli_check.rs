@@ -76,6 +76,8 @@ alpha is the first letter.
     );
     let diagram = std::fs::read_to_string(line(&stdout, "diagram available at ")).unwrap();
     assert!(diagram.starts_with("flowchart TD\n"), "{diagram}");
+    let svg = std::fs::read_to_string(line(&stdout, "svg available at ")).unwrap();
+    assert!(svg.contains("<svg"), "{svg}");
     assert!(
         stdout
             .lines()
@@ -153,6 +155,8 @@ fn check_out_writes_the_session_there() {
     );
     assert_eq!(context, session.join("context.md"));
     assert_eq!(diagram, session.join("diagram.mmd"));
+    let svg = PathBuf::from(line(&stdout, "svg available at "));
+    assert_eq!(svg, session.join("diagram.svg"));
     assert!(std::fs::read_to_string(&trace)
         .unwrap()
         .contains("\"kind\":\"check\""));

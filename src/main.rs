@@ -51,7 +51,7 @@ enum Commands {
         #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
         budget: u64,
         /// Parent directory for this check. A new subdirectory holds
-        /// `trace.jsonl`, `context.md`, and `diagram.mmd`.
+        /// `trace.jsonl`, `context.md`, `diagram.mmd`, and `diagram.svg`.
         /// Defaults to `/tmp/autoground`.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,

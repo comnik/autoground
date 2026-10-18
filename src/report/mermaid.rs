@@ -2,11 +2,12 @@
 //!
 //! Names are nodes, binary sense applications are edges, and details are
 //! subgraphs. A claim is not a box. A closing `senses` subgraph verbalizes
-//! each reading. One oracle request classifies each name as a component or as
-//! data, and chooses a priority. The state of that request is the verbalized
-//! context, plus the intent of the scope that declared the name or the sense.
-//! Shape and paint are fixed from those answers. A contradicted claim draws
-//! its edge with a red dashed stroke.
+//! each reading. One oracle request classifies each name as a component, an
+//! interface, or data, and chooses a priority. The state of that request is
+//! the verbalized context, plus the intent of the scope that declared the
+//! name or the sense. The classification picks the shape and a layer fill.
+//! Priority keeps the stroke, the arrow, and `linkStyle`. A contradicted
+//! claim draws its edge with a red dashed stroke.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -21,13 +22,22 @@ use crate::syntax::{Arg, Form, Formula, Program, Reading, Sense};
 
 /// `…/trace.jsonl` → `…/diagram.mmd`.
 pub fn diagram_path(trace: &Path) -> PathBuf {
+    session_file(trace, "diagram.mmd")
+}
+
+/// `…/trace.jsonl` → `…/diagram.svg`.
+pub fn svg_path(trace: &Path) -> PathBuf {
+    session_file(trace, "diagram.svg")
+}
+
+fn session_file(trace: &Path, name: &str) -> PathBuf {
     match trace.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join("diagram.mmd"),
-        _ => PathBuf::from("diagram.mmd"),
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
     }
 }
 
-/// Write [`render`] to [`diagram_path`].
+/// Write [`render`] to [`diagram_path`] and the rendered picture to [`svg_path`].
 pub fn write_diagram(trace: &Path, diagram: &Diagram, styles: &Styles) -> io::Result<PathBuf> {
     let path = diagram_path(trace);
     if let Some(parent) = path.parent() {
@@ -35,7 +45,11 @@ pub fn write_diagram(trace: &Path, diagram: &Diagram, styles: &Styles) -> io::Re
             std::fs::create_dir_all(parent)?;
         }
     }
-    std::fs::write(&path, render(diagram, styles))?;
+    let source = render(diagram, styles);
+    std::fs::write(&path, &source)?;
+    let svg = sebastian::render_diagram(&source, "diagram")
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    std::fs::write(svg_path(trace), svg)?;
     Ok(path)
 }
 
@@ -153,6 +167,10 @@ impl Styles {
             .unwrap_or(Shape::Rectangle)
     }
 
+    fn kind_of(&self, name: &str) -> Option<Kind> {
+        self.kinds.get(name).copied()
+    }
+
     fn priority_of_name(&self, name: &str) -> Priority {
         self.name_priority
             .get(name)
@@ -171,6 +189,7 @@ impl Styles {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Component,
+    Interface,
     Data,
 }
 
@@ -178,6 +197,7 @@ impl Kind {
     fn parse(text: &str) -> Option<Self> {
         Some(match text {
             "component" => Self::Component,
+            "interface" => Self::Interface,
             "data" => Self::Data,
             _ => return None,
         })
@@ -186,7 +206,16 @@ impl Kind {
     fn shape(self) -> Shape {
         match self {
             Self::Component => Shape::Rounded,
+            Self::Interface => Shape::Circle,
             Self::Data => Shape::Cylinder,
+        }
+    }
+
+    fn class_name(self) -> &'static str {
+        match self {
+            Self::Component => "component",
+            Self::Interface => "interface",
+            Self::Data => "data",
         }
     }
 }
@@ -195,6 +224,7 @@ impl Kind {
 enum Shape {
     Rectangle,
     Rounded,
+    Circle,
     Cylinder,
 }
 
@@ -245,15 +275,25 @@ const CLASS_DEEMPHASIZED: &str =
 const CLASS_NORMAL: &str = "classDef normal fill:#f8fafc,stroke:#334155,stroke-width:1.5px";
 const CLASS_HIGHLIGHTED: &str =
     "classDef highlighted fill:#fef3c7,stroke:#b45309,stroke-width:2.5px";
+/// Layer fills. Attached after the priority class, so the fill replaces the
+/// priority fill and the priority stroke stays.
+const CLASS_COMPONENT: &str = "classDef component fill:#dbeafe";
+const CLASS_INTERFACE: &str = "classDef interface fill:#ede9fe";
+const CLASS_DATA: &str = "classDef data fill:#d1fae5";
 const CONTRADICTED_STROKE: &str = "stroke:#dc2626,stroke-width:1.5px,stroke-dasharray: 4 3";
 
-/// Flowchart text. Priority picks the class, the arrow, and `linkStyle`.
+/// Flowchart text. A layer class paints a classified name. Priority picks
+/// the stroke, the arrow, and `linkStyle`.
 pub fn render(diagram: &Diagram, styles: &Styles) -> String {
     let mut out = String::from("flowchart TD\n");
     out.push_str(&format!("  {CLASS_DEEMPHASIZED}\n"));
     out.push_str(&format!("  {CLASS_NORMAL}\n"));
     out.push_str(&format!("  {CLASS_HIGHLIGHTED}\n"));
+    out.push_str(&format!("  {CLASS_COMPONENT}\n"));
+    out.push_str(&format!("  {CLASS_INTERFACE}\n"));
+    out.push_str(&format!("  {CLASS_DATA}\n"));
     let mut strokes = Vec::new();
+    let mut layers = Vec::new();
     let mut details = 0usize;
     render_scope(
         &diagram.root,
@@ -261,10 +301,14 @@ pub fn render(diagram: &Diagram, styles: &Styles) -> String {
         styles,
         &mut details,
         &mut strokes,
+        &mut layers,
         &mut out,
     );
     for (index, stroke) in strokes.iter().enumerate() {
         out.push_str(&format!("  linkStyle {index} {stroke}\n"));
+    }
+    for (id, class) in layers {
+        out.push_str(&format!("  class {id} {class}\n"));
     }
     out.push_str("  subgraph senses [\"senses\"]\n");
     for row in &diagram.legend {
@@ -284,6 +328,7 @@ fn render_scope(
     styles: &Styles,
     details: &mut usize,
     strokes: &mut Vec<&'static str>,
+    layers: &mut Vec<(String, &'static str)>,
     out: &mut String,
 ) {
     let pad = "  ".repeat(depth);
@@ -302,6 +347,9 @@ fn render_scope(
         let body = shaped(&node.id, &node.name, styles.shape_of(&node.name));
         let class = styles.priority_of_name(&node.name).class_name();
         out.push_str(&format!("{pad_in}{body}:::{class}\n"));
+        if let Some(kind) = styles.kind_of(&node.name) {
+            layers.push((node.id.clone(), kind.class_name()));
+        }
     }
     for edge in &scope.edges {
         let (arrow, stroke) = if edge.contradicted {
@@ -319,7 +367,7 @@ fn render_scope(
         ));
     }
     for child in &scope.children {
-        render_scope(child, inner, styles, details, strokes, out);
+        render_scope(child, inner, styles, details, strokes, layers, out);
     }
     if scope.boxed {
         out.push_str(&format!("{pad}end\n"));
@@ -331,6 +379,7 @@ fn shaped(id: &str, label: &str, shape: Shape) -> String {
     match shape {
         Shape::Rectangle => format!("{id}[{label}]"),
         Shape::Rounded => format!("{id}({label})"),
+        Shape::Circle => format!("{id}(({label}))"),
         Shape::Cylinder => format!("{id}[({label})]"),
     }
 }
@@ -378,7 +427,7 @@ fn style_questions(diagram: &Diagram, context: &str) -> Option<Batch> {
             &state,
             json!({
                 "name": name,
-                "question": "Is this name a component or data?",
+                "question": "Is this name a component, an interface, or data?",
             }),
             kind_criteria(),
         ));
@@ -442,8 +491,9 @@ fn choice(state: &State, instructions: Json, criteria: Json) -> Classification {
 
 fn kind_criteria() -> Json {
     json!({
-        "component": "something that does work",
-        "data": "a store, record, or value that is kept",
+        "component": "a processing unit, service, or module that does work",
+        "interface": "a contract, API, or port between components",
+        "data": "a payload, schema, or state that is kept",
     })
 }
 
@@ -1279,12 +1329,17 @@ mod tests {
             diagram_path(Path::new("/tmp/autoground/1790-51022-0/trace.jsonl")),
             PathBuf::from("/tmp/autoground/1790-51022-0/diagram.mmd")
         );
+        assert_eq!(
+            svg_path(Path::new("/tmp/autoground/1790-51022-0/trace.jsonl")),
+            PathBuf::from("/tmp/autoground/1790-51022-0/diagram.svg")
+        );
     }
 
     #[test]
     fn quoted_shapes_keep_the_label_inside_the_brackets() {
         assert_eq!(shaped("n", "Frontend", Shape::Rectangle), "n[\"Frontend\"]");
         assert_eq!(shaped("n", "Frontend", Shape::Rounded), "n(\"Frontend\")");
+        assert_eq!(shaped("n", "Frontend", Shape::Circle), "n((\"Frontend\"))");
         assert_eq!(
             shaped("n", "Frontend", Shape::Cylinder),
             "n[(\"Frontend\")]"
@@ -1383,6 +1438,9 @@ flowchart TD
   classDef deemphasized fill:#f4f4f5,stroke:#a1a1aa,stroke-width:1px,stroke-dasharray: 4 3
   classDef normal fill:#f8fafc,stroke:#334155,stroke-width:1.5px
   classDef highlighted fill:#fef3c7,stroke:#b45309,stroke-width:2.5px
+  classDef component fill:#dbeafe
+  classDef interface fill:#ede9fe
+  classDef data fill:#d1fae5
   n_Concept[\"Concept\"]:::normal
   subgraph d1 [\"inputs\"]
     n_LogicBlock[\"LogicBlock\"]:::normal
@@ -1505,22 +1563,42 @@ flowchart TD
     }
 
     #[test]
-    fn a_component_is_rounded_and_data_is_a_cylinder() {
-        let program = parse("(name Frontend) (name Catalog)").unwrap();
+    fn each_layer_has_its_own_shape_and_class() {
+        let program = parse("(name Frontend) (name Api) (name Catalog)").unwrap();
         let diagram = diagram_of(&program, &Vocabulary::none());
         let batch = style_questions(&diagram, "").unwrap();
         let answers = vec![
             answer("component"),
             answer("normal"),
+            answer("interface"),
+            answer("highlighted"),
             answer("data"),
-            answer("normal"),
+            answer("deemphasized"),
         ];
         let text = render(
             &diagram,
             &from_answers(&batch.names, &batch.senses, &answers),
         );
         assert!(text.contains("n_Frontend(\"Frontend\"):::normal"), "{text}");
-        assert!(text.contains("n_Catalog[(\"Catalog\")]:::normal"), "{text}");
+        assert!(text.contains("n_Api((\"Api\")):::highlighted"), "{text}");
+        assert!(
+            text.contains("n_Catalog[(\"Catalog\")]:::deemphasized"),
+            "{text}"
+        );
+        assert!(text.contains("class n_Frontend component\n"), "{text}");
+        assert!(text.contains("class n_Api interface\n"), "{text}");
+        assert!(text.contains("class n_Catalog data\n"), "{text}");
+        assert!(text.contains("classDef component fill:#dbeafe\n"), "{text}");
+        assert!(text.contains("classDef interface fill:#ede9fe\n"), "{text}");
+        assert!(text.contains("classDef data fill:#d1fae5\n"), "{text}");
+        let svg = sebastian::render_diagram(&text, "diagram").expect(&text);
+        assert!(svg.contains("<svg"), "{svg}");
+        assert!(svg.contains("Frontend"), "{svg}");
+        assert!(svg.contains("Api"), "{svg}");
+        assert!(svg.contains("Catalog"), "{svg}");
+        assert!(svg.to_ascii_lowercase().contains("#dbeafe"), "{svg}");
+        assert!(svg.to_ascii_lowercase().contains("#ede9fe"), "{svg}");
+        assert!(svg.to_ascii_lowercase().contains("#d1fae5"), "{svg}");
     }
 
     #[test]
@@ -1601,7 +1679,7 @@ LogicBlockBuilder produces LogicBlock
         assert_eq!(state, &json!(context));
         assert_eq!(
             batch.questions[0].instructions["question"],
-            "Is this name a component or data?"
+            "Is this name a component, an interface, or data?"
         );
         let kind_keys: HashSet<_> = batch.questions[0]
             .criteria
@@ -1612,7 +1690,7 @@ LogicBlockBuilder produces LogicBlock
             .collect();
         assert_eq!(
             kind_keys,
-            HashSet::from(["component".into(), "data".into()])
+            HashSet::from(["component".into(), "interface".into(), "data".into()])
         );
         let priority_keys: HashSet<_> = batch.questions[1]
             .criteria
@@ -1688,12 +1766,18 @@ flowchart TD
   classDef deemphasized fill:#f4f4f5,stroke:#a1a1aa,stroke-width:1px,stroke-dasharray: 4 3
   classDef normal fill:#f8fafc,stroke:#334155,stroke-width:1.5px
   classDef highlighted fill:#fef3c7,stroke:#b45309,stroke-width:2.5px
+  classDef component fill:#dbeafe
+  classDef interface fill:#ede9fe
+  classDef data fill:#d1fae5
   subgraph senses [\"senses\"]
   end
 "
         );
         let program = parse("(\"there is a GPU compiler\")").unwrap();
         assert!(style_questions(&diagram_of(&program, &Vocabulary::none()), "").is_none());
+        let svg =
+            sebastian::render_diagram(&drawn("(\"there is a GPU compiler\")"), "diagram").unwrap();
+        assert!(svg.contains("<svg"), "{svg}");
     }
 
     #[test]
