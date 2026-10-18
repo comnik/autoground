@@ -382,23 +382,33 @@ fn style_questions(diagram: &Diagram, context: &str) -> Option<Batch> {
             }),
             kind_criteria(),
         ));
+        let prominence = if intent.is_some() {
+            "How prominent should this name be given the `intent` behind the diagram?"
+        } else {
+            "How prominent should this name be?"
+        };
         questions.push(choice(
             &state,
             json!({
                 "name": name,
-                "question": "How prominent should this name be?",
+                "question": prominence,
             }),
             name_priority_criteria(),
         ));
     }
     for (name, reading, intent) in &senses {
         let state = style_state(context, intent);
+        let strength = if intent.is_some() {
+            "How strongly should this relation read given the `intent` behind the diagram?"
+        } else {
+            "How strongly should this relation read?"
+        };
         questions.push(choice(
             &state,
             json!({
                 "name": name,
                 "reading": reading,
-                "question": "How strongly should this relation read?",
+                "question": strength,
             }),
             sense_priority_criteria(),
         ));
