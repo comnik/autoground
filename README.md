@@ -43,7 +43,7 @@ language for establishing shared terminology.
 > *"a formal written presentation of an argument that sets forth the main points with
 > supporting precedents and evidence"*
 
-A brief consists of *names*, *senses*, and *witnesses*:
+A brief consists of *names*, *senses*, *claims*, and *witnesses*:
 
 ```brief
 ;; A namespace globally disambiguates this brief.
@@ -56,58 +56,74 @@ A brief consists of *names*, *senses*, and *witnesses*:
 (name Program)
 (name AST)
 
-;; Senses express a claim about a name, or the relationship between names.
-;; Unambiguous senses can be written as plain text sentences.
-Program is a data structure
-AST is a data structure
-Frontend accepts Program
-Frontend returns AST
-The system convers Program to AST via Frontend
-
-;; The explicit syntax for a sense requires quotes and parentheses.
-("Program is a data structure")
-("Frontend accepts Program")
-
-;; Senses can have free variables, in which case the claim is not fully formulated yet.
-("{Name} is a data structure")                      ;; single free variable
-("{Name} returns {Name}")                           ;; two free variables
-
-;; Senses can be named as well, to not have to fully spell them out everywhere.
-(sense is_data "{Name} is a part of the system")    ;; single free variable
-(sense is_component "{X} is a part of the system")  ;; single free variable
+;; Senses define templates for attaching meaning to names and for establishing
+;; relationships between them.
+(sense is_data "{Name} is a data structure")        ;; single free variable
+(sense is_component "{X} is a component")           ;; single free variable
 (sense returns "{Name} returns {Name}")             ;; two free variables
 
-;; Roles name the free variables on a sense, to disambiguate.
-(sense returns "{Component} returns {Data}")
+;; Note how the variables can be named as well, to disambiguate roles in a relationship.
 (sense property "{object} has a {property}")
 (sense borrowed_from "{borrower} borrowed from {lender}")
 
-;; A claim becomes verifiable when its tied to one or more witnesses.
-(witness
-  ("Sweep asks the oracle whether a path matches the filter")
-  "src/sweep/mod.rs")
+;; Senses instantiated with names can be used to make statements about the codebase.
+(is_component Frontend)
+(is_component Backend)
+(is_data AST)
+(returns Frontend AST)
 
-;; Atomic claims can be negated, or composed into conjunctions and disjunctions. 
-(not (depends_on X Y))
+;; The above claims are all unsupported and so can neither be validated nor contradicted.
+;; A claim becomes verifiable when it is tied to a witness.
+(claim (is_component Frontend)
+  (witness "src/frontend/mod.rs"))
 
-(and
-  (component X)
-  (component Y)
-  (depends_on X Y))
+(claim ("Sweep asks the oracle whether a path matches the filter")
+  (witness "src/sweep/mod.rs"))
 
-(or
-  (part_of X Y)
-  (part_of Y X))
+;; Claims can be supported by other claims, forming a chain of deductions.
+(sense lemma-1 "If a whole number is odd, then its square is not even.")
+(sense lemma-2 "If the square of a whole number is even, then that whole number is not odd.")
+(claim (lemma-2)
+  (lemma-1))
 
-;; Any claim that can't be validated as a whole, can be decomposed.
-(detail (calls Sweep Oracle)
-  (witness
-    ("Sweep asks the oracle whether a path matches the filter")
-    "src/sweep/mod.rs")
-  (witness
-    ("Sweep's oracle posts are the Jev HTTP call")
-    "src/sweep/mod.rs"
-    "src/oracle/jev.rs"))
+;; Crucially, any claim that can't be validated directly from a witness, can be decomposed
+;; into conjunctions and disjunctions of smaller claims via `not`, `and`, and `or`.
+(claim (is_component Backend)
+  (not (is_data Backend)))
+
+(claim (returns Frontend AST)
+  (and
+    (is_component Frontend)
+    (is_data AST)
+    (claim ("Frontend parses the program and returns AST")
+      (witness "src/frontend/parser.rs"))))
+
+(claim (related Frontend Backend)
+  (or
+    (depends_on Frontend Backend)
+    (depends_on Backend Frontend)))
+```
+
+Note how applying names to a sense boils down to a fully formed sentence:
+
+```
+   (returns Frontend AST)
+=> ("{Name} returns {Name}" Frontend AST)
+=> ("Frontend returns AST")
+=> Frontend returns AST
+```
+
+There are two additional language constructs: *assume* and *intent*.
+
+```brief
+;; Sometimes, we're just looking to make an internally consistent argument that is based
+;; on a handful of explicit assumptions, rather than some observable ground truth.
+(sense axiom "The square of an even whole number is even.")
+(assume (axiom))
+
+;; It is often helpful to capture the intent behind a brief. What do we want the receipient
+;; to take away? What mental model are we trying to convey?
+(intent "This brief is intended to convey the compilation pipeline.")
 ```
 
 The ordering of the top-level declarations is irrelevant.
@@ -118,6 +134,34 @@ out.
 
 Briefs are not accepted as witnesses for other briefs, to make sure unvalidated claims are
 never treated as evidence.
+
+Finally, briefs can be nested, to hide *details* of an argument for easier consumption.
+
+```brief
+(intent "Convey the relationship between front- and backend.")
+
+(name Frontend)
+(name Backend)
+
+(sense feeds_into "{Producer} feeds into {Consumer}")
+
+(detail
+  (intent "Explain in more detail the interaction between front- and backend.")
+
+  ;; Names and senses declared here are local to this scope and not visible outside.
+  (name AST)
+  (sense produces "{Component} produces {Representation}")
+  (sense consumes "{Component} accepts {Representation} as input")
+
+  (claim (produces Frontend AST) (witness ...))
+  (claim (consumes Backend AST) (witness ...))
+
+  ;; Claims made about names and senses from the outer scope become visible there.
+  (claim (feeds_into Frontend Backend)
+    (and
+     (produces Frontend AST)
+     (consumes Backend AST))))
+```
 
 
 ## `autoground check`
@@ -137,7 +181,7 @@ oracle, a sort of neural proof kernel.
 
 At every step in the proof the oracle is provided with the relevant hypotheses and is asked
 to judge the proposed conclusion as "supported", "contradicted", or "neutral". This starts
-with the files referenced by witnesses. Every `detail` is a deductive step. Only logical
+with the files referenced by witnesses. Every `claim` is a deductive step. Only logical
 operators are resolved determinisitically, without involving the oracle. Each unique claim
 is only proved once, no matter how often it is referred to.
 
