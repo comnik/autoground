@@ -29,6 +29,7 @@ Then capture this intent behind your briefing in the `brief` you create, using t
 Use the `autoground check` utility to validate your brief. Iterate until all claims are 
 verified. An assumption is taken as true. A detail is verified when its body is. If you
 notice that a claim made by the user is incorrect, report this misalignment back to them.
+Remember, the goal is not to get your brief to pass, but to accurately capture the state of the codebase. If your struggling to get a brief accepted, recheck your own assumptions.
 
 
 ## Creating a `brief`
