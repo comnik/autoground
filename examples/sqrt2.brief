@@ -1,130 +1,136 @@
 ;; The square root of two is irrational.
-;; Each lemma is a nullary sense. The detail under it is the proof, and a later
-;; step cites the sense instead of nesting the proof again.
+;; Axioms are named senses, taken as true with assume. Each lemma is a nullary
+;; sense. The claim under it is the proof, and a later step cites the sense
+;; instead of nesting the proof again.
+
+(sense even-square "The square of an even whole number is even.")
+(sense odd-square "The square of an odd whole number is odd.")
+(sense even-or-odd "Every whole number is even or odd.")
+(sense not-both "No whole number is both even and odd.")
+(sense even-iff-twice "A whole number is even exactly when it is twice a whole number.")
+(sense square-whole "The square of a whole number is a whole number.")
+(sense square-of-twice "The square of twice a whole number is four times the square of that whole number.")
+(sense four-equals-twice "If four times a whole number equals twice another whole number, then that other whole number is twice the first.")
+(sense sqrt2-equation "Whenever a ratio of two whole numbers equals the square root of two, the square of the first equals twice the square of the second.")
+(sense evens-share-two "Two even whole numbers share two as a common divisor.")
+(sense lowest-terms "A fraction in lowest terms is a ratio of two whole numbers that share no common divisor greater than one.")
+(sense has-lowest-terms "Every ratio of two whole numbers equals some fraction in lowest terms.")
+
+(assume (even-square))
+(assume (odd-square))
+(assume (even-or-odd))
+(assume (not-both))
+(assume (even-iff-twice))
+(assume (square-whole))
+(assume (square-of-twice))
+(assume (four-equals-twice))
+(assume (sqrt2-equation))
+(assume (evens-share-two))
+(assume (lowest-terms))
+(assume (has-lowest-terms))
 
 (sense lemma-1 "If a whole number is odd, then its square is not even.")
 
-(detail (lemma-1)
-  (witness
-    ("The square of an odd whole number is odd.")
-    "sqrt2-notes.txt")
-  (witness
-    ("No whole number is both even and odd.")
-    "sqrt2-notes.txt"))
+(claim (lemma-1)
+  (and
+    (odd-square)
+    (not-both)))
 
 (sense lemma-2 "If the square of a whole number is even, then that whole number is not odd.")
 
-(detail (lemma-2)
+(claim (lemma-2)
   (lemma-1))
 
 (sense lemma-3 "A whole number whose square is even is itself even.")
 
-(detail (lemma-3)
-  (lemma-2)
-  (witness
-    ("Every whole number is even or odd.")
-    "sqrt2-notes.txt"))
+(claim (lemma-3)
+  (and
+    (lemma-2)
+    (even-or-odd)))
 
 (sense lemma-4 "If a ratio of two whole numbers equals the square root of two, then the first whole number is even.")
 
-(detail (lemma-4)
-  (lemma-3)
-  (witness
-    ("Whenever a ratio of two whole numbers equals the square root of two, the square of the first equals twice the square of the second.")
-    "sqrt2-notes.txt"))
+(claim (lemma-4)
+  (and
+    (lemma-3)
+    (sqrt2-equation)))
 
 (sense lemma-5 "If a whole number is even, then it is twice a whole number.")
 
-(detail (lemma-5)
-  (witness
-    ("A whole number is even exactly when it is twice a whole number.")
-    "sqrt2-notes.txt"))
+(claim (lemma-5)
+  (even-iff-twice))
 
 (sense lemma-6 "If a whole number is even, then its square is four times the square of some whole number.")
 
-(detail (lemma-6)
-  (lemma-5)
-  (witness
-    ("The square of twice a whole number is four times the square of that whole number.")
-    "sqrt2-notes.txt"))
+(claim (lemma-6)
+  (and
+    (lemma-5)
+    (square-of-twice)))
 
 (sense lemma-7 "If the first whole number is even, then its square is four times the square of some whole number.")
 
-(detail (lemma-7)
+(claim (lemma-7)
   (lemma-6))
 
 (sense lemma-8 "If a ratio of two whole numbers equals the square root of two and the first whole number is even, then the square of the first is four times the square of some whole number.")
 
-(detail (lemma-8)
+(claim (lemma-8)
   (lemma-7))
 
 (sense lemma-9 "If a ratio of two whole numbers equals the square root of two and the first whole number is even, then four times a whole number equals twice the square of the second.")
 
-(detail (lemma-9)
-  (lemma-8)
-  (witness
-    ("Whenever a ratio of two whole numbers equals the square root of two, the square of the first equals twice the square of the second.")
-    "sqrt2-notes.txt"))
+(claim (lemma-9)
+  (and
+    (lemma-8)
+    (sqrt2-equation)))
 
 (sense lemma-10 "If a ratio of two whole numbers equals the square root of two and the first whole number is even, then the square of the second is twice a whole number.")
 
-(detail (lemma-10)
-  (lemma-9)
-  (witness
-    ("If four times a whole number equals twice another whole number, then that other whole number is twice the first.")
-    "sqrt2-notes.txt")
-  (witness
-    ("The square of a whole number is a whole number.")
-    "sqrt2-notes.txt"))
+(claim (lemma-10)
+  (and
+    (lemma-9)
+    (four-equals-twice)
+    (square-whole)))
 
 (sense lemma-11 "A whole number that is twice a whole number is even.")
 
-(detail (lemma-11)
-  (witness
-    ("A whole number is even exactly when it is twice a whole number.")
-    "sqrt2-notes.txt"))
+(claim (lemma-11)
+  (even-iff-twice))
 
 (sense lemma-12 "If a ratio of two whole numbers equals the square root of two and the first whole number is even, then the square of the second is even.")
 
-(detail (lemma-12)
-  (lemma-10)
-  (lemma-11))
+(claim (lemma-12)
+  (and
+    (lemma-10)
+    (lemma-11)))
 
 (sense lemma-13 "If a ratio of two whole numbers equals the square root of two, then the first whole number is even and the square of the second is even.")
 
-(detail (lemma-13)
-  (lemma-4)
-  (lemma-12))
+(claim (lemma-13)
+  (and
+    (lemma-4)
+    (lemma-12)))
 
 (sense lemma-14 "If a ratio of two whole numbers equals the square root of two, then both whole numbers are even.")
 
-(detail (lemma-14)
-  (lemma-13)
-  (witness
-    ("The square of an even whole number is even.")
-    "sqrt2-notes.txt")
-  (witness
-    ("The square of an odd whole number is odd.")
-    "sqrt2-notes.txt")
-  (witness
-    ("Every whole number is even or odd.")
-    "sqrt2-notes.txt"))
+(claim (lemma-14)
+  (and
+    (lemma-13)
+    (even-square)
+    (odd-square)
+    (even-or-odd)))
 
 (sense lemma-15 "No fraction in lowest terms equals the square root of two.")
 
-(detail (lemma-15)
-  (witness
-    ("A fraction in lowest terms is a ratio of two whole numbers that share no common divisor greater than one.")
-    "sqrt2-notes.txt")
-  (witness
-    ("Two even whole numbers share two as a common divisor.")
-    "sqrt2-notes.txt")
-  (lemma-14))
+(claim (lemma-15)
+  (and
+    (lowest-terms)
+    (evens-share-two)
+    (lemma-14)))
 
 (sense theorem "The square root of two is not a ratio of two whole numbers.")
 
-(detail (theorem)
-  (witness
-    ("Every ratio of two whole numbers equals some fraction in lowest terms.")
-    "sqrt2-notes.txt")
-  (lemma-15))
+(claim (theorem)
+  (and
+    (has-lowest-terms)
+    (lemma-15)))

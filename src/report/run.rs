@@ -34,6 +34,8 @@ enum Tone {
     UnknownText,
     /// A `;;` comment on a false clause. Red, but not the bold violation mark.
     FalseNote,
+    /// A `;; assumed` comment. The sentence was not checked against a file.
+    Assumed,
 }
 
 enum Mode {
@@ -205,7 +207,7 @@ fn tone_color(tone: Tone) -> Option<Color> {
         Tone::Rule => Color::DarkGrey,
         Tone::TrueMark => Color::DarkGreen,
         Tone::FalseMark | Tone::FalseText | Tone::FalseNote => Color::Red,
-        Tone::UnknownMark | Tone::UnknownText => Color::Yellow,
+        Tone::UnknownMark | Tone::UnknownText | Tone::Assumed => Color::Yellow,
         Tone::Source => return None,
     })
 }
@@ -299,7 +301,13 @@ fn notes(clauses: &[ClauseSpan], claims: &[Node]) -> Vec<Note> {
 /// `parent_holds` means an ancestor is already true, so a false clause inside
 /// it is not why the claim failed.
 fn notes_of(node: &Node, clause: &ClauseSpan, parent_holds: bool, out: &mut Vec<Note>) {
-    if node.value != Value::True && !parent_holds {
+    if node.assumed {
+        out.push(Note {
+            at: clause.span.start,
+            text: ";; assumed".to_string(),
+            tone: Tone::Assumed,
+        });
+    } else if node.value != Value::True && !parent_holds {
         if let Some(failure) = failure_comment(node) {
             out.push(Note {
                 at: clause.span.start,
@@ -317,11 +325,7 @@ fn notes_of(node: &Node, clause: &ClauseSpan, parent_holds: bool, out: &mut Vec<
 }
 
 fn failure_comment(node: &Node) -> Option<&Failure> {
-    node.failure.as_ref().or_else(|| {
-        node.implication
-            .as_ref()
-            .and_then(|step| step.failure.as_ref())
-    })
+    node.failure.as_ref()
 }
 
 fn note_tone(value: Value) -> Tone {
@@ -606,6 +610,7 @@ mod tests {
             cites: cites.iter().map(|cite| (*cite).to_string()).collect(),
             children: Vec::new(),
             implication: None,
+            assumed: false,
         }
     }
 
@@ -617,6 +622,7 @@ mod tests {
             cites: Vec::new(),
             children,
             implication: None,
+            assumed: false,
         }
     }
 
@@ -624,7 +630,7 @@ mod tests {
         Node {
             text: head.to_string(),
             value,
-            failure: None,
+            failure: step.clone(),
             cites: Vec::new(),
             children: body,
             implication: Some(Box::new(leaf(
@@ -637,6 +643,7 @@ mod tests {
                 step,
                 &[],
             ))),
+            assumed: false,
         }
     }
 
@@ -701,7 +708,7 @@ mod tests {
     #[test]
     fn finished_view_marks_the_brief() {
         let src = "\
-(witness (\"search finds the window\") \"src/search.rs\")
+(claim (\"search finds the window\") (witness \"src/search.rs\"))
 (\"bare sentence\")
 (or (\"kept\") (\"dropped\"))
 ";
@@ -739,7 +746,7 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "✓ (witness (\"search finds the window\") \"src/search.rs\")".to_string(),
+                "✓ (claim (\"search finds the window\") (witness \"src/search.rs\"))".to_string(),
                 "  ;; unpinned".to_string(),
                 "? (\"bare sentence\")".to_string(),
                 "✓ (or (\"kept\") (\"dropped\"))".to_string(),
@@ -758,7 +765,7 @@ mod tests {
 
     #[test]
     fn a_contradicted_witness_is_the_red_clause() {
-        let src = "(and (witness (\"nope\") \"gone.rs\") (witness (\"search finds the window\") \"src/search.rs\"))\n";
+        let src = "(and (claim (\"nope\") (witness \"gone.rs\")) (claim (\"search finds the window\") (witness \"src/search.rs\")))\n";
         let report = Report {
             claims: vec![connective(
                 "and",
@@ -798,8 +805,8 @@ mod tests {
     #[test]
     fn an_implication_failure_comments_the_detail() {
         let src = "\
-(detail (\"the head\")
-  (witness (\"search finds the window\") \"src/search.rs\"))
+(claim (\"the head\")
+  (claim (\"search finds the window\") (witness \"src/search.rs\")))
 ";
         let report = Report {
             claims: vec![detail(
@@ -817,7 +824,7 @@ mod tests {
         let rows = finished(src, &report);
         let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
         assert_eq!(text[0], "  ;; not entailed");
-        assert!(text[1].starts_with("? (detail"), "{text:?}");
+        assert!(text[1].starts_with("? (claim (\"the head\")"), "{text:?}");
         assert!(
             text.iter()
                 .any(|line| line.starts_with('✓') && line.contains("(witness")),
@@ -828,29 +835,34 @@ mod tests {
     #[test]
     fn a_detail_marks_each_body_witness() {
         let src = "\
-(detail (\"the head\")
-  (witness (\"search finds the window\") \"src/search.rs\")
-  (witness (\"nope\") \"gone.rs\"))
+(claim (\"the head\")
+  (and
+    (claim (\"search finds the window\") (witness \"src/search.rs\"))
+    (claim (\"nope\") (witness \"gone.rs\"))))
 ";
         let report = Report {
             claims: vec![detail(
                 "the head",
                 Value::Unknown,
-                vec![
-                    leaf(
-                        "search finds the window",
-                        Value::True,
-                        None,
-                        &["src/search.rs"],
-                    ),
-                    leaf(
-                        "nope",
-                        Value::Unknown,
-                        Some(Failure::NotEntailed),
-                        &["gone.rs"],
-                    ),
-                ],
-                Some(Failure::NotEntailed),
+                vec![connective(
+                    "and",
+                    Value::Unknown,
+                    vec![
+                        leaf(
+                            "search finds the window",
+                            Value::True,
+                            None,
+                            &["src/search.rs"],
+                        ),
+                        leaf(
+                            "nope",
+                            Value::Unknown,
+                            Some(Failure::NotEntailed),
+                            &["gone.rs"],
+                        ),
+                    ],
+                )],
+                None,
             )],
         };
         let rows = finished(src, &report);
@@ -858,19 +870,48 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "  ;; not entailed".to_string(),
-                "? (detail (\"the head\")".to_string(),
-                "✓   (witness (\"search finds the window\") \"src/search.rs\")".to_string(),
-                "    ;; not entailed".to_string(),
-                "?   (witness (\"nope\") \"gone.rs\"))".to_string(),
+                "? (claim (\"the head\")".to_string(),
+                "?   (and".to_string(),
+                "✓     (claim (\"search finds the window\") (witness \"src/search.rs\"))"
+                    .to_string(),
+                "      ;; not entailed".to_string(),
+                "?     (claim (\"nope\") (witness \"gone.rs\"))))".to_string(),
             ]
         );
         assert!(rows[4]
             .pieces
             .iter()
             .any(|piece| piece.tone == Tone::UnknownText && piece.text.contains("nope")));
-        assert!(rows[2].pieces.iter().any(|piece| {
-            piece.tone == Tone::Source && piece.text.contains("search finds the window")
+        assert!(rows[2]
+            .pieces
+            .iter()
+            .any(|piece| piece.tone == Tone::TrueMark));
+    }
+
+    #[test]
+    fn an_assumption_is_marked_assumed() {
+        let src = "(assume (\"the premise holds\"))\n";
+        let report = Report {
+            claims: vec![Node {
+                text: "the premise holds".to_string(),
+                value: Value::True,
+                failure: None,
+                cites: Vec::new(),
+                children: Vec::new(),
+                implication: None,
+                assumed: true,
+            }],
+        };
+        let rows = finished(src, &report);
+        let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
+        assert!(
+            text.iter().any(|line| line.contains(";; assumed")),
+            "{text:?}"
+        );
+        assert!(rows.iter().any(|row| {
+            row.pieces
+                .iter()
+                .any(|piece| piece.tone == Tone::Assumed && piece.text.contains("assumed"))
         }));
     }
 }

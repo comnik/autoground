@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::syntax::template::{apply, holes_word, names_word};
-use crate::syntax::{Arg, Form, Formula, Ident, Program, Proposition, Reading, Sense};
+use crate::syntax::{Arg, Form, Formula, Ident, Program, Proposition, Reading, Sense, Support};
 
 mod link;
 mod scan;
@@ -174,12 +174,14 @@ impl std::fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
-/// A model whose claims are sentences under `and`, `or`, `not`, and `detail`.
+/// A model whose claims are sentences under `and`, `or`, `not`, `claim`, and `detail`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Compiled {
     pub names: Vec<String>,
     pub senses: Vec<Sense>,
     pub claims: Vec<Proposition>,
+    /// Assumption sentences, in source order, including ones inside a detail.
+    pub assumptions: Vec<String>,
 }
 
 /// Resolve senses and check that every claim is a saturated ground sentence.
@@ -204,6 +206,7 @@ pub(crate) fn compile_with(program: &Program, imports: &Imports) -> Result<Compi
     let mut senses = Vec::new();
     let mut sense_seen = HashSet::new();
 
+    scope_intent(&program.forms)?;
     for form in &program.forms {
         match form {
             Form::Name(name) => {
@@ -222,7 +225,7 @@ pub(crate) fn compile_with(program: &Program, imports: &Imports) -> Result<Compi
                 }
                 senses.push(sense.clone());
             }
-            Form::Claim(_) => {}
+            Form::Intent(_) | Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => {}
         }
     }
 
@@ -246,68 +249,94 @@ pub(crate) fn compile_with(program: &Program, imports: &Imports) -> Result<Compi
     let mut declared: HashSet<String> = names.iter().cloned().collect();
     declared.extend(imports.names.iter().cloned());
 
-    let mut claims = Vec::new();
-    for formula in program.claims() {
-        claims.push(resolve(formula, &declared, &sense_by_name, imports)?);
-    }
-    check_details(&claims)?;
+    let mut assumptions = Vec::new();
+    let claims = resolve_forms(
+        &program.forms,
+        &declared,
+        &sense_by_name,
+        imports,
+        &mut assumptions,
+    )?;
+    check_definitions(&claims)?;
 
     Ok(Compiled {
         names,
         senses,
         claims,
+        assumptions,
     })
 }
 
-/// One detail defines a sentence. A cycle would ask that sentence to establish
-/// itself.
-fn check_details(claims: &[Proposition]) -> Result<(), CompileError> {
-    let mut defs: HashMap<String, Vec<Proposition>> = HashMap::new();
+enum Def {
+    Claim(Support),
+    Assume,
+}
+
+/// One claim or assumption defines a sentence. A cycle would ask that sentence
+/// to establish itself.
+fn check_definitions(claims: &[Proposition]) -> Result<(), CompileError> {
+    let mut defs: HashMap<String, Def> = HashMap::new();
     for claim in claims {
-        collect_detail(claim, &mut defs)?;
+        collect_def(claim, &mut defs)?;
     }
     let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
     for head in defs.keys() {
-        if let Some(sentence) = detail_cycle(head, &defs, &mut visiting, &mut visited) {
+        if let Some(sentence) = definition_cycle(head, &defs, &mut visiting, &mut visited) {
             return Err(CompileError {
-                message: format!("`{sentence}` is detailed in terms of itself"),
+                message: format!("`{sentence}` is claimed in terms of itself"),
             });
         }
     }
     Ok(())
 }
 
-fn collect_detail(
+fn collect_def(
     proposition: &Proposition,
-    defs: &mut HashMap<String, Vec<Proposition>>,
+    defs: &mut HashMap<String, Def>,
 ) -> Result<(), CompileError> {
     match proposition {
         Proposition::And(xs) | Proposition::Or(xs) => {
             for proposition in xs {
-                collect_detail(proposition, defs)?;
+                collect_def(proposition, defs)?;
             }
         }
-        Proposition::Not(inner) => collect_detail(inner, defs)?,
-        Proposition::Sentence(_) | Proposition::Witness { .. } => {}
-        Proposition::Detail { head, body } => {
-            if defs.contains_key(head) {
-                return Err(CompileError {
-                    message: format!("duplicate detail of `{head}`"),
-                });
-            }
-            defs.insert(head.clone(), body.clone());
+        Proposition::Not(inner) => collect_def(inner, defs)?,
+        Proposition::Sentence(_) => {}
+        Proposition::Claim { sentence, support } => {
+            collect_support(support, defs)?;
+            define(sentence, Def::Claim(support.clone()), defs)?;
+        }
+        Proposition::Assume(sentence) => define(sentence, Def::Assume, defs)?,
+        Proposition::Scope { body, .. } => {
             for proposition in body {
-                collect_detail(proposition, defs)?;
+                collect_def(proposition, defs)?;
             }
         }
     }
     Ok(())
 }
 
-fn detail_cycle(
+fn collect_support(support: &Support, defs: &mut HashMap<String, Def>) -> Result<(), CompileError> {
+    match support {
+        Support::Witness { .. } => Ok(()),
+        Support::Sentence(proposition) => collect_def(proposition, defs),
+    }
+}
+
+fn define(sentence: &str, def: Def, defs: &mut HashMap<String, Def>) -> Result<(), CompileError> {
+    if defs.contains_key(sentence) {
+        return Err(CompileError {
+            message: format!("duplicate definition of `{sentence}`"),
+        });
+    }
+    defs.insert(sentence.to_string(), def);
+    Ok(())
+}
+
+fn definition_cycle(
     head: &str,
-    defs: &HashMap<String, Vec<Proposition>>,
+    defs: &HashMap<String, Def>,
     visiting: &mut HashSet<String>,
     visited: &mut HashSet<String>,
 ) -> Option<String> {
@@ -317,9 +346,9 @@ fn detail_cycle(
     if !visiting.insert(head.to_string()) {
         return Some(head.to_string());
     }
-    if let Some(body) = defs.get(head) {
-        for dep in detail_deps(body, defs) {
-            if let Some(sentence) = detail_cycle(&dep, defs, visiting, visited) {
+    if let Some(def) = defs.get(head) {
+        for dep in def_deps(def, defs) {
+            if let Some(sentence) = definition_cycle(&dep, defs, visiting, visited) {
                 return Some(sentence);
             }
         }
@@ -329,40 +358,123 @@ fn detail_cycle(
     None
 }
 
-fn detail_deps(body: &[Proposition], defs: &HashMap<String, Vec<Proposition>>) -> Vec<String> {
-    let mut deps = Vec::new();
-    for proposition in body {
-        push_detail_deps(proposition, defs, &mut deps);
+fn def_deps(def: &Def, defs: &HashMap<String, Def>) -> Vec<String> {
+    match def {
+        Def::Assume => Vec::new(),
+        Def::Claim(support) => support_deps(support, defs),
     }
-    deps
 }
 
-fn push_detail_deps(
-    proposition: &Proposition,
-    defs: &HashMap<String, Vec<Proposition>>,
-    deps: &mut Vec<String>,
-) {
+fn support_deps(support: &Support, defs: &HashMap<String, Def>) -> Vec<String> {
+    match support {
+        Support::Witness { .. } => Vec::new(),
+        Support::Sentence(proposition) => prop_deps(proposition, defs),
+    }
+}
+
+fn prop_deps(proposition: &Proposition, defs: &HashMap<String, Def>) -> Vec<String> {
     match proposition {
-        Proposition::Sentence(sentence) | Proposition::Witness { sentence, .. } => {
+        Proposition::Sentence(sentence) | Proposition::Assume(sentence) => {
             if defs.contains_key(sentence) {
-                deps.push(sentence.clone());
+                vec![sentence.clone()]
+            } else {
+                Vec::new()
             }
         }
-        Proposition::And(xs) | Proposition::Or(xs) => {
-            for proposition in xs {
-                push_detail_deps(proposition, defs, deps);
+        Proposition::Claim { sentence, .. } => {
+            if defs.contains_key(sentence) {
+                vec![sentence.clone()]
+            } else {
+                Vec::new()
             }
         }
-        Proposition::Not(inner) => push_detail_deps(inner, defs, deps),
-        Proposition::Detail { head, body } => {
-            if defs.contains_key(head) {
-                deps.push(head.clone());
+        Proposition::And(xs) | Proposition::Or(xs) => xs
+            .iter()
+            .flat_map(|proposition| prop_deps(proposition, defs))
+            .collect(),
+        Proposition::Not(inner) => prop_deps(inner, defs),
+        Proposition::Scope { body, .. } => body
+            .iter()
+            .flat_map(|proposition| prop_deps(proposition, defs))
+            .collect(),
+    }
+}
+
+fn scope_intent(forms: &[Form]) -> Result<Option<String>, CompileError> {
+    let mut intent = None;
+    for form in forms {
+        if let Form::Intent(text) = form {
+            if intent.is_some() {
+                return Err(CompileError {
+                    message: "a scope has two intents".into(),
+                });
             }
-            for proposition in body {
-                push_detail_deps(proposition, defs, deps);
+            intent = Some(text.clone());
+        }
+    }
+    Ok(intent)
+}
+
+fn contains_claim_or_assume(forms: &[Form]) -> bool {
+    forms.iter().any(|form| match form {
+        Form::Assume(_) => true,
+        Form::Formula(Formula::Claim { .. }) => true,
+        Form::Detail(body) => contains_claim_or_assume(body),
+        Form::Name(_) | Form::Sense(_) | Form::Intent(_) | Form::Formula(_) => false,
+    })
+}
+
+fn resolve_forms(
+    forms: &[Form],
+    names: &HashSet<String>,
+    senses: &HashMap<String, Sense>,
+    imports: &Imports,
+    assumptions: &mut Vec<String>,
+) -> Result<Vec<Proposition>, CompileError> {
+    let mut claims = Vec::new();
+    for form in forms {
+        match form {
+            Form::Name(_) | Form::Sense(_) | Form::Intent(_) => {}
+            Form::Assume(sentence) => {
+                let text = require_sentence(
+                    sentence,
+                    names,
+                    senses,
+                    imports,
+                    "`assume` takes a sentence",
+                )?;
+                assumptions.push(text.clone());
+                claims.push(Proposition::Assume(text));
+            }
+            Form::Detail(body) => {
+                claims.push(resolve_detail(body, names, senses, imports, assumptions)?);
+            }
+            Form::Formula(formula) => {
+                claims.push(resolve(formula, names, senses, imports)?);
             }
         }
     }
+    Ok(claims)
+}
+
+/// Names and senses declared in `body` are visible inside the detail and
+/// nowhere else. The scope contributes the sentences it validates.
+fn resolve_detail(
+    body: &[Form],
+    names: &HashSet<String>,
+    senses: &HashMap<String, Sense>,
+    imports: &Imports,
+    assumptions: &mut Vec<String>,
+) -> Result<Proposition, CompileError> {
+    let intent = scope_intent(body)?;
+    if !contains_claim_or_assume(body) {
+        return Err(CompileError {
+            message: "a detail has no claim".into(),
+        });
+    }
+    let (names, senses) = extend_scope(body, names, senses)?;
+    let body = resolve_forms(body, &names, &senses, imports, assumptions)?;
+    Ok(Proposition::Scope { intent, body })
 }
 
 fn resolve(
@@ -377,8 +489,20 @@ fn resolve(
         Formula::Not(x) => Ok(Proposition::Not(Box::new(resolve(
             x, names, senses, imports,
         )?))),
-        Formula::Detail { head, body } => resolve_detail(head, body, names, senses, imports),
-        Formula::Witness { fact, paths } => resolve_witness(fact, paths, names, senses, imports),
+        Formula::Claim { sentence, support } => {
+            let sentence =
+                require_sentence(sentence, names, senses, imports, "`claim` heads a sentence")?;
+            let support = match support.as_ref() {
+                Formula::Witness { paths } => Support::Witness {
+                    paths: witness_paths(paths)?,
+                },
+                other => Support::Sentence(Box::new(resolve(other, names, senses, imports)?)),
+            };
+            Ok(Proposition::Claim { sentence, support })
+        }
+        Formula::Witness { .. } => Err(CompileError {
+            message: "`witness` is only the support of a claim".into(),
+        }),
         Formula::Apply { reading, args } => {
             let mut spellings = Vec::with_capacity(args.len());
             for arg in args {
@@ -407,47 +531,22 @@ fn resolve(
     }
 }
 
-/// Names and senses declared in `body` extend the enclosing scope for the head
-/// and for the body's claims. They are not visible outside this detail.
-fn resolve_detail(
-    head: &Formula,
-    body: &[Form],
+fn require_sentence(
+    formula: &Formula,
     names: &HashSet<String>,
     senses: &HashMap<String, Sense>,
     imports: &Imports,
-) -> Result<Proposition, CompileError> {
-    let (names, senses) = extend_scope(body, names, senses)?;
-    let Proposition::Sentence(head) = resolve(head, &names, &senses, imports)? else {
-        return Err(CompileError {
-            message: "`detail` heads a sentence".into(),
-        });
-    };
-    let mut claims = Vec::new();
-    for form in body {
-        if let Form::Claim(formula) = form {
-            claims.push(resolve(formula, &names, &senses, imports)?);
-        }
+    message: &str,
+) -> Result<String, CompileError> {
+    match resolve(formula, names, senses, imports)? {
+        Proposition::Sentence(text) => Ok(text),
+        _ => Err(CompileError {
+            message: message.into(),
+        }),
     }
-    if claims.is_empty() {
-        return Err(CompileError {
-            message: "a detail's body has no claim".into(),
-        });
-    }
-    Ok(Proposition::Detail { head, body: claims })
 }
 
-fn resolve_witness(
-    fact: &Formula,
-    paths: &[String],
-    names: &HashSet<String>,
-    senses: &HashMap<String, Sense>,
-    imports: &Imports,
-) -> Result<Proposition, CompileError> {
-    let Proposition::Sentence(sentence) = resolve(fact, names, senses, imports)? else {
-        return Err(CompileError {
-            message: "`witness` cites a sentence".into(),
-        });
-    };
+fn witness_paths(paths: &[String]) -> Result<Vec<String>, CompileError> {
     let mut seen = HashSet::new();
     for path in paths {
         if !is_brief_path(path) {
@@ -461,10 +560,7 @@ fn resolve_witness(
             });
         }
     }
-    Ok(Proposition::Witness {
-        sentence,
-        paths: paths.to_vec(),
-    })
+    Ok(paths.to_vec())
 }
 
 /// A witness path is relative to the brief file. `..` is a parent of that file.
@@ -519,7 +615,7 @@ pub fn extend_scope(
                 }
                 senses.insert(sense.name.clone(), sense.clone());
             }
-            Form::Claim(_) => {}
+            Form::Intent(_) | Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => {}
         }
     }
     Ok((names, senses))
@@ -710,25 +806,29 @@ mod tests {
         let c = compiled(
             r#"
 (name Concept)
-(detail (input Concept LogicBlock)
+(detail
   (name LogicBlock)
   (name Relationship)
   (sense input "{X} is an input into {Y}")
-  (and
-    ("Concept is closed over by a LogicBlock")
-    (input Relationship LogicBlock)))
+  (claim (input Concept LogicBlock)
+    (and
+      ("Concept is closed over by a LogicBlock")
+      (input Relationship LogicBlock))))
 "#,
         );
         assert_eq!(c.names, vec!["Concept".to_string()]);
         assert!(c.senses.is_empty());
         assert_eq!(
             c.claims,
-            vec![Proposition::Detail {
-                head: "Concept is an input into LogicBlock".into(),
-                body: vec![Proposition::And(vec![
-                    Proposition::Sentence("Concept is closed over by a LogicBlock".into()),
-                    Proposition::Sentence("Relationship is an input into LogicBlock".into()),
-                ])],
+            vec![Proposition::Scope {
+                intent: None,
+                body: vec![Proposition::Claim {
+                    sentence: "Concept is an input into LogicBlock".into(),
+                    support: Support::Sentence(Box::new(Proposition::And(vec![
+                        Proposition::Sentence("Concept is closed over by a LogicBlock".into()),
+                        Proposition::Sentence("Relationship is an input into LogicBlock".into()),
+                    ]))),
+                }],
             }]
         );
 
@@ -738,8 +838,7 @@ mod tests {
 (name Concept)
 (name LogicBlock)
 (sense input "{X} is an input into {Y}")
-(detail (input Concept LogicBlock)
-  (input Concept LogicBlock))
+(claim (input Concept LogicBlock) (input Concept LogicBlock))
 "#,
             )
             .unwrap(),
@@ -748,16 +847,16 @@ mod tests {
         assert!(
             itself
                 .message
-                .contains("`Concept is an input into LogicBlock` is detailed in terms of itself"),
+                .contains("`Concept is an input into LogicBlock` is claimed in terms of itself"),
             "{itself}"
         );
 
         let leaked = compile(
             &parse(
                 r#"
-(detail ("h")
+(detail
   (name Local)
-  ("Local holds"))
+  (claim ("Local holds") ("given")))
 ("{Name} holds" Local)
 "#,
             )
@@ -772,11 +871,11 @@ mod tests {
         let hidden = compile(
             &parse(
                 r#"
-(detail ("outer")
-  (detail ("inner")
+(detail
+  (detail
     (name Hidden)
-    ("Hidden holds"))
-  ("{Name} holds" Hidden))
+    (claim ("Hidden holds") ("given")))
+  (claim ("{Name} holds" Hidden) ("given")))
 "#,
             )
             .unwrap(),
@@ -791,9 +890,9 @@ mod tests {
             &parse(
                 r#"
 (name Concept)
-(detail ("h")
+(detail
   (name Concept)
-  ("Concept holds"))
+  (claim ("Concept holds") ("given")))
 "#,
             )
             .unwrap(),
@@ -806,27 +905,27 @@ mod tests {
     }
 
     #[test]
-    fn a_sentence_is_detailed_once_and_not_in_terms_of_itself() {
+    fn a_sentence_is_defined_once_and_not_in_terms_of_itself() {
         let twice = compile(
             &parse(
                 r#"
-(detail ("arrow") ("one"))
-(detail ("arrow") ("two"))
+(claim ("arrow") ("one"))
+(claim ("arrow") ("two"))
 "#,
             )
             .unwrap(),
         )
         .unwrap_err();
         assert!(
-            twice.message.contains("duplicate detail of `arrow`"),
+            twice.message.contains("duplicate definition of `arrow`"),
             "{twice}"
         );
 
         let cycle = compile(
             &parse(
                 r#"
-(detail ("arrow") ("leaf"))
-(detail ("leaf") ("arrow"))
+(claim ("arrow") ("leaf"))
+(claim ("leaf") ("arrow"))
 "#,
             )
             .unwrap(),
@@ -835,29 +934,31 @@ mod tests {
         assert!(
             cycle
                 .message
-                .contains("`arrow` is detailed in terms of itself")
+                .contains("`arrow` is claimed in terms of itself")
                 || cycle
                     .message
-                    .contains("`leaf` is detailed in terms of itself"),
+                    .contains("`leaf` is claimed in terms of itself"),
             "{cycle}"
         );
     }
 
     #[test]
-    fn a_witness_keeps_its_sentence_and_its_paths() {
+    fn a_witness_is_the_support_of_a_claim() {
         let c = compiled(
             r#"
 (name Search)
 (name Oracle)
 (sense calls "{caller} calls {callee}")
-(witness (calls Search Oracle) "src/search/mod.rs" "src/oracle/jev.rs")
+(claim (calls Search Oracle) (witness "src/search/mod.rs" "src/oracle/jev.rs"))
 "#,
         );
         assert_eq!(
             c.claims,
-            vec![Proposition::Witness {
+            vec![Proposition::Claim {
                 sentence: "Search calls Oracle".into(),
-                paths: vec!["src/search/mod.rs".into(), "src/oracle/jev.rs".into()],
+                support: Support::Witness {
+                    paths: vec!["src/search/mod.rs".into(), "src/oracle/jev.rs".into()],
+                },
             }]
         );
     }
@@ -865,29 +966,35 @@ mod tests {
     #[test]
     fn a_witness_path_is_relative_to_the_brief() {
         for (src, path) in [
-            ("(witness (\"a\") \"../notes.txt\")", "../notes.txt"),
+            ("(claim (\"a\") (witness \"../notes.txt\"))", "../notes.txt"),
             (
-                "(witness (\"a\") \"examples/sqrt2.brief\")",
+                "(claim (\"a\") (witness \"examples/sqrt2.brief\"))",
                 "examples/sqrt2.brief",
             ),
         ] {
             let compiled = compiled(src);
             assert_eq!(
                 compiled.claims,
-                vec![Proposition::Witness {
+                vec![Proposition::Claim {
                     sentence: "a".into(),
-                    paths: vec![path.into()],
+                    support: Support::Witness {
+                        paths: vec![path.into()],
+                    },
                 }]
             );
         }
         for (src, needle) in [
             (
-                "(witness (\"a\") \"/etc/passwd\")",
+                "(claim (\"a\") (witness \"/etc/passwd\"))",
                 "`/etc/passwd` is not a path relative to the brief",
             ),
             (
-                "(witness (\"a\") \"src/a.rs\" \"src/a.rs\")",
+                "(claim (\"a\") (witness \"src/a.rs\" \"src/a.rs\"))",
                 "witness cites `src/a.rs` twice",
+            ),
+            (
+                "(witness \"src/a.rs\")",
+                "`witness` is only the support of a claim",
             ),
         ] {
             let err = compile(&parse(src).unwrap()).unwrap_err();
@@ -896,21 +1003,38 @@ mod tests {
     }
 
     #[test]
-    fn a_detail_is_not_witnessed_by_its_own_head() {
+    fn a_claim_is_not_supported_by_itself() {
         let err = compile(
             &parse(
                 r#"
-(detail ("arrow")
-  (witness ("arrow") "src/a.rs"))
+(claim ("arrow") (claim ("arrow") (witness "src/a.rs")))
 "#,
             )
             .unwrap(),
         )
         .unwrap_err();
         assert!(
-            err.message
-                .contains("`arrow` is detailed in terms of itself"),
+            err.message.contains("duplicate definition of `arrow`"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn an_assumption_is_recorded_in_source_order() {
+        let c = compiled(
+            r#"
+(assume ("the file is small"))
+(detail
+  (assume ("a local step holds"))
+  (claim ("the conclusion") ("a local step holds")))
+"#,
+        );
+        assert_eq!(
+            c.assumptions,
+            vec![
+                "the file is small".to_string(),
+                "a local step holds".to_string(),
+            ]
         );
     }
 

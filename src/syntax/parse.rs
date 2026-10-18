@@ -397,7 +397,17 @@ fn bare_sentence(p: &mut Parser) -> Result<Option<(Form, ClauseSpan, Range<usize
 fn needs_parentheses(word: &str) -> bool {
     matches!(
         word,
-        "name" | "sense" | "ns" | "and" | "or" | "not" | "detail" | "witness"
+        "name"
+            | "sense"
+            | "ns"
+            | "and"
+            | "or"
+            | "not"
+            | "claim"
+            | "witness"
+            | "assume"
+            | "detail"
+            | "intent"
     )
 }
 
@@ -416,7 +426,7 @@ fn nullary_sentence(
         span: span.clone(),
         children: Vec::new(),
     };
-    Ok((Form::Claim(formula), clause, span))
+    Ok((Form::Formula(formula), clause, span))
 }
 
 /// Whether a top-level form is `(ns ...)`, including one that fails to parse.
@@ -619,9 +629,20 @@ fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
         Some(SexpKind::Symbol(head)) if head == "sense" => {
             Ok((Form::Sense(lower_sense(xs)?), None))
         }
+        Some(SexpKind::Symbol(head)) if head == "intent" => {
+            Ok((Form::Intent(lower_intent(xs)?), None))
+        }
+        Some(SexpKind::Symbol(head)) if head == "assume" => {
+            let (formula, span) = lower_assume(s, xs)?;
+            Ok((formula, Some(span)))
+        }
+        Some(SexpKind::Symbol(head)) if head == "detail" => {
+            let (formula, span) = lower_detail(s, xs)?;
+            Ok((formula, Some(span)))
+        }
         _ => {
             let (formula, clause) = lower_formula(s)?;
-            Ok((Form::Claim(formula), Some(clause)))
+            Ok((Form::Formula(formula), Some(clause)))
         }
     }
 }
@@ -670,9 +691,21 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
         children,
     };
     match &xs[0].kind {
-        SexpKind::Symbol(head) if head == "name" || head == "sense" || head == "ns" => Err(err_at(
+        SexpKind::Symbol(head)
+            if head == "name"
+                || head == "sense"
+                || head == "ns"
+                || head == "intent"
+                || head == "assume" =>
+        {
+            Err(err_at(
+                &xs[0],
+                format!("`{head}` is a declaration and cannot appear inside a formula"),
+            ))
+        }
+        SexpKind::Symbol(head) if head == "detail" => Err(err_at(
             &xs[0],
-            format!("`{head}` is a declaration and cannot appear inside a formula"),
+            "`detail` is a scope and cannot appear inside a formula",
         )),
         SexpKind::Symbol(head) if head == "and" => {
             let (forms, children) = lower_formulas(&xs[1..])?;
@@ -689,7 +722,7 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
             let (inner, child) = lower_formula(&xs[1])?;
             Ok((Formula::Not(Box::new(inner)), clause(vec![child])))
         }
-        SexpKind::Symbol(head) if head == "detail" => lower_detail(s, xs),
+        SexpKind::Symbol(head) if head == "claim" => lower_claim(s, xs),
         SexpKind::Symbol(head) if head == "witness" => lower_witness(s, xs),
         SexpKind::Symbol(head) => Ok((
             Formula::Apply {
@@ -718,31 +751,49 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
     }
 }
 
-fn lower_detail(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseError> {
-    if xs.len() < 3 {
-        return Err(err_at(&xs[0], "`detail` takes a sentence and a body"));
+fn lower_intent(xs: &[Sexp]) -> Result<String, ParseError> {
+    if xs.len() != 2 {
+        return Err(err_at(&xs[0], "`intent` takes one string"));
     }
-    let (head, _) = lower_formula(&xs[1])?;
-    if !matches!(head, Formula::Apply { .. }) {
-        return Err(err_at(&xs[1], "`detail` heads a sentence"));
+    match &xs[1].kind {
+        SexpKind::String(text) if !text.is_empty() => Ok(text.clone()),
+        SexpKind::String(_) => Err(err_at(&xs[1], "an intent is not empty")),
+        _ => Err(err_at(&xs[1], "`intent` takes one string")),
     }
-    let mut body = Vec::with_capacity(xs.len() - 2);
+}
+
+fn lower_assume(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError> {
+    if xs.len() != 2 {
+        return Err(err_at(&xs[0], "`assume` takes a sentence"));
+    }
+    let (sentence, _) = lower_formula(&xs[1])?;
+    if !matches!(sentence, Formula::Apply { .. }) {
+        return Err(err_at(&xs[1], "`assume` takes a sentence"));
+    }
+    Ok((
+        Form::Assume(sentence),
+        ClauseSpan {
+            span: s.span.clone(),
+            children: Vec::new(),
+        },
+    ))
+}
+
+fn lower_detail(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError> {
+    if xs.len() < 2 {
+        return Err(err_at(&xs[0], "`detail` takes a body"));
+    }
+    let mut body = Vec::with_capacity(xs.len() - 1);
     let mut children = Vec::new();
-    for item in &xs[2..] {
+    for item in &xs[1..] {
         let (form, span) = lower_form(item)?;
         if let Some(span) = span {
             children.push(span);
         }
         body.push(form);
     }
-    if !body.iter().any(|form| matches!(form, Form::Claim(_))) {
-        return Err(err_at(&xs[0], "a detail's body has no claim"));
-    }
     Ok((
-        Formula::Detail {
-            head: Box::new(head),
-            body,
-        },
+        Form::Detail(body),
         ClauseSpan {
             span: s.span.clone(),
             children,
@@ -750,16 +801,33 @@ fn lower_detail(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseErr
     ))
 }
 
+fn lower_claim(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseError> {
+    if xs.len() != 3 {
+        return Err(err_at(&xs[0], "`claim` takes a sentence and a support"));
+    }
+    let (sentence, _) = lower_formula(&xs[1])?;
+    if !matches!(sentence, Formula::Apply { .. }) {
+        return Err(err_at(&xs[1], "`claim` heads a sentence"));
+    }
+    let (support, child) = lower_formula(&xs[2])?;
+    Ok((
+        Formula::Claim {
+            sentence: Box::new(sentence),
+            support: Box::new(support),
+        },
+        ClauseSpan {
+            span: s.span.clone(),
+            children: vec![child],
+        },
+    ))
+}
+
 fn lower_witness(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseError> {
-    if xs.len() < 3 {
-        return Err(err_at(&xs[0], "`witness` takes a sentence and a path"));
+    if xs.len() < 2 {
+        return Err(err_at(&xs[0], "`witness` takes a path"));
     }
-    let (fact, child) = lower_formula(&xs[1])?;
-    if !matches!(fact, Formula::Apply { .. }) {
-        return Err(err_at(&xs[1], "`witness` cites a sentence"));
-    }
-    let mut paths = Vec::with_capacity(xs.len() - 2);
-    for item in &xs[2..] {
+    let mut paths = Vec::with_capacity(xs.len() - 1);
+    for item in &xs[1..] {
         match &item.kind {
             SexpKind::String(text) if !text.is_empty() => paths.push(text.clone()),
             SexpKind::String(_) => return Err(err_at(item, "a witness path is not empty")),
@@ -767,13 +835,10 @@ fn lower_witness(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseEr
         }
     }
     Ok((
-        Formula::Witness {
-            fact: Box::new(fact),
-            paths,
-        },
+        Formula::Witness { paths },
         ClauseSpan {
             span: s.span.clone(),
-            children: vec![child],
+            children: Vec::new(),
         },
     ))
 }
@@ -931,7 +996,17 @@ fn expect_symbol(s: &Sexp, message: &str) -> Result<String, ParseError> {
 fn reject_reserved(s: &Sexp, spelling: &str) -> Result<(), ParseError> {
     if matches!(
         spelling,
-        "name" | "sense" | "ns" | "and" | "or" | "not" | "detail" | "witness"
+        "name"
+            | "sense"
+            | "ns"
+            | "and"
+            | "or"
+            | "not"
+            | "claim"
+            | "witness"
+            | "assume"
+            | "detail"
+            | "intent"
     ) {
         Err(err_at(
             s,
@@ -988,6 +1063,9 @@ mod tests {
             "sense calls \"{a} calls {b}\"",
             "detail something",
             "witness a \"b.rs\"",
+            "claim something",
+            "assume something",
+            "intent something",
             "ns com.acme",
         ] {
             let err = parse(src).unwrap_err();
@@ -1034,41 +1112,42 @@ mod tests {
     #[test]
     fn parses_a_detail_with_local_declarations() {
         let src = r#"
-(detail ("Logic blocks can depend on arbitrary concepts.")
+(detail
+  (intent "how a block is fed")
   (name Concept)
   (name LogicBlock)
   (sense input "{X} is an input into {Y}")
-  (and
-    (input Concept LogicBlock)
-    ("Concept is named")))
+  (claim (input Concept LogicBlock) ("Concept is named")))
 "#;
         let program = parse(src).unwrap();
         assert_eq!(program.names().count(), 0);
         assert_eq!(program.senses().count(), 0);
-        let formula = program.claims().next().unwrap();
-        let Formula::Detail { head, body } = formula else {
+        let Form::Detail(body) = &program.forms[0] else {
             panic!("detail");
         };
-        assert!(matches!(head.as_ref(), Formula::Apply { .. }));
-        assert_eq!(body.len(), 4);
-        assert!(matches!(body[0], Form::Name(_)));
-        assert!(matches!(body[2], Form::Sense(_)));
+        assert!(matches!(body[0], Form::Intent(_)));
+        assert!(matches!(body[1], Form::Name(_)));
+        assert!(matches!(body[3], Form::Sense(_)));
+        assert!(matches!(body[4], Form::Formula(Formula::Claim { .. })));
         assert_eq!(program.clauses[0].children.len(), 1);
     }
 
     #[test]
-    fn parses_a_witness_fact_then_paths() {
+    fn parses_a_witness_as_the_support_of_a_claim() {
         let src = r#"
-(witness ("Search posts listings to the oracle") "src/search/mod.rs" "src/oracle/jev.rs")
+(claim ("Search posts listings to the oracle") (witness "src/search/mod.rs" "src/oracle/jev.rs"))
 "#;
         let formula = parse(src).unwrap().claims().next().unwrap().clone();
-        let Formula::Witness { fact, paths } = formula else {
+        let Formula::Claim { sentence, support } = formula else {
+            panic!("claim");
+        };
+        assert!(matches!(sentence.as_ref(), Formula::Apply { .. }));
+        let Formula::Witness { paths } = support.as_ref() else {
             panic!("witness");
         };
-        assert!(matches!(fact.as_ref(), Formula::Apply { .. }));
         assert_eq!(
-            paths,
-            vec![
+            paths.as_slice(),
+            [
                 "src/search/mod.rs".to_string(),
                 "src/oracle/jev.rs".to_string()
             ]
@@ -1076,16 +1155,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_witness_that_is_not_a_cited_sentence() {
+    fn rejects_a_witness_that_is_not_a_path() {
         for (src, needle) in [
-            ("(witness)", "takes a sentence"),
-            ("(witness (\"only the fact\"))", "takes a sentence"),
+            ("(witness)", "takes a path"),
+            ("(witness (\"only the fact\"))", "path is a string"),
             (
                 "(witness (and (\"a\") (\"b\")) \"a.rs\")",
-                "cites a sentence",
+                "path is a string",
             ),
-            ("(witness (\"a\") path)", "path is a string"),
-            ("(witness (\"a\") \"\")", "not empty"),
+            ("(witness path)", "path is a string"),
+            ("(witness \"\")", "not empty"),
+            ("(claim)", "takes a sentence and a support"),
+            ("(claim (and (\"a\") (\"b\")) (\"c\"))", "heads a sentence"),
+            ("(assume)", "takes a sentence"),
+            ("(assume (and (\"a\") (\"b\")))", "takes a sentence"),
+            ("(intent)", "takes one string"),
+            ("(intent \"\")", "not empty"),
         ] {
             let err = parse(src).unwrap_err();
             assert!(err.message.contains(needle), "{src}: {err}");
@@ -1095,13 +1180,13 @@ mod tests {
     #[test]
     fn rejects_a_detail_that_cannot_be_a_brief() {
         for (src, needle) in [
-            ("(detail)", "takes a sentence"),
-            ("(detail (\"only the head\"))", "takes a sentence"),
-            ("(detail (and (\"a\") (\"b\")) (\"c\"))", "heads a sentence"),
-            ("(detail (\"h\") (name Only))", "no claim"),
+            ("(detail)", "takes a body"),
             ("(name detail)", "reserved"),
             ("(sense detail \"{X}\")", "reserved"),
             ("(name witness)", "reserved"),
+            ("(name claim)", "reserved"),
+            ("(name assume)", "reserved"),
+            ("(name intent)", "reserved"),
         ] {
             let err = parse(src).unwrap_err();
             assert!(err.message.contains(needle), "{src}: {err}");
@@ -1114,6 +1199,10 @@ mod tests {
         assert!(err.message.contains("declaration"));
         let err = parse("(and (ns com.acme.product))").unwrap_err();
         assert!(err.message.contains("declaration"), "{err}");
+        let err = parse("(and (assume (\"a\")))").unwrap_err();
+        assert!(err.message.contains("declaration"), "{err}");
+        let err = parse("(and (detail (claim (\"a\") (\"b\"))))").unwrap_err();
+        assert!(err.message.contains("scope"), "{err}");
     }
 
     #[test]

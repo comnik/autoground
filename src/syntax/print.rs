@@ -66,7 +66,30 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
             out.push_str(&quote_const(&sense.template));
             out.push(')');
         }
-        Form::Claim(formula) => write_formula(formula, indent, out),
+        Form::Intent(text) => {
+            out.push_str("(intent ");
+            out.push_str(&quote_const(text));
+            out.push(')');
+        }
+        Form::Assume(sentence) => {
+            out.push_str("(assume ");
+            write_formula(sentence, indent, out);
+            out.push(')');
+        }
+        Form::Detail(body) => {
+            out.push_str("(detail");
+            if body.is_empty() {
+                out.push(')');
+                return;
+            }
+            for form in body {
+                out.push('\n');
+                write_indent(indent + 1, out);
+                print_form(form, indent + 1, out);
+            }
+            out.push(')');
+        }
+        Form::Formula(formula) => write_formula(formula, indent, out),
     }
 }
 
@@ -79,25 +102,15 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
             write_formula(x, indent, out);
             out.push(')');
         }
-        Formula::Detail { head, body } => {
-            out.push_str("(detail ");
-            write_formula(head, indent, out);
-            if body.len() == 1 {
-                out.push(' ');
-                print_form(&body[0], indent, out);
-                out.push(')');
-                return;
-            }
-            for form in body {
-                out.push('\n');
-                write_indent(indent + 1, out);
-                print_form(form, indent + 1, out);
-            }
+        Formula::Claim { sentence, support } => {
+            out.push_str("(claim ");
+            write_formula(sentence, indent, out);
+            out.push(' ');
+            write_formula(support, indent, out);
             out.push(')');
         }
-        Formula::Witness { fact, paths } => {
-            out.push_str("(witness ");
-            write_formula(fact, indent, out);
+        Formula::Witness { paths } => {
+            out.push_str("(witness");
             for path in paths {
                 out.push(' ');
                 out.push_str(&quote_const(path));
@@ -200,7 +213,8 @@ mod tests {
 
     #[test]
     fn round_trip_keeps_a_detail() {
-        let src = r#"(detail ("broad")
+        let src = r#"(detail
+  (intent "how a block is fed")
   (name Concept)
   (sense input "{X} is an input into {Y}")
   (and

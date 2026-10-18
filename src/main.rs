@@ -25,18 +25,20 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Re-check a brief against the files its witnesses cite.
+    /// Re-check a brief against the files its claims cite.
     ///
     /// A witness path is relative to the brief file. A file longer than the
     /// body budget is sent in parts, and the sentence is discharged when one
-    /// part entails it. A detail is discharged when its body is discharged
-    /// and those sentences entail the head. `--budget` caps this run in cents
-    /// and defaults to 1. On a terminal the spinner names the sentence in
-    /// flight, and the finished view is the brief: each judged clause carries
-    /// its own mark, and an undischarged clause carries its failure comment.
-    /// The trace, the context, and the diagram are written in a new directory
-    /// under `/tmp/autoground/`, or under `--out`. Exit status is 1 when a
-    /// top-level claim is not discharged.
+    /// part entails it. A claim is discharged when its support holds and,
+    /// where that support is a sentence, those sentences entail the claim. An
+    /// assumption is taken as true. A detail is discharged when its body is.
+    /// `--budget` caps this run in cents and defaults to 1. On a terminal the
+    /// spinner names the sentence in flight, and the finished view is the
+    /// brief: each judged clause carries its own mark, and an undischarged
+    /// clause carries its failure comment. The trace, the context, and the
+    /// diagram are written in a new directory under `/tmp/autoground/`, or
+    /// under `--out`. Exit status is 1 when a top-level claim is not
+    /// discharged.
     ///
     /// Examples:
     ///   autoground check examples/search-calls-oracle.brief
@@ -59,7 +61,7 @@ enum Commands {
 
 /// Judge a brief against the filesystem in the current directory.
 ///
-/// The brief has no witness and no detail. `--filter` keeps paths that
+/// The brief has no `claim`, `witness`, `assume`, or `detail`. `--filter` keeps paths that
 /// match it, from the listing alone, before any file is read. Each
 /// remaining file is judged until `--budget` cents are spent. A file
 /// matches when any top-level claim is true. Stdout is `CLEAN`, or the
@@ -362,6 +364,7 @@ fn check_cmd(
         &src,
         &program,
         &compiled.claims,
+        &compiled.assumptions,
         &base,
         &mut oracle,
         &mut diagram,
@@ -375,6 +378,7 @@ fn finish_check<O: Oracle>(
     src: &str,
     program: &autoground::Program,
     claims: &[Proposition],
+    assumptions: &[String],
     base: &Path,
     oracle: &mut O,
     diagram: &mut Diagram,
@@ -436,6 +440,7 @@ fn finish_check<O: Oracle>(
         report.claims.len(),
         started.elapsed(),
         log.path(),
+        assumptions,
     )?;
     let discharged = report
         .claims

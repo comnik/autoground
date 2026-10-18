@@ -44,11 +44,13 @@ pub fn print_run_summary(
     total: usize,
     elapsed: Duration,
     trace: &Path,
+    assumptions: &[String],
 ) -> io::Result<()> {
     let color = stdout().is_terminal();
     let width = terminal::size()
         .map(|(columns, _)| columns as usize)
-        .unwrap_or(80);
+        .unwrap_or(80)
+        .max(80);
     let mut out = stdout();
     if color {
         writeln!(out)?;
@@ -61,6 +63,7 @@ pub fn print_run_summary(
         total,
         elapsed,
         trace,
+        assumptions,
         width,
     ) {
         write_line(&mut out, &line, color)?;
@@ -160,9 +163,14 @@ fn painted(
     total: usize,
     elapsed: Duration,
     trace: &Path,
+    assumptions: &[String],
     width: usize,
 ) -> Vec<Painted> {
-    let mut lines = vec![
+    let mut lines = Vec::new();
+    if !assumptions.is_empty() {
+        lines.extend(assumption_box(assumptions, width));
+    }
+    lines.extend([
         rule(width),
         plain(format!("trace available at {}", trace.display())),
         plain(format!(
@@ -174,13 +182,85 @@ fn painted(
             diagram_path(trace).display()
         )),
         throughput_line(usage, flights, flight_limit),
-    ];
+    ]);
     if let Some(text) = latency_line(usage, flights) {
         lines.push(plain(text));
     }
     lines.push(plain(utilization_line(usage)));
     lines.push(verdict(usage, true_count, total, elapsed));
     lines
+}
+
+/// Sentences the brief took as true. Drawn before the summary rule.
+fn assumption_box(sentences: &[String], width: usize) -> Vec<Painted> {
+    let title = "┌ assumed, not checked ";
+    let width = width.max(20).max(title.chars().count());
+    let mut lines = vec![yellow(format!(
+        "{title}{}",
+        "─".repeat(width - title.chars().count())
+    ))];
+    let inner = width.saturating_sub(2).max(1);
+    for sentence in sentences {
+        for row in wrap_sentence(sentence, inner) {
+            let pad = inner.saturating_sub(row.chars().count());
+            lines.push(yellow(format!("│ {row}{}", " ".repeat(pad))));
+        }
+    }
+    lines.push(yellow(format!("└{}", "─".repeat(width - 1))));
+    lines
+}
+
+fn yellow(text: String) -> Painted {
+    Painted {
+        text,
+        paint: Paint::Yellow,
+        bold: false,
+    }
+}
+
+fn wrap_sentence(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for word in text.split_whitespace() {
+        if row.is_empty() {
+            push_long(&mut rows, &mut row, word, width);
+        } else if row.chars().count() + 1 + word.chars().count() <= width {
+            row.push(' ');
+            row.push_str(word);
+        } else {
+            rows.push(std::mem::take(&mut row));
+            push_long(&mut rows, &mut row, word, width);
+        }
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
+fn push_long(rows: &mut Vec<String>, row: &mut String, word: &str, width: usize) {
+    let mut rest = word;
+    while rest.chars().count() > width {
+        let (head, tail) = split_at_chars(rest, width);
+        rows.push(head.to_string());
+        rest = tail;
+    }
+    row.push_str(rest);
+}
+
+fn split_at_chars(text: &str, width: usize) -> (&str, &str) {
+    let mut count = 0;
+    for (index, _) in text.char_indices() {
+        if count == width {
+            return (&text[..index], &text[index..]);
+        }
+        count += 1;
+    }
+    (text, "")
 }
 
 fn plain(text: String) -> Painted {
@@ -462,6 +542,7 @@ mod tests {
             total,
             elapsed,
             Path::new("/tmp/trace.jsonl"),
+            &[],
             40,
         )
         .into_iter()
@@ -687,6 +768,48 @@ mod tests {
             .unwrap();
         assert_eq!(lines[judged + 1], "1 file failed");
         assert!(lines[judged + 2].starts_with("sweep stopped"), "{lines:?}");
+    }
+
+    #[test]
+    fn assumptions_are_listed_before_the_rule() {
+        let lines = painted(
+            &Usage::default(),
+            &[],
+            None,
+            1,
+            1,
+            Duration::from_millis(4),
+            Path::new("/tmp/trace.jsonl"),
+            &[
+                "the file is small".to_string(),
+                "a local step holds and the sentence is long enough to wrap".to_string(),
+            ],
+            40,
+        );
+        assert!(matches!(lines[0].paint, Paint::Yellow));
+        assert!(lines[0].text.starts_with("┌ assumed, not checked "));
+        assert_eq!(lines[0].text.chars().count(), 40);
+        assert!(lines
+            .iter()
+            .any(|line| line.text.contains("│ the file is small")));
+        assert!(lines
+            .iter()
+            .any(|line| line.text.contains("│ a local step holds and")));
+        assert!(lines
+            .iter()
+            .any(|line| line.text.contains("long enough to wrap")));
+        let rule = lines
+            .iter()
+            .position(|line| line.text.starts_with('─'))
+            .unwrap();
+        assert!(rule > 2);
+        assert!(lines[rule - 1].text.starts_with('└'));
+    }
+
+    #[test]
+    fn no_assumptions_draw_no_box() {
+        let lines = texts(&Usage::default(), &[], None, 0, 0, Duration::from_millis(4));
+        assert!(lines.iter().all(|line| !line.contains("assumed")));
     }
 
     #[test]

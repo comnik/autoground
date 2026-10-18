@@ -22,7 +22,7 @@ use crate::check::{split_body, DEFAULT_BODY_BYTES, MAX_SLICED_BYTES};
 use crate::confidence::SUPPORT;
 use crate::oracle::jev::QUESTION_BUDGET;
 use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, State, Ticket};
-use crate::syntax::Proposition;
+use crate::syntax::{Proposition, Support};
 use crate::universe::{Diff, Filesystem, Transcript, Universe, UniverseError};
 use crate::value::Value;
 
@@ -93,7 +93,8 @@ pub fn failed_message(failed: usize) -> String {
     }
 }
 
-/// `witness` and `detail` are check's forms. A sweep brief states claims.
+/// A sweep brief is boolean structure over sentences. `claim`, `witness`,
+/// `assume`, and `detail` belong to check.
 pub fn ensure_constraints(claims: &[Proposition]) -> Result<(), SweepError> {
     for claim in claims {
         reject(claim)?;
@@ -103,10 +104,17 @@ pub fn ensure_constraints(claims: &[Proposition]) -> Result<(), SweepError> {
 
 fn reject(proposition: &Proposition) -> Result<(), SweepError> {
     match proposition {
-        Proposition::Witness { .. } => Err(SweepError::Constraint(
-            "`witness` is not a sweep constraint".into(),
+        Proposition::Claim { support, .. } => {
+            let message = match support {
+                Support::Witness { .. } => "`witness` is not a sweep constraint",
+                Support::Sentence(_) => "`claim` is not a sweep constraint",
+            };
+            Err(SweepError::Constraint(message.into()))
+        }
+        Proposition::Assume(_) => Err(SweepError::Constraint(
+            "`assume` is not a sweep constraint".into(),
         )),
-        Proposition::Detail { .. } => Err(SweepError::Constraint(
+        Proposition::Scope { .. } => Err(SweepError::Constraint(
             "`detail` is not a sweep constraint".into(),
         )),
         Proposition::And(xs) | Proposition::Or(xs) => {
@@ -586,14 +594,18 @@ fn value_of(proposition: &Proposition, sentences: &HashMap<String, Value>) -> Va
             .reduce(Value::or)
             .unwrap_or(Value::False),
         Proposition::Not(inner) => value_of(inner, sentences).not(),
-        Proposition::Witness { .. } | Proposition::Detail { .. } => Value::Unknown,
+        Proposition::Claim { .. } | Proposition::Assume(_) | Proposition::Scope { .. } => {
+            Value::Unknown
+        }
     }
 }
 
 fn statement(proposition: &Proposition) -> String {
     match proposition {
-        Proposition::Sentence(sentence) | Proposition::Witness { sentence, .. } => sentence.clone(),
-        Proposition::Detail { head, .. } => head.clone(),
+        Proposition::Sentence(sentence)
+        | Proposition::Assume(sentence)
+        | Proposition::Claim { sentence, .. } => sentence.clone(),
+        Proposition::Scope { intent, .. } => intent.clone().unwrap_or_else(|| "detail".to_string()),
         Proposition::And(xs) => xs.iter().map(statement).collect::<Vec<_>>().join(" and "),
         Proposition::Or(xs) => xs.iter().map(statement).collect::<Vec<_>>().join(" or "),
         Proposition::Not(inner) => format!("not ({})", statement(inner)),
@@ -621,7 +633,7 @@ fn push_sentences(proposition: &Proposition, sentences: &mut Vec<String>) {
             }
         }
         Proposition::Not(inner) => push_sentences(inner, sentences),
-        Proposition::Witness { .. } | Proposition::Detail { .. } => {}
+        Proposition::Claim { .. } | Proposition::Assume(_) | Proposition::Scope { .. } => {}
     }
 }
 
@@ -891,15 +903,30 @@ mod tests {
     }
 
     #[test]
-    fn a_witness_and_a_detail_are_not_constraints() {
-        let witness = ensure_constraints(&compiled("(witness (\"a\") \"a.rs\")")).unwrap_err();
+    fn a_claim_a_witness_an_assumption_and_a_detail_are_not_constraints() {
+        let witness =
+            ensure_constraints(&compiled("(claim (\"a\") (witness \"a.rs\"))")).unwrap_err();
         assert!(
             witness
                 .to_string()
                 .contains("`witness` is not a sweep constraint"),
             "{witness}"
         );
-        let detail = ensure_constraints(&compiled("(detail (\"head\") (\"body\"))")).unwrap_err();
+        let claim = ensure_constraints(&compiled("(claim (\"a\") (\"b\"))")).unwrap_err();
+        assert!(
+            claim
+                .to_string()
+                .contains("`claim` is not a sweep constraint"),
+            "{claim}"
+        );
+        let assume = ensure_constraints(&compiled("(assume (\"a\"))")).unwrap_err();
+        assert!(
+            assume
+                .to_string()
+                .contains("`assume` is not a sweep constraint"),
+            "{assume}"
+        );
+        let detail = ensure_constraints(&compiled("(detail (assume (\"a\")))")).unwrap_err();
         assert!(
             detail
                 .to_string()

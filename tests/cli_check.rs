@@ -21,7 +21,7 @@ fn quoted_witness(dir: &Path) -> PathBuf {
     let brief = dir.join("model.brief");
     std::fs::write(
         &brief,
-        "(witness (\"alpha is the first letter.\") \"note.txt\")\n",
+        "(claim (\"alpha is the first letter.\") (witness \"note.txt\"))\n",
     )
     .unwrap();
     brief

@@ -1,8 +1,9 @@
 //! Markdown context for a check: the green proof.
 //!
-//! Written beside the trace as `context.md`. A top-level
-//! claim that is not discharged is omitted. A discharged detail is its head.
-//! Witness paths are listed once, sorted.
+//! Written beside the trace as `context.md`. A claim that is not discharged
+//! is omitted. A detail is the intent it declares, and the claims it
+//! discharged are nested under that line. Witness paths stay on the claim
+//! that cited them. A detail that discharged nothing is omitted.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -35,16 +36,8 @@ pub fn write_context(trace: &Path, report: &Report) -> io::Result<PathBuf> {
 pub fn render(report: &Report) -> String {
     let mut blocks = Vec::new();
     for claim in &report.claims {
-        if claim.value != Value::True {
-            continue;
-        }
-        let mut lines = render_node(claim, "");
-        let files = cites(claim);
-        if !files.is_empty() {
-            lines.push(format!("(see {})", files.join(", ")));
-        }
-        if !lines.is_empty() {
-            blocks.push(lines.join("\n"));
+        if let Some(block) = block_of(claim) {
+            blocks.push(block);
         }
     }
     if blocks.is_empty() {
@@ -54,6 +47,108 @@ pub fn render(report: &Report) -> String {
         out.push('\n');
         out
     }
+}
+
+fn block_of(node: &Node) -> Option<String> {
+    if node.assumed || node.text == "sentences entail this claim" {
+        return None;
+    }
+    if is_scope(node) {
+        return scope_block(node);
+    }
+    if node.implication.is_some() {
+        return idb_block(node);
+    }
+    if node.value != Value::True {
+        return None;
+    }
+    let mut lines = render_node(node, "");
+    let files = cites(node);
+    if !files.is_empty() {
+        lines.push(format!("(see {})", files.join(", ")));
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+/// A detail. Check names it with its intent, or `detail` when it has none.
+fn is_scope(node: &Node) -> bool {
+    node.implication.is_none()
+        && !node.children.is_empty()
+        && !matches!(node.text.as_str(), "and" | "or" | "not")
+}
+
+fn scope_block(node: &Node) -> Option<String> {
+    let mut parts = Vec::new();
+    for child in &node.children {
+        if let Some(part) = block_of(child) {
+            parts.push(part);
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let body = parts.join("\n\n");
+    if node.text == "detail" {
+        Some(body)
+    } else {
+        Some(format!("{}\n{}", node.text, indent(&body)))
+    }
+}
+
+/// The claim sentence, then the support it discharged. A use of a lemma is
+/// not copied here; the lemma's own block carries it.
+fn idb_block(node: &Node) -> Option<String> {
+    let mut nested = Vec::new();
+    for child in &node.children {
+        if is_bare_use(child) {
+            continue;
+        }
+        if let Some(part) = block_of(child) {
+            nested.push(part);
+        }
+    }
+    if node.value != Value::True {
+        if nested.is_empty() {
+            None
+        } else {
+            Some(nested.join("\n\n"))
+        }
+    } else if nested.is_empty() {
+        let mut lines = vec![node.text.clone()];
+        let files = cites(node);
+        if !files.is_empty() {
+            lines.push(format!("(see {})", files.join(", ")));
+        }
+        Some(lines.join("\n"))
+    } else {
+        Some(format!("{}\n{}", node.text, indent(&nested.join("\n\n"))))
+    }
+}
+
+fn is_bare_use(node: &Node) -> bool {
+    node.value == Value::True
+        && node.cites.is_empty()
+        && node.children.is_empty()
+        && node.implication.is_none()
+        && !node.assumed
+        && !matches!(node.text.as_str(), "and" | "or" | "not")
+}
+
+fn indent(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!("  {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn render_node(node: &Node, prefix: &str) -> Vec<String> {
@@ -115,6 +210,7 @@ mod tests {
             cites: cites.iter().map(|cite| (*cite).to_string()).collect(),
             children: Vec::new(),
             implication: None,
+            assumed: false,
         }
     }
 
@@ -126,17 +222,19 @@ mod tests {
             cites: Vec::new(),
             children,
             implication: None,
+            assumed: false,
         }
     }
 
-    fn detail(head: &str, value: Value, body: Vec<Node>) -> Node {
+    fn scope(intent: &str, value: Value, body: Vec<Node>) -> Node {
         Node {
-            text: head.to_string(),
+            text: intent.to_string(),
             value,
             failure: None,
             cites: Vec::new(),
             children: body,
-            implication: Some(Box::new(leaf("sentences entail this claim", value, &[]))),
+            implication: None,
+            assumed: false,
         }
     }
 
@@ -149,37 +247,48 @@ mod tests {
     }
 
     #[test]
-    fn a_true_detail_records_its_head_and_cites_the_body() {
+    fn a_true_claim_nests_under_the_detail_intent() {
         let report = Report {
             claims: vec![
-                detail(
-                    "broad",
-                    Value::True,
-                    vec![leaf("Local holds", Value::True, &["src/a.rs"])],
-                ),
-                connective(
-                    "and",
-                    Value::True,
+                scope(
+                    "why it holds",
+                    Value::False,
                     vec![
-                        detail(
-                            "mid",
-                            Value::True,
-                            vec![leaf("leaf", Value::True, &["src/b.rs"])],
-                        ),
-                        leaf("other", Value::True, &["src/c.rs"]),
+                        leaf("Local holds", Value::True, &["src/a.rs"]),
+                        leaf("nope", Value::False, &["src/secret.rs"]),
                     ],
                 ),
+                scope(
+                    "why the middle holds",
+                    Value::True,
+                    vec![scope(
+                        "inner",
+                        Value::True,
+                        vec![leaf("leaf", Value::True, &["src/b.rs"])],
+                    )],
+                ),
+                scope(
+                    "empty",
+                    Value::True,
+                    vec![leaf("hidden", Value::False, &[])],
+                ),
+                leaf("other", Value::True, &["src/c.rs"]),
             ],
         };
         assert_eq!(
             render(&report),
             "\
-broad
-(see src/a.rs)
+why it holds
+  Local holds
+  (see src/a.rs)
 
-mid
-AND: other
-(see src/b.rs, src/c.rs)
+why the middle holds
+  inner
+    leaf
+    (see src/b.rs)
+
+other
+(see src/c.rs)
 "
         );
     }
@@ -196,14 +305,10 @@ AND: other
                         leaf("arrow", Value::True, &[]),
                     ],
                 ),
-                detail(
+                leaf(
                     "arrow",
                     Value::True,
-                    vec![leaf(
-                        "leaf",
-                        Value::True,
-                        &["reasoners/prescriptive_reasoner.py"],
-                    )],
+                    &["reasoners/prescriptive_reasoner.py"],
                 ),
             ],
         };

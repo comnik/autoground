@@ -46,7 +46,8 @@ pub enum Arg {
     Literal(String),
 }
 
-/// A ground claim.
+/// A ground formula. A `claim` offers a sentence with support. A `witness` is
+/// only legal as that support.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Formula {
     And(Vec<Formula>),
@@ -57,17 +58,14 @@ pub enum Formula {
         reading: Reading,
         args: Vec<Arg>,
     },
-    /// A sentence established by the claims of a brief local to this detail.
-    ///
-    /// Names and senses in `body` are visible to the head and to those claims,
-    /// and nowhere else.
-    Detail {
-        head: Box<Formula>,
-        body: Vec<Form>,
+    /// `sentence` established by `support`.
+    Claim {
+        sentence: Box<Formula>,
+        support: Box<Formula>,
     },
-    /// A sentence cited to one or more repository paths, judged together.
+    /// One or more repository paths, judged together. The sentence is the
+    /// enclosing claim.
     Witness {
-        fact: Box<Formula>,
         paths: Vec<String>,
     },
 }
@@ -98,32 +96,46 @@ pub struct Ns {
     pub requires: Vec<Require>,
 }
 
-/// What a saturated formula says: boolean structure over sentences.
+/// How a claim is supported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Support {
+    /// The sentence judged against the bodies at `paths`, as one state.
+    Witness { paths: Vec<String> },
+    /// Another sentence. An `and` is several premises.
+    Sentence(Box<Proposition>),
+}
+
+/// What a saturated formula says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Proposition {
     And(Vec<Proposition>),
     Or(Vec<Proposition>),
     Not(Box<Proposition>),
     Sentence(String),
-    /// `head` is the sentence being detailed. `body` is the brief's claims, in
-    /// order, and the detail holds when every one of them holds.
-    Detail {
-        head: String,
-        body: Vec<Proposition>,
-    },
-    /// `sentence` judged against the bodies at `paths`, as one state.
-    Witness {
+    /// `sentence` established by `support`.
+    Claim {
         sentence: String,
-        paths: Vec<String>,
+        support: Support,
+    },
+    /// A sentence taken as true, with no evidence.
+    Assume(String),
+    /// A detail. Names declared in the body stay there. `body` is the claims,
+    /// assumptions, and nested details, in order.
+    Scope {
+        intent: Option<String>,
+        body: Vec<Proposition>,
     },
 }
 
-/// A top-level form.
+/// A top-level form, or a form inside a detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Form {
     Name(String),
     Sense(Sense),
-    Claim(Formula),
+    Intent(String),
+    Assume(Formula),
+    Detail(Vec<Form>),
+    Formula(Formula),
 }
 
 /// Byte range of a formula, with one child per `and` / `or` / `not` operand.
@@ -160,21 +172,33 @@ impl Program {
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.forms.iter().filter_map(|form| match form {
             Form::Name(name) => Some(name.as_str()),
-            Form::Sense(_) | Form::Claim(_) => None,
+            Form::Sense(_)
+            | Form::Intent(_)
+            | Form::Assume(_)
+            | Form::Detail(_)
+            | Form::Formula(_) => None,
         })
     }
 
     pub fn senses(&self) -> impl Iterator<Item = &Sense> {
         self.forms.iter().filter_map(|form| match form {
             Form::Sense(sense) => Some(sense),
-            Form::Name(_) | Form::Claim(_) => None,
+            Form::Name(_)
+            | Form::Intent(_)
+            | Form::Assume(_)
+            | Form::Detail(_)
+            | Form::Formula(_) => None,
         })
     }
 
     pub fn claims(&self) -> impl Iterator<Item = &Formula> {
         self.forms.iter().filter_map(|form| match form {
-            Form::Claim(formula) => Some(formula),
-            Form::Name(_) | Form::Sense(_) => None,
+            Form::Formula(formula) => Some(formula),
+            Form::Name(_)
+            | Form::Sense(_)
+            | Form::Intent(_)
+            | Form::Assume(_)
+            | Form::Detail(_) => None,
         })
     }
 
@@ -184,8 +208,8 @@ impl Program {
             .iter()
             .zip(self.spans.iter())
             .filter_map(|(form, span)| match form {
-                Form::Claim(_) => Some(span.clone()),
-                Form::Name(_) | Form::Sense(_) => None,
+                Form::Formula(_) | Form::Assume(_) | Form::Detail(_) => Some(span.clone()),
+                Form::Name(_) | Form::Sense(_) | Form::Intent(_) => None,
             })
             .collect()
     }

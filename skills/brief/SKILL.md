@@ -70,12 +70,11 @@ The system convers Program to AST via Frontend
 (sense property "{object} has a {property}")
 (sense borrowed_from "{borrower} borrowed from {lender}")
 
-;; A claim becomes verifiable when its tied to one or more witnesses.
-(witness
-  ("Sweep asks the oracle whether a path matches the filter")
-  "src/sweep/mod.rs")
+;; A claim becomes verifiable when its support is a witness.
+(claim ("Sweep asks the oracle whether a path matches the filter")
+  (witness "src/sweep/mod.rs"))
 
-;; Atomic claims can be negated, or composed into conjunctions and disjunctions. 
+;; Atomic claims can be negated, or composed into conjunctions and disjunctions.
 (not (depends_on X Y))
 
 (and
@@ -87,15 +86,13 @@ The system convers Program to AST via Frontend
   (part_of X Y)
   (part_of Y X))
 
-;; Any claim that can't be validated as a whole, can be decomposed.
-(detail (calls Sweep Oracle)
-  (witness
+;; A claim that cannot be validated from one file is supported by other claims.
+;; A sentence already claimed is cited, not claimed again.
+(claim (calls Sweep Oracle)
+  (and
     ("Sweep asks the oracle whether a path matches the filter")
-    "src/sweep/mod.rs")
-  (witness
-    ("Sweep's oracle posts are the Jev HTTP call")
-    "src/sweep/mod.rs"
-    "src/oracle/jev.rs"))
+    (claim ("Sweep's oracle posts are the Jev HTTP call")
+      (witness "src/sweep/mod.rs" "src/oracle/jev.rs"))))
 ```
 
 The ordering of the top-level declarations is irrelevant.

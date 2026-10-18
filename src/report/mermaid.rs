@@ -1,11 +1,12 @@
 //! Mermaid diagram of a brief.
 //!
 //! Names are nodes, binary sense applications are edges, and details are
-//! subgraphs. A closing `senses` subgraph verbalizes each reading. One oracle
-//! request classifies each name as a component or as data, and chooses a
-//! priority. The state of that request is the verbalized context, the same
-//! text written beside the trace. Shape and paint are fixed from those
-//! answers. A contradicted claim draws its edge with a red dashed stroke.
+//! subgraphs. A claim is not a box. A closing `senses` subgraph verbalizes
+//! each reading. One oracle request classifies each name as a component or as
+//! data, and chooses a priority. The state of that request is the verbalized
+//! context, plus the intent of the scope that declared the name or the sense.
+//! Shape and paint are fixed from those answers. A contradicted claim draws
+//! its edge with a red dashed stroke.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -70,6 +71,9 @@ fn mark_contradicted(scope: &mut Scope, sentences: &HashSet<String>) {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Scope {
+    /// A detail. The root brief is not boxed.
+    boxed: bool,
+    /// The detail's own intent. Absent when the detail states none.
     title: Option<String>,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
@@ -80,6 +84,8 @@ struct Scope {
 struct Node {
     id: String,
     name: String,
+    /// Intent of the scope that declared this name, enclosing intents first.
+    intent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +106,8 @@ struct LegendRow {
     id: String,
     name: Option<String>,
     reading: String,
+    /// Intent of the scope that declared this sense.
+    intent: Option<String>,
 }
 
 /// Kind and priority for the nodes and senses in one diagram.
@@ -122,7 +130,7 @@ impl Styles {
 
     /// One same-state batch. An unknown choice leaves that item on the plain default.
     ///
-    /// `context` is the green proof. It is the whole state.
+    /// `context` is the green proof. A scope's intent joins it when one is declared.
     pub fn ask(oracle: &mut impl Oracle, diagram: &Diagram, context: &str) -> Self {
         let Some(batch) = style_questions(diagram, context) else {
             return Self::plain();
@@ -279,14 +287,15 @@ fn render_scope(
     out: &mut String,
 ) {
     let pad = "  ".repeat(depth);
-    let inner = if scope.title.is_some() {
-        depth + 1
-    } else {
-        depth
-    };
-    if let Some(title) = &scope.title {
+    let inner = if scope.boxed { depth + 1 } else { depth };
+    if scope.boxed {
         *details += 1;
-        out.push_str(&format!("{pad}subgraph d{details} [{}]\n", quote(title)));
+        match &scope.title {
+            Some(title) => {
+                out.push_str(&format!("{pad}subgraph d{details} [{}]\n", quote(title)));
+            }
+            None => out.push_str(&format!("{pad}subgraph d{details}\n")),
+        }
     }
     let pad_in = "  ".repeat(inner);
     for node in &scope.nodes {
@@ -312,7 +321,7 @@ fn render_scope(
     for child in &scope.children {
         render_scope(child, inner, styles, details, strokes, out);
     }
-    if scope.title.is_some() {
+    if scope.boxed {
         out.push_str(&format!("{pad}end\n"));
     }
 }
@@ -346,24 +355,25 @@ struct Batch {
 }
 
 /// Names, then senses. Two choices per name (kind, priority) and one per sense.
-/// Every question shares `context` as its state.
+/// A name or sense takes the intent of the scope that declared it. With no
+/// intent anywhere, the state is the context text alone.
 fn style_questions(diagram: &Diagram, context: &str) -> Option<Batch> {
-    let names = inventory_names(&diagram.root);
-    let senses: Vec<(String, String)> = diagram
+    let named = inventory_names(&diagram.root);
+    let senses: Vec<(String, String, Option<String>)> = diagram
         .legend
         .iter()
         .filter_map(|row| {
             row.name
                 .as_ref()
-                .map(|name| (name.clone(), row.reading.clone()))
+                .map(|name| (name.clone(), row.reading.clone(), row.intent.clone()))
         })
         .collect();
-    if names.is_empty() && senses.is_empty() {
+    if named.is_empty() && senses.is_empty() {
         return None;
     }
-    let state = State::new(json!(context));
     let mut questions = Vec::new();
-    for name in &names {
+    for (name, intent) in &named {
+        let state = style_state(context, intent);
         questions.push(choice(
             &state,
             json!({
@@ -381,7 +391,8 @@ fn style_questions(diagram: &Diagram, context: &str) -> Option<Batch> {
             name_priority_criteria(),
         ));
     }
-    for (name, reading) in &senses {
+    for (name, reading, intent) in &senses {
+        let state = style_state(context, intent);
         questions.push(choice(
             &state,
             json!({
@@ -393,10 +404,21 @@ fn style_questions(diagram: &Diagram, context: &str) -> Option<Batch> {
         ));
     }
     Some(Batch {
-        names,
-        senses,
+        names: named.into_iter().map(|(name, _)| name).collect(),
+        senses: senses
+            .into_iter()
+            .map(|(name, reading, _)| (name, reading))
+            .collect(),
         questions,
     })
+}
+
+/// Context alone, or context plus the declaring scope's intent chain.
+fn style_state(context: &str, intent: &Option<String>) -> State {
+    match intent {
+        Some(intent) => State::new(json!({ "context": context, "intent": intent })),
+        None => State::new(json!(context)),
+    }
 }
 
 fn choice(state: &State, instructions: Json, criteria: Json) -> Classification {
@@ -431,17 +453,23 @@ fn sense_priority_criteria() -> Json {
     })
 }
 
-fn inventory_names(scope: &Scope) -> Vec<String> {
+fn inventory_names(scope: &Scope) -> Vec<(String, Option<String>)> {
     let mut names = Vec::new();
     let mut seen = HashSet::new();
     collect_names(scope, &mut names, &mut seen);
     names
 }
 
-fn collect_names(scope: &Scope, names: &mut Vec<String>, seen: &mut HashSet<String>) {
+/// Root first, and a scope's declared nodes before the copies an edge adds.
+/// The first sight of a spelling is the scope that declared it.
+fn collect_names(
+    scope: &Scope,
+    names: &mut Vec<(String, Option<String>)>,
+    seen: &mut HashSet<String>,
+) {
     for node in &scope.nodes {
         if seen.insert(node.name.clone()) {
-            names.push(node.name.clone());
+            names.push((node.name.clone(), node.intent.clone()));
         }
     }
     for child in &scope.children {
@@ -489,18 +517,39 @@ fn choice_at<'a>(answers: &'a [Result<Answer, OracleError>], index: usize) -> Op
 pub fn diagram_of(program: &Program, vocab: &Vocabulary) -> Diagram {
     let mut legend = LegendAcc::default();
     let built = bindings(&program.forms);
+    let root_intent = intent_chain(None, own_intent(&program.forms).as_deref());
     let mut root = RawScope::new(Vec::new());
     root.declared = built.order;
+    root.intent = root_intent.clone();
     let mut stack = vec![built.layer];
     walk_forms(
         &program.forms,
         false,
+        &root_intent,
         &mut stack,
         vocab,
         &mut root,
         &mut legend,
     );
+    rehome(&mut root);
     assemble(root, legend.finish())
+}
+
+fn own_intent(forms: &[Form]) -> Option<String> {
+    forms.iter().find_map(|form| match form {
+        Form::Intent(text) => Some(text.clone()),
+        _ => None,
+    })
+}
+
+/// Enclosing intents first. A scope with no intent of its own keeps the parent's.
+fn intent_chain(parent: Option<&str>, own: Option<&str>) -> Option<String> {
+    match (parent, own) {
+        (Some(parent), Some(own)) => Some(format!("{parent}\n{own}")),
+        (Some(parent), None) => Some(parent.to_string()),
+        (None, Some(own)) => Some(own.to_string()),
+        (None, None) => None,
+    }
 }
 
 #[derive(Default)]
@@ -512,15 +561,17 @@ struct LegendAcc {
 struct LegendDraft {
     name: Option<String>,
     reading: String,
+    intent: Option<String>,
 }
 
 impl LegendAcc {
-    fn push_sense(&mut self, name: &str, reading: &str) {
+    fn push_sense(&mut self, name: &str, reading: &str, intent: Option<String>) {
         let key = (Some(name.to_string()), reading.to_string());
         if self.seen.insert(key) {
             self.rows.push(LegendDraft {
                 name: Some(name.to_string()),
                 reading: reading.to_string(),
+                intent,
             });
         }
     }
@@ -531,6 +582,7 @@ impl LegendAcc {
             self.rows.push(LegendDraft {
                 name: None,
                 reading: reading.to_string(),
+                intent: None,
             });
         }
     }
@@ -563,7 +615,7 @@ fn bindings(forms: &[Form]) -> Built {
             Form::Sense(sense) => {
                 senses.insert(sense.name.clone(), sense.clone());
             }
-            Form::Claim(_) => {}
+            Form::Intent(_) | Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => {}
         }
     }
     Built {
@@ -574,7 +626,10 @@ fn bindings(forms: &[Form]) -> Built {
 
 struct RawScope {
     path: Vec<usize>,
+    boxed: bool,
     title: Option<String>,
+    /// Intent chain used for style questions in this scope.
+    intent: Option<String>,
     declared: Vec<String>,
     edges: Vec<RawEdge>,
     children: Vec<RawScope>,
@@ -584,7 +639,9 @@ impl RawScope {
     fn new(path: Vec<usize>) -> Self {
         Self {
             path,
+            boxed: false,
             title: None,
+            intent: None,
             declared: Vec::new(),
             edges: Vec::new(),
             children: Vec::new(),
@@ -599,6 +656,8 @@ struct RawEdge {
     sentence: String,
     negated: bool,
     sense: Option<(String, String)>,
+    /// Scope the edge is drawn in. A prefix of the scope that wrote it.
+    home: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -611,6 +670,7 @@ enum End {
 fn walk_forms(
     forms: &[Form],
     negated: bool,
+    root_intent: &Option<String>,
     stack: &mut Vec<Layer>,
     vocab: &Vocabulary,
     scope: &mut RawScope,
@@ -618,10 +678,39 @@ fn walk_forms(
 ) {
     for form in forms {
         match form {
-            Form::Name(_) => {}
-            Form::Sense(sense) => legend.push_sense(&sense.name, &sense.template),
-            Form::Claim(formula) => {
-                walk_formula(formula, negated, stack, vocab, scope, legend);
+            Form::Name(_) | Form::Intent(_) => {}
+            Form::Sense(sense) => {
+                legend.push_sense(&sense.name, &sense.template, scope.intent.clone());
+            }
+            Form::Assume(sentence) => {
+                walk_formula(sentence, negated, root_intent, stack, vocab, scope, legend)
+            }
+            Form::Formula(formula) => {
+                walk_formula(formula, negated, root_intent, stack, vocab, scope, legend)
+            }
+            Form::Detail(body) => {
+                if extend_scope(
+                    body,
+                    &visible_names(stack, vocab),
+                    &visible_senses(stack, vocab),
+                )
+                .is_err()
+                {
+                    return;
+                }
+                let built = bindings(body);
+                let mut path = scope.path.clone();
+                path.push(scope.children.len());
+                let own = own_intent(body);
+                let mut child = RawScope::new(path);
+                child.boxed = true;
+                child.title = own.clone();
+                child.intent = intent_chain(scope.intent.as_deref(), own.as_deref());
+                child.declared = built.order;
+                stack.push(built.layer);
+                walk_forms(body, false, root_intent, stack, vocab, &mut child, legend);
+                stack.pop();
+                scope.children.push(child);
             }
         }
     }
@@ -630,6 +719,7 @@ fn walk_forms(
 fn walk_formula(
     formula: &Formula,
     negated: bool,
+    root_intent: &Option<String>,
     stack: &mut Vec<Layer>,
     vocab: &Vocabulary,
     scope: &mut RawScope,
@@ -638,43 +728,70 @@ fn walk_formula(
     match formula {
         Formula::And(xs) | Formula::Or(xs) => {
             for formula in xs {
-                walk_formula(formula, negated, stack, vocab, scope, legend);
+                walk_formula(formula, negated, root_intent, stack, vocab, scope, legend);
             }
         }
-        Formula::Not(inner) => walk_formula(inner, !negated, stack, vocab, scope, legend),
+        Formula::Not(inner) => {
+            walk_formula(inner, !negated, root_intent, stack, vocab, scope, legend);
+        }
         Formula::Apply { .. } => {
-            if let Some(edge) = binary_edge(formula, negated, stack, vocab, legend) {
+            if let Some(edge) =
+                binary_edge(formula, negated, root_intent, stack, scope, vocab, legend)
+            {
                 scope.edges.push(edge);
             }
         }
-        Formula::Witness { fact, .. } => {
-            walk_formula(fact, negated, stack, vocab, scope, legend);
+        Formula::Claim { sentence, support } => {
+            walk_formula(sentence, negated, root_intent, stack, vocab, scope, legend);
+            walk_formula(support, negated, root_intent, stack, vocab, scope, legend);
         }
-        Formula::Detail { head, body } => {
-            if extend_scope(
-                body,
-                &visible_names(stack, vocab),
-                &visible_senses(stack, vocab),
-            )
-            .is_err()
-            {
-                return;
-            }
-            let built = bindings(body);
-            let mut path = scope.path.clone();
-            path.push(scope.children.len());
-            let mut child = RawScope::new(path);
-            child.declared = built.order;
-            stack.push(built.layer);
-            child.title = sentence(head, stack, vocab);
-            if let Some(edge) = binary_edge(head, negated, stack, vocab, legend) {
-                child.edges.push(edge);
-            }
-            walk_forms(body, false, stack, vocab, &mut child, legend);
-            stack.pop();
-            scope.children.push(child);
+        Formula::Witness { .. } => {}
+    }
+}
+
+/// Innermost scope that declares an endpoint name or the sense. Literals and
+/// imports do not pin, so an edge they alone make is drawn at the root.
+fn edge_home(
+    edge_from: &End,
+    edge_to: &End,
+    sense: &Option<(String, String)>,
+    stack: &[Layer],
+    path: &[usize],
+) -> Vec<usize> {
+    let mut index = 0usize;
+    for (at, layer) in stack.iter().enumerate() {
+        let name_pins = [edge_from, edge_to].iter().any(|end| match end {
+            End::Declared(name) => layer.names.contains(name),
+            End::Imported(_) | End::Literal(_) => false,
+        });
+        let sense_pins = sense
+            .as_ref()
+            .is_some_and(|(name, _)| layer.senses.contains_key(name));
+        if name_pins || sense_pins {
+            index = at;
         }
     }
+    path[..index].to_vec()
+}
+
+/// Move each edge onto the scope whose path is its home.
+fn rehome(scope: &mut RawScope) -> Vec<RawEdge> {
+    let mut upward = Vec::new();
+    for child in &mut scope.children {
+        upward.extend(rehome(child));
+    }
+    upward.extend(scope.edges.drain(..));
+    let mut stay = Vec::new();
+    let mut further = Vec::new();
+    for edge in upward {
+        if edge.home == scope.path {
+            stay.push(edge);
+        } else {
+            further.push(edge);
+        }
+    }
+    scope.edges = stay;
+    further
 }
 
 fn visible_names(stack: &[Layer], vocab: &Vocabulary) -> HashSet<String> {
@@ -716,7 +833,9 @@ fn local_senses(stack: &[Layer]) -> HashMap<String, Sense> {
 fn binary_edge(
     formula: &Formula,
     negated: bool,
+    root_intent: &Option<String>,
     stack: &[Layer],
+    scope: &RawScope,
     vocab: &Vocabulary,
     legend: &mut LegendAcc,
 ) -> Option<RawEdge> {
@@ -738,7 +857,7 @@ fn binary_edge(
                 .iter()
                 .any(|layer| layer.senses.contains_key(&resolved.name))
             {
-                legend.push_sense(&resolved.name, &resolved.template);
+                legend.push_sense(&resolved.name, &resolved.template, root_intent.clone());
             }
             (
                 resolved.name.clone(),
@@ -755,6 +874,7 @@ fn binary_edge(
     };
     let label = if negated { format!("not {base}") } else { base };
     let sentence = sentence(formula, stack, vocab)?;
+    let home = edge_home(&from, &to, &sense, stack, &scope.path);
     Some(RawEdge {
         from,
         to,
@@ -762,6 +882,7 @@ fn binary_edge(
         sentence,
         negated,
         sense,
+        home,
     })
 }
 
@@ -887,6 +1008,7 @@ fn assemble(raw: RawScope, legend_rows: Vec<LegendDraft>) -> Diagram {
                 id: ids.fresh("legend", basis),
                 name: row.name,
                 reading: row.reading,
+                intent: row.intent,
             }
         })
         .collect();
@@ -968,6 +1090,7 @@ fn place(
         nodes.push(Node {
             id,
             name: name.clone(),
+            intent: raw.intent.clone(),
         });
     }
     if raw.path.is_empty() {
@@ -977,6 +1100,7 @@ fn place(
             nodes.push(Node {
                 id,
                 name: name.clone(),
+                intent: raw.intent.clone(),
             });
         }
     }
@@ -987,6 +1111,7 @@ fn place(
             nodes.push(Node {
                 id,
                 name: name.clone(),
+                intent: raw.intent.clone(),
             });
         }
     }
@@ -1034,8 +1159,8 @@ fn place(
     let children = raw
         .children
         .iter()
-        .map(|child| {
-            place(
+        .filter_map(|child| {
+            let placed = place(
                 child,
                 homes,
                 literal_order,
@@ -1044,14 +1169,26 @@ fn place(
                 declared_ids,
                 imported_ids,
                 literal_ids,
-            )
+            );
+            kept(placed)
         })
         .collect();
     Scope {
+        boxed: raw.boxed,
         title: raw.title.clone(),
         nodes,
         edges,
         children,
+    }
+}
+
+/// A detail with nothing drawn is not a box. The root is kept.
+fn kept(scope: Scope) -> Option<Scope> {
+    if scope.boxed && scope.nodes.is_empty() && scope.edges.is_empty() && scope.children.is_empty()
+    {
+        None
+    } else {
+        Some(scope)
     }
 }
 
@@ -1083,6 +1220,7 @@ fn node_for(
     nodes.push(Node {
         id: id.clone(),
         name: name.clone(),
+        intent: None,
     });
     Some(id)
 }
@@ -1221,10 +1359,12 @@ mod tests {
             drawn(
                 r#"
 (name Concept)
-(detail (input Concept LogicBlock)
+(detail
+  (intent "inputs")
   (name LogicBlock)
   (name Relationship)
   (sense input "{X} is an input into {Y}")
+  (input Concept LogicBlock)
   (input Relationship LogicBlock))
 "#,
             ),
@@ -1234,7 +1374,7 @@ flowchart TD
   classDef normal fill:#f8fafc,stroke:#334155,stroke-width:1.5px
   classDef highlighted fill:#fef3c7,stroke:#b45309,stroke-width:2.5px
   n_Concept[\"Concept\"]:::normal
-  subgraph d1 [\"Concept is an input into LogicBlock\"]
+  subgraph d1 [\"inputs\"]
     n_LogicBlock[\"LogicBlock\"]:::normal
     n_Relationship[\"Relationship\"]:::normal
     n_Concept_2[\"Concept\"]:::normal
@@ -1251,15 +1391,16 @@ flowchart TD
     }
 
     #[test]
-    fn a_detail_of_outer_names_repeats_both_ends_inside_the_subgraph() {
+    fn an_edge_of_outer_names_lifts_out_of_a_detail() {
         let text = drawn(
             r#"
 (name Relationship)
 (name LogicBlock)
 (sense input "{X} is an input into {Y}")
-(input Relationship LogicBlock)
-(detail (input Relationship LogicBlock)
-  ("Relationship is an input"))
+(detail
+  (intent "note")
+  (name Scratch)
+  (input Relationship LogicBlock))
 "#,
         );
         let subgraph = text
@@ -1268,40 +1409,57 @@ flowchart TD
             .and_then(|rest| rest.split("end").next())
             .unwrap_or("");
         assert!(
-            subgraph.contains("n_Relationship_2[\"Relationship\"]:::normal"),
+            subgraph.contains("n_Scratch[\"Scratch\"]:::normal"),
             "{text}"
         );
-        assert!(
-            subgraph.contains("n_LogicBlock_2[\"LogicBlock\"]:::normal"),
-            "{text}"
-        );
-        assert!(
-            subgraph.contains("n_Relationship_2 -->|\"input\"| n_LogicBlock_2"),
-            "{text}"
-        );
-        assert!(!subgraph.contains("n_Relationship -->|"), "{text}");
+        assert!(!subgraph.contains("-->"), "{text}");
         assert!(
             text.contains("n_Relationship -->|\"input\"| n_LogicBlock"),
             "{text}"
         );
+        assert!(text.contains("subgraph d1 [\"note\"]"), "{text}");
+    }
+
+    #[test]
+    fn a_local_sense_keeps_an_edge_inside_the_detail() {
+        let text = drawn(
+            r#"
+(name Relationship)
+(name LogicBlock)
+(detail
+  (intent "inputs")
+  (sense input "{X} is an input into {Y}")
+  (input Relationship LogicBlock))
+"#,
+        );
+        let subgraph = text
+            .split("subgraph d1")
+            .nth(1)
+            .and_then(|rest| rest.split("end").next())
+            .unwrap_or("");
+        assert!(subgraph.contains("-->|\"input\"|"), "{text}");
+        let outside = text.split("subgraph d1").next().unwrap_or("");
+        assert!(!outside.contains("-->"), "{text}");
     }
 
     #[test]
     fn sibling_details_keep_distinct_ids_for_one_spelling() {
         let text = drawn(
             r#"
-(detail ("left")
+(detail
   (name Local)
   ("Local holds"))
-(detail ("right")
+(detail
   (name Local)
   ("Local holds"))
 "#,
         );
-        assert!(text.contains("subgraph d1 [\"left\"]"), "{text}");
-        assert!(text.contains("subgraph d2 [\"right\"]"), "{text}");
+        assert!(text.contains("subgraph d1\n"), "{text}");
+        assert!(text.contains("subgraph d2\n"), "{text}");
+        assert!(!text.contains("subgraph d1 ["), "{text}");
         assert!(text.contains("n_Local[\"Local\"]:::normal"), "{text}");
         assert!(text.contains("n_Local_2[\"Local\"]:::normal"), "{text}");
+        assert!(!text.contains("Local holds"), "{text}");
     }
 
     #[test]
@@ -1466,6 +1624,49 @@ LogicBlockBuilder produces LogicBlock
             .questions
             .iter()
             .all(|question| question.state.json() == state));
+    }
+
+    #[test]
+    fn intent_is_the_declaring_scope_in_the_style_state() {
+        let program = parse(
+            r#"
+(intent "the picture")
+(name Outer)
+(sense calls "{X} calls {Y}")
+(detail
+  (name Inner)
+  (calls Outer Inner))
+(detail
+  (intent "the step")
+  (name Local)
+  (sense feeds "{X} feeds {Y}")
+  (feeds Local Outer))
+"#,
+        )
+        .unwrap();
+        let diagram = diagram_of(&program, &Vocabulary::none());
+        let batch = style_questions(&diagram, "green\n").unwrap();
+        assert_eq!(batch.names, vec!["Outer", "Inner", "Local"]);
+        let picture = json!({ "context": "green\n", "intent": "the picture" });
+        let step = json!({ "context": "green\n", "intent": "the picture\nthe step" });
+        assert_eq!(batch.questions[0].state.json(), &picture);
+        assert_eq!(batch.questions[0].instructions["name"], "Outer");
+        assert_eq!(batch.questions[2].state.json(), &picture);
+        assert_eq!(batch.questions[2].instructions["name"], "Inner");
+        assert_eq!(batch.questions[4].state.json(), &step);
+        assert_eq!(batch.questions[4].instructions["name"], "Local");
+        let feeds = batch
+            .questions
+            .iter()
+            .find(|question| question.instructions["name"] == "feeds")
+            .unwrap();
+        assert_eq!(feeds.state.json(), &step);
+        let calls = batch
+            .questions
+            .iter()
+            .find(|question| question.instructions["name"] == "calls")
+            .unwrap();
+        assert_eq!(calls.state.json(), &picture);
     }
 
     #[test]
