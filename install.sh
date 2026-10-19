@@ -83,7 +83,7 @@ for name in "${skills[@]}"; do
   fi
 done
 
-for name in brief sweep; do
+for name in brief sweep proof; do
   if [ ! -f "$SKILLS_DIR/$name/SKILL.md" ]; then
     echo "Warning: skills/$name/SKILL.md is missing." >&2
   fi
