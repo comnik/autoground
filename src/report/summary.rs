@@ -195,11 +195,23 @@ fn assumption_box(sentences: &[String], width: usize) -> Vec<Painted> {
         "─".repeat(width - title.chars().count())
     ))];
     let inner = width.saturating_sub(2).max(1);
-    for sentence in sentences {
-        for row in wrap_sentence(sentence, inner) {
-            let pad = inner.saturating_sub(row.chars().count());
-            lines.push(yellow(format!("│ {row}{}", " ".repeat(pad))));
+    let label_width = format!("({})", sentences.len()).chars().count();
+    let hang = " ".repeat(label_width + 1);
+    for (index, sentence) in sentences.iter().enumerate() {
+        let label = format!("({})", index + 1);
+        let marker = format!("{label:<label_width$} ");
+        let body_width = inner.saturating_sub(marker.chars().count()).max(1);
+        for (row, wrapped) in wrap_sentence(sentence, body_width).iter().enumerate() {
+            let prefix = if row == 0 {
+                marker.as_str()
+            } else {
+                hang.as_str()
+            };
+            let text = format!("{prefix}{wrapped}");
+            let pad = inner.saturating_sub(text.chars().count());
+            lines.push(yellow(format!("│ {text}{}", " ".repeat(pad))));
         }
+        lines.push(yellow(format!("│{}", " ".repeat(width.saturating_sub(1)))));
     }
     lines.push(yellow(format!("└{}", "─".repeat(width - 1))));
     lines
@@ -782,21 +794,48 @@ mod tests {
         assert!(matches!(lines[0].paint, Paint::Yellow));
         assert!(lines[0].text.starts_with("┌ assumed, not checked "));
         assert_eq!(lines[0].text.chars().count(), 40);
-        assert!(lines
+        let body: Vec<&str> = lines
             .iter()
-            .any(|line| line.text.contains("│ the file is small")));
-        assert!(lines
+            .skip(1)
+            .take_while(|line| !line.text.starts_with('└'))
+            .map(|line| line.text.trim_end())
+            .collect();
+        assert_eq!(
+            body,
+            vec![
+                "│ (1) the file is small",
+                "│",
+                "│ (2) a local step holds and the",
+                "│     sentence is long enough to wrap",
+                "│",
+            ]
+        );
+        let close = lines
             .iter()
-            .any(|line| line.text.contains("│ a local step holds and")));
-        assert!(lines
-            .iter()
-            .any(|line| line.text.contains("long enough to wrap")));
+            .position(|line| line.text.starts_with('└'))
+            .unwrap();
         let rule = lines
             .iter()
             .position(|line| line.text.starts_with('─'))
             .unwrap();
-        assert!(rule > 2);
-        assert!(lines[rule - 1].text.starts_with('└'));
+        assert_eq!(rule, close + 1);
+
+        let numbered = assumption_box(
+            &(1..=10).map(|n| format!("item {n}")).collect::<Vec<_>>(),
+            40,
+        );
+        let row = |line: &Painted| line.text.trim_end().to_string();
+        assert_eq!(row(&numbered[1]), "│ (1)  item 1");
+        assert_eq!(row(&numbered[2]), "│");
+        assert_eq!(row(&numbered[3]), "│ (2)  item 2");
+        assert_eq!(
+            numbered
+                .iter()
+                .map(row)
+                .find(|line| line.contains("item 10"))
+                .as_deref(),
+            Some("│ (10) item 10")
+        );
     }
 
     #[test]
