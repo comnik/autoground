@@ -132,7 +132,7 @@ impl<'a> Lexer<'a> {
         self.bump();
         let mut out = String::new();
         loop {
-            match self.bump() {
+            match self.bump_char() {
                 None => {
                     return Err(ParseError {
                         line,
@@ -140,12 +140,12 @@ impl<'a> Lexer<'a> {
                         message: "unterminated string".into(),
                     });
                 }
-                Some(b'"') => return Ok(out),
-                Some(b'\\') => match self.bump() {
-                    Some(b'"') => out.push('"'),
-                    Some(b'\\') => out.push('\\'),
-                    Some(b'n') => out.push('\n'),
-                    Some(c) => out.push(c as char),
+                Some('"') => return Ok(out),
+                Some('\\') => match self.bump_char() {
+                    Some('"') => out.push('"'),
+                    Some('\\') => out.push('\\'),
+                    Some('n') => out.push('\n'),
+                    Some(c) => out.push(c),
                     None => {
                         return Err(ParseError {
                             line,
@@ -154,7 +154,7 @@ impl<'a> Lexer<'a> {
                         });
                     }
                 },
-                Some(c) => out.push(c as char),
+                Some(c) => out.push(c),
             }
         }
     }
@@ -171,7 +171,7 @@ impl<'a> Lexer<'a> {
             if c == b';' && self.src.get(self.i + 1) == Some(&b';') {
                 break;
             }
-            out.push(self.bump().unwrap() as char);
+            out.push(self.bump_char().expect("brief source is utf-8"));
         }
         if out.is_empty() {
             return Err(ParseError {
@@ -181,6 +181,23 @@ impl<'a> Lexer<'a> {
             });
         }
         Ok(out)
+    }
+
+    fn bump_char(&mut self) -> Option<char> {
+        let b0 = *self.src.get(self.i)?;
+        let width = match b0 {
+            0x00..=0x7F => 1,
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => return None,
+        };
+        let bytes = self.src.get(self.i..self.i + width)?;
+        let ch = std::str::from_utf8(bytes).ok()?.chars().next()?;
+        for _ in 0..width {
+            self.bump();
+        }
+        Some(ch)
     }
 }
 
@@ -1042,6 +1059,25 @@ fn err_at(s: &Sexp, message: impl Into<String>) -> ParseError {
 mod tests {
     use super::*;
     use crate::syntax::{Arg, Form, Formula, Reading, Refer};
+
+    #[test]
+    fn a_brief_keeps_unicode_text() {
+        let src = "(intent \"Nestlé\")\n(\"Nestlé\")\n(name Café)\n";
+        let program = parse(src).unwrap();
+        assert_eq!(&src[program.spans[0].clone()], "(intent \"Nestlé\")");
+        assert!(matches!(&program.forms[0], Form::Intent(text) if text == "Nestlé"));
+        match &program.forms[1] {
+            Form::Formula(Formula::Apply {
+                reading: Reading::Inline { template, .. },
+                args,
+            }) => {
+                assert!(args.is_empty());
+                assert_eq!(template, "Nestlé");
+            }
+            other => panic!("sentence: {other:?}"),
+        }
+        assert_eq!(program.names().collect::<Vec<_>>(), vec!["Café"]);
+    }
 
     #[test]
     fn a_line_of_words_is_a_nullary_sentence() {
