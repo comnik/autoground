@@ -30,11 +30,17 @@ path      ::= string
 prose     ::= a top-level line of symbols, or one top-level string
 ```
 
-`ident-name` is an unqualified Clojure identifier. A comma is whitespace. `;;` comments through the end of the line.
+`ident-name` is an unqualified identifier. A comma is whitespace. `;;` comments through the
+end of the line.
 
-A scope is the file, or one `detail`. It has at most one `intent`, and the string is not empty. A second intent is a compile error. A `detail` contains a claim or an assumption, walking into nested details. `ns` stays at the top of the file.
+A scope is the file, or one `detail`. It has at most one `intent`, and the string is not
+empty. A second intent is a compile error. A `detail` contains a claim or an assumption,
+walking into nested details. `ns` stays at the top of the file.
 
-`witness` is only the support of a `claim`. A path is relative to the brief. One sentence is defined once in the file, by a `claim` or an `assume`. A claim whose support reaches its own sentence is rejected. Names and senses declared inside a `detail` stay there. Names and senses declared outside gain the sentences validated inside.
+`witness` is only the support of a `claim`. A path is relative to the brief. One sentence is
+defined once in the file, by a `claim` or an `assume`. A claim whose support reaches its own
+sentence is rejected. Names and senses declared inside a `detail` stay there. Names and
+senses declared outside gain the sentences validated inside.
 
 ```brief
 (name Frontend)
