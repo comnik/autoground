@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>autoground flow</title>
+<style>
+  :root {
+    --bg: #fbfaf7;
+    --fg: #1d1d1f;
+    --muted: #707075;
+    --line: #b9b6ae;
+    --surface: #ffffff;
+    --name: #2f5fd0;
+    --name-bg: #e9effc;
+    --sense: #7a4cc2;
+    --ok: #1f8a4c;
+    --ok-bg: #e3f4ea;
+    --neutral: #a86f00;
+    --neutral-bg: #fbf1d6;
+    --author: #c2410c;
+    --verifier: #0e7490;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17171a;
+      --fg: #ececef;
+      --muted: #9a9aa2;
+      --line: #55555c;
+      --surface: #222227;
+      --name: #8fb0ff;
+      --name-bg: #1f2a46;
+      --sense: #c3a3f5;
+      --ok: #5fd08f;
+      --ok-bg: #173826;
+      --neutral: #f0c04a;
+      --neutral-bg: #3b2f12;
+      --author: #fb923c;
+      --verifier: #38bdd8;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17171a;
+    --fg: #ececef;
+    --muted: #9a9aa2;
+    --line: #55555c;
+    --surface: #222227;
+    --name: #8fb0ff;
+    --name-bg: #1f2a46;
+    --sense: #c3a3f5;
+    --ok: #5fd08f;
+    --ok-bg: #173826;
+    --neutral: #f0c04a;
+    --neutral-bg: #3b2f12;
+    --author: #fb923c;
+    --verifier: #38bdd8;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .frame { max-width: 820px; margin: 0 auto; padding: 16px; }
+
+  .phases {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+    gap: 6px 8px; font-size: 13px;
+  }
+  .phase {
+    padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); transition: all 300ms ease;
+  }
+  .phase.active { color: var(--bg); background: var(--fg); border-color: var(--fg); }
+  .sep { color: var(--line); }
+  .round { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 4px; }
+
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  svg text { fill: var(--fg); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .mono, svg .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+  .fade { opacity: 0; transition: opacity 500ms ease; }
+  .fade.in { opacity: 1; }
+  .move { transition: transform 1000ms cubic-bezier(.5, 0, .2, 1), opacity 600ms ease; }
+
+  .lane { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+  .lane.author { fill: var(--author); }
+  .lane.verifier { fill: var(--verifier); }
+  .word { font-size: 16px; font-style: italic; }
+  .word.author text { fill: var(--author); }
+  .word.verifier text { fill: var(--verifier); }
+
+  .chip rect { fill: var(--name-bg); stroke: var(--name); stroke-width: 1.5; }
+  .chip text { fill: var(--name); font-size: 16px; font-weight: 600; }
+  .pop { transform-box: fill-box; transform-origin: center; }
+  .in > .pop { animation: pop 450ms cubic-bezier(.3, 1.6, .5, 1); }
+  @keyframes pop { from { transform: scale(.6); } to { transform: scale(1); } }
+
+  .edge { fill: none; stroke: var(--line); stroke-width: 2; transition: stroke-dashoffset 900ms ease, stroke 400ms ease; }
+  .edge.ok { stroke: var(--ok); }
+  .edge-label { fill: var(--sense); font-size: 14px; font-style: italic; }
+  #arrow path { fill: var(--line); }
+  #arrow-ok path { fill: var(--ok); }
+
+  .claim rect { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; transition: fill 400ms, stroke 400ms; }
+  .claim text { font-size: 14px; }
+  .claim.checking rect { stroke: var(--fg); stroke-dasharray: 5 4; animation: march 600ms linear infinite; }
+  .claim.ok rect { stroke: var(--ok); fill: var(--ok-bg); }
+  .claim.neutral rect { stroke: var(--neutral); fill: var(--neutral-bg); }
+  @keyframes march { to { stroke-dashoffset: -18; } }
+  .badge { opacity: 0; transition: opacity 300ms; }
+  .ok .badge, .neutral .badge { opacity: 1; }
+  .badge circle { stroke: var(--bg); stroke-width: 2; }
+  .ok .badge circle { fill: var(--ok); }
+  .neutral .badge circle { fill: var(--neutral); }
+  .badge text { fill: var(--bg); font-size: 13px; font-weight: 700; }
+
+  .connector { stroke: var(--line); stroke-width: 1.5; fill: none; transition: stroke 400ms; }
+  .connector.ok { stroke: var(--ok); }
+  .op rect { fill: var(--bg); stroke: var(--line); stroke-width: 1.5; transition: stroke 400ms; }
+  .op.ok rect { stroke: var(--ok); }
+  .op text { font-size: 13px; fill: var(--muted); }
+  .witness { font-size: 11.5px; fill: var(--muted); }
+
+  .caption { min-height: 4.4em; text-align: center; transition: opacity 250ms ease; }
+  .caption.out { opacity: 0; }
+  .say { margin: 0; }
+  .code {
+    margin: 4px 0 0; font-size: 13px; color: var(--sense);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    overflow-wrap: anywhere;
+  }
+
+  .controls { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .controls button {
+    flex: none; width: 34px; height: 34px; padding: 0; border-radius: 50%;
+    border: 1px solid var(--line); background: var(--surface); color: var(--fg);
+    display: grid; place-items: center; cursor: pointer;
+  }
+  .controls button:hover { border-color: var(--fg); }
+  .controls button:focus-visible, .controls input:focus-visible { outline: 2px solid var(--name); outline-offset: 2px; }
+  .controls svg { width: 14px; height: 14px; fill: currentColor; }
+  .controls input { flex: 1; min-width: 0; accent-color: var(--fg); }
+  .controls .time { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 6.5em; text-align: right; }
+  .controls .icon-play { display: none; }
+  .paused .icon-play { display: block; }
+  .paused .icon-pause { display: none; }
+
+  .instant *, .instant *::before, .instant *::after { transition: none !important; animation: none !important; }
+  .in.still > .pop { animation: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="phases" aria-hidden="true">
+    <span class="phase" data-phase="0">Align terms</span><span class="sep">→</span>
+    <span class="phase" data-phase="1">Relate names</span><span class="sep">→</span>
+    <span class="phase" data-phase="2">Decompose claims</span>
+    <span class="round" id="round"></span>
+  </div>
+
+  <svg viewBox="0 0 800 450" role="img" aria-labelledby="svg-title">
+    <title id="svg-title">Author and verifier align on names, relate them through senses, and break a claim into smaller claims until each one is supported by a witness.</title>
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z"/>
+      </marker>
+      <marker id="arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z"/>
+      </marker>
+    </defs>
+    <text class="lane author" x="90" y="60" text-anchor="middle">author</text>
+    <text class="lane verifier" x="710" y="60" text-anchor="middle">verifier</text>
+    <g id="stage"></g>
+  </svg>
+
+  <div class="caption" id="caption" aria-live="polite">
+    <p class="say" id="say"></p>
+    <p class="code" id="code"></p>
+  </div>
+
+  <div class="controls" id="controls">
+    <button id="prev" type="button" aria-label="Previous step"><svg viewBox="0 0 16 16"><path d="M3 2h2v12H3zM14 2v12L6 8z"/></svg></button>
+    <button id="play" type="button" aria-label="Play or pause">
+      <svg class="icon-pause" viewBox="0 0 16 16"><path d="M3 2h4v12H3zM9 2h4v12H9z"/></svg>
+      <svg class="icon-play" viewBox="0 0 16 16"><path d="M4 2l10 6-10 6z"/></svg>
+    </button>
+    <button id="next" type="button" aria-label="Next step"><svg viewBox="0 0 16 16"><path d="M11 2h2v12h-2zM2 2v12l8-6z"/></svg></button>
+    <input id="scrub" type="range" min="0" step="10" value="0" aria-label="Position in the animation">
+    <span class="time" id="time"></span>
+  </div>
+</div>
+
+<script>
+(() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const theme = new URLSearchParams(location.search).get('theme');
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+
+  const stage = document.getElementById('stage');
+  const captionEl = document.getElementById('caption');
+  const sayEl = document.getElementById('say');
+  const codeEl = document.getElementById('code');
+  const roundEl = document.getElementById('round');
+  const phaseEls = [...document.querySelectorAll('.phase')];
+  let edges, claims, chips, words;
+
+  // The script runs on a virtual clock so that any moment can be reconstructed by replaying
+  // it from the start with transitions switched off.
+  let vt = 0, timers = [], seq = 0, seeking = false;
+  const sleep = ms => new Promise(resolve => timers.push({ at: vt + ms, seq: seq++, resolve }));
+
+
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    parent.appendChild(e);
+    return e;
+  }
+
+  function label(str, x, y, cls, parent) {
+    const t = el('text', { x, y, class: cls || '', 'text-anchor': 'middle', 'dominant-baseline': 'central' }, parent);
+    t.textContent = str;
+    return t;
+  }
+
+  function place(g, x, y) { g.style.transform = `translate(${x}px, ${y}px)`; }
+
+  function show(e) {
+    e.getBoundingClientRect();
+    e.classList.add('in');
+    if (seeking) e.classList.add('still');
+  }
+
+  function box(parent, str, cls, padX, h) {
+    const g = el('g', { class: 'pop' }, parent);
+    const r = el('rect', {}, g);
+    const t = label(str, 0, 0, cls, g);
+    const w = t.getComputedTextLength() + padX * 2;
+    Object.entries({ x: -w / 2, y: -h / 2, width: w, height: h, rx: h / 2 }).forEach(([k, v]) => r.setAttribute(k, v));
+    return w;
+  }
+
+  async function caption(say, code = '') {
+    captionTimes.push(vt);
+    await sleep(1);
+    captionEl.classList.add('out');
+    await sleep(250);
+    sayEl.textContent = say;
+    codeEl.textContent = code;
+    captionEl.classList.remove('out');
+  }
+
+  function phase(i, round) {
+    phaseEls.forEach((p, j) => p.classList.toggle('active', i === j));
+    roundEl.textContent = `↺ round ${round}`;
+  }
+
+  function word(str, side, x, y) {
+    const g = el('g', { class: `word ${side} fade move` }, words);
+    place(g, x, y);
+    label(`“${str}”`, 0, 0, '', g);
+    show(g);
+    return g;
+  }
+
+  function chip(name, x, y) {
+    const g = el('g', { class: 'chip fade' }, chips);
+    place(g, x, y);
+    box(g, name, '', 14, 34);
+    show(g);
+    return g;
+  }
+
+  async function align(fromAuthor, fromVerifier, name, [x, y], wordY) {
+    const a = word(fromAuthor, 'author', 90, wordY);
+    await sleep(500);
+    const v = word(fromVerifier, 'verifier', 710, wordY);
+    await sleep(1600);
+    for (const w of [a, v]) { place(w, x, y); w.style.opacity = 0; }
+    await sleep(800);
+    chip(name, x, y);
+    a.remove(); v.remove();
+  }
+
+  async function edge(d, text, lx, ly) {
+    const p = el('path', { d, class: 'edge' }, edges);
+    const len = p.getTotalLength();
+    p.style.strokeDasharray = len;
+    p.style.strokeDashoffset = len;
+    p.getBoundingClientRect();
+    p.style.strokeDashoffset = 0;
+    await sleep(900);
+    p.setAttribute('marker-end', 'url(#arrow)');
+    const t = label(text, lx, ly, 'edge-label fade', edges);
+    show(t);
+    return p;
+  }
+
+  function settle(p) {
+    p.classList.add('ok');
+    p.setAttribute('marker-end', 'url(#arrow-ok)');
+  }
+
+  function claim(str, x, y) {
+    const g = el('g', { class: 'claim fade' }, claims);
+    place(g, x, y);
+    const w = box(g, str, '', 18, 32);
+    const b = el('g', { class: 'badge' }, g);
+    place(b, w / 2, -16);
+    el('circle', { r: 11 }, b);
+    g.glyph = label('', 0, 1, '', b);
+    show(g);
+    return g;
+  }
+
+  async function check(g, result) {
+    g.classList.remove('ok', 'neutral');
+    g.classList.add('checking');
+    await sleep(1300);
+    g.classList.remove('checking');
+    g.glyph.textContent = result === 'ok' ? '✓' : '?';
+    g.classList.add(result);
+  }
+
+  async function run() {
+    stage.replaceChildren();
+    edges = el('g', {}, stage);
+    claims = el('g', {}, stage);
+    chips = el('g', {}, stage);
+    words = el('g', {}, stage);
+
+    phase(0, 1);
+    await caption('Author and verifier start out with different words for the same thing.');
+    await align('the parser', 'front end', 'Frontend', [180, 125], 88);
+    await caption('They agree on a single name for it.', '(name Frontend)');
+    await sleep(1400);
+    await align('codegen', 'the back half', 'Backend', [620, 125], 88);
+    await caption('And another.', '(name Backend)');
+    await sleep(1600);
+
+    phase(1, 1);
+    await caption('A sense relates names to each other.', '(sense feeds_into "{Producer} feeds into {Consumer}")');
+    const feeds = await edge('M240,125 L558,125', 'feeds into', 400, 109);
+    await sleep(1800);
+    await caption('Applied to names, a sense reads as a sentence.', '(feeds_into Frontend Backend)  ⇒  Frontend feeds into Backend');
+    await sleep(2400);
+
+    phase(2, 1);
+    const top = claim('Frontend feeds into Backend', 400, 305);
+    await caption('The oracle judges the claim…', '(claim (feeds_into Frontend Backend) …)');
+    await check(top, 'neutral');
+    await caption('…but no single witness shows it. The verdict is neutral.');
+    await sleep(2200);
+    await caption('Breaking it down takes a word for what passes between the two.');
+    await sleep(2200);
+
+    phase(0, 2);
+    await caption('Back to alignment.');
+    await align('syntax tree', 'parse output', 'AST', [400, 205], 205);
+    await caption('A third name joins the shared vocabulary.', '(name AST)');
+    await sleep(1600);
+
+    phase(1, 2);
+    await caption('Two new senses connect it.', '(sense produces "{Component} produces {Representation}")');
+    const produces = await edge('M205,143 L354,194', 'produces', 252, 186);
+    await sleep(900);
+    await caption('Two new senses connect it.', '(sense consumes "{Component} accepts {Representation} as input")');
+    const accepts = await edge('M595,143 L446,194', 'accepts', 548, 186);
+    await sleep(1600);
+
+    phase(2, 2);
+    await caption('The big claim becomes a conjunction of smaller ones.', '(and (produces Frontend AST) (consumes Backend AST))');
+    top.classList.remove('neutral');
+    const conn = [
+      el('path', { d: 'M400,321 L400,340', class: 'connector fade' }, claims),
+      el('path', { d: 'M400,364 C400,378 220,368 220,388', class: 'connector fade' }, claims),
+      el('path', { d: 'M400,364 C400,378 580,368 580,388', class: 'connector fade' }, claims),
+    ];
+    const and = el('g', { class: 'op fade' }, claims);
+    place(and, 400, 352);
+    box(and, 'and', 'mono', 12, 24);
+    conn.forEach(show);
+    show(and);
+    await sleep(500);
+    const left = claim('Frontend produces AST', 220, 404);
+    const right = claim('Backend accepts AST as input', 580, 404);
+    await sleep(1200);
+    await caption('Each small claim points at a witness the oracle can read.');
+    show(label('src/frontend/parser.rs', 220, 438, 'witness mono fade', claims));
+    show(label('src/backend/mod.rs', 580, 438, 'witness mono fade', claims));
+    await sleep(1400);
+
+    await caption('The oracle checks each one against its witness.');
+    await Promise.all([
+      check(left, 'ok').then(() => settle(produces)),
+      sleep(400).then(() => check(right, 'ok')).then(() => settle(accepts)),
+    ]);
+    await sleep(500);
+    await caption('Logical operators resolve without the oracle.');
+    conn.slice(1).forEach(c => c.classList.add('ok'));
+    and.classList.add('ok');
+    await sleep(700);
+    conn[0].classList.add('ok');
+    await check(top, 'ok');
+    settle(feeds);
+    await caption('Every claim checks out.', 'autoground check  ✓');
+    await sleep(4000);
+  }
+
+  const root = document.documentElement;
+  const controls = document.getElementById('controls');
+  const scrub = document.getElementById('scrub');
+  const timeEl = document.getElementById('time');
+  let captionTimes = [], stops = [], END = 0;
+  let playing = !reduce, playTarget = 0, wanted = null, dest = 0, busy = false, last = null;
+
+  const macrotask = () => new Promise(r => {
+    const c = new MessageChannel();
+    c.port1.onmessage = () => r();
+    c.port2.postMessage(0);
+  });
+
+  function restart() {
+    timers = [];
+    vt = 0;
+    captionTimes = [];
+    sayEl.textContent = '';
+    codeEl.textContent = '';
+    run();
+  }
+
+  async function advance(target) {
+    for (;;) {
+      timers.sort((a, b) => a.at - b.at || a.seq - b.seq);
+      const t = timers[0];
+      if (!t || t.at > target) break;
+      timers.shift();
+      vt = t.at;
+      t.resolve();
+      await macrotask();
+    }
+    if (target !== Infinity) vt = target;
+  }
+
+  async function seek(t) {
+    seeking = true;
+    root.classList.add('instant');
+    if (t < vt) restart();
+    await advance(t);
+    stage.getBoundingClientRect();
+    root.classList.remove('instant');
+    seeking = false;
+    playTarget = vt;
+  }
+
+  async function pump() {
+    if (busy) return;
+    busy = true;
+    while (wanted !== null) {
+      const t = wanted;
+      wanted = null;
+      await seek(t);
+    }
+    if (playing && playTarget > vt) await advance(playTarget);
+    busy = false;
+  }
+
+  function goto(t) {
+    wanted = dest = Math.max(0, Math.min(END, t));
+    playTarget = wanted;
+    pump();
+  }
+
+  function setPlaying(p) {
+    playing = p;
+    controls.classList.toggle('paused', !p);
+  }
+
+  // While a seek replays the script, vt runs through earlier moments; report where it is headed.
+  function now_() { return seeking || wanted !== null ? dest : vt; }
+
+  function fmt(ms) { return `${(ms / 1000).toFixed(1)} / ${(END / 1000).toFixed(1)} s`; }
+
+  function frame(now) {
+    if (playing && last !== null) {
+      playTarget = Math.min(END, playTarget + (now - last));
+      if (vt >= END && !busy) goto(0);
+      else pump();
+    }
+    last = now;
+    const at = now_();
+    if (!scrub.matches(':active')) scrub.value = at;
+    timeEl.textContent = fmt(at);
+    requestAnimationFrame(frame);
+  }
+
+  function step(dir) {
+    setPlaying(false);
+    const at = now_();
+    const t = dir > 0 ? stops.find(s => s > at + 1) : [...stops].reverse().find(s => s < at - 1);
+    goto(t ?? (dir > 0 ? END : 0));
+  }
+
+  scrub.addEventListener('input', () => { setPlaying(false); goto(+scrub.value); });
+  document.getElementById('play').addEventListener('click', () => {
+    if (!playing && vt >= END) goto(0);
+    setPlaying(!playing);
+  });
+  document.getElementById('prev').addEventListener('click', () => step(-1));
+  document.getElementById('next').addEventListener('click', () => step(1));
+  document.addEventListener('keydown', e => {
+    if (e.target.closest('button') && (e.key === ' ' || e.key === 'Enter')) return;
+    if (e.key === ' ') { e.preventDefault(); setPlaying(!playing); }
+    else if (e.key === 'ArrowRight' && e.target !== scrub) step(1);
+    else if (e.key === 'ArrowLeft' && e.target !== scrub) step(-1);
+  });
+
+  async function init() {
+    // A dry run measures the script and finds where each step ends: when the next caption
+    // is requested, a millisecond before it starts to fade out.
+    root.classList.add('instant');
+    seeking = true;
+    restart();
+    await advance(Infinity);
+    END = vt;
+    stops = [...captionTimes.slice(1), END];
+    scrub.max = END;
+    seeking = false;
+    root.classList.remove('instant');
+    setPlaying(playing);
+    if (reduce) goto(END);
+    else { vt = Infinity; goto(0); }
+    requestAnimationFrame(frame);
+  }
+
+  (document.fonts ? document.fonts.ready : Promise.resolve()).then(init);
+})();
+</script>
+</body>
+</html>
