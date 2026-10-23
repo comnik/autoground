@@ -3,23 +3,26 @@
 `autoground` is an <ins>informal</ins> proof assistant.
 
 Together with your favourite coding agent, autoground helps you to (re-)establish and
-maintain an accurate mental model of a codebase that has drifted out from under you. Please
-read the [/brief guide](docs/use-cases/codebase-mental-model.md) to learn how.
+maintain an accurate mental model of a codebase that has drifted out from under you.
 
-Apart from this primary use case, autoground can also help you and your agents make rigorous
-arguments via [/proof](docs/use-cases/rigorous-reasoning.md), and scan your codebase for
-things that are hard to grep for via [/sweep](docs/use-cases/semantic-sweep.md).
+**use [/brief](docs/use-cases/codebase-mental-model.md) to validate your mental model of a
+codebase**
 
-Unlike formal proof assistants like Lean or Rocq, autoground uses a [system one decision
-model](https://typesafe.ai/blog/introducing-system-one-models-and-jev) as its proof kernel —
-which has all kinds of wacky implications. Effectively, the kernel accepts any deductive
-step that a capable LLM can follow intuitively, meaning without the use of reasoning. The
-trust boundary shifts: while it becomes easier for you to verify assumptions and claims made
-throghout the proof, the non-deterministic nature of the approach admits both false
+**use [/proof](docs/use-cases/rigorous-reasoning.md) to construct a rigorously reasoned argument**
+
+**use [/sweep](docs/use-cases/semantic-sweep.md) to scan a codebase for things that are hard
+to grep for**
+
+Unlike formal proof assistants like Lean or Rocq, autoground uses a [system one
+model](https://typesafe.ai/blog/introducing-system-one-models-and-jev) as its proof kernel,
+which has all kinds of wacky implications. The kernel effectively accepts any deductive step
+that a capable LLM can follow *intuitively*, meaning without the use of reasoning. The trust
+boundary shifts: it becomes easier for you to verify assumptions and claims made throghout
+the proof, but the informal and non-deterministic nature of the approach admits both false
 positives and negatives.
 
 Once the [uneasy feeling passes](https://en.wikipedia.org/wiki/Proofs_and_Refutations), this
-can be quite fun. autoground proofs can be written in (mostly) natural language and with
+can be quite fun! autoground proofs can be written in (mostly) natural language and with
 witnesses drawn from different input modalities, which means you could prove that a given
 piece of code produces the screenshot of a website you just took.
 
@@ -61,7 +64,7 @@ Confirm that everything is working, by validating this README:
 
 ![README Demo](docs/assets/vhs/readme.gif)
 
-Then try out the skills:
+Then learn about the skills:
 
 - [/brief](docs/use-cases/codebase-mental-model.md): validate your mental model of a codebase
 - [/proof](docs/use-cases/rigorous-reasoning.md): construct a rigorously reasoned argument
