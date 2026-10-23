@@ -2,17 +2,16 @@
 
 `autoground` is an <ins>informal</ins> proof assistant.
 
-Together with your favourite coding agent, `autoground` helps you to (re-)establish and
+Together with your favourite coding agent, autoground helps you to (re-)establish and
 maintain an accurate mental model of a codebase that has drifted out from under you. Please
-read the [`/brief` guide](docs/use-cases/codebase-mental-model.md) to learn how.
+read the [/brief guide](docs/use-cases/codebase-mental-model.md) to learn how.
 
-Apart from this primary use case, `autoground` can also help you and your agents make
-rigorous arguments via [`/proof`](docs/use-cases/rigorous-reasoning.md), and scan your
-codebase for things that are hard to grep for via
-[`/sweep`](docs/use-cases/semantic-sweep.md).
+Apart from this primary use case, autoground can also help you and your agents make rigorous
+arguments via [/proof](docs/use-cases/rigorous-reasoning.md), and scan your codebase for
+things that are hard to grep for via [/sweep](docs/use-cases/semantic-sweep.md).
 
 Unlike formal proof assistants like [Lean](https://lean-lang.org/) or
-[Rocq](https://rocq-prover.org/), `autoground` uses a [system one decision
+[Rocq](https://rocq-prover.org/), autoground uses a [system one decision
 model](https://typesafe.ai/blog/introducing-system-one-models-and-jev) as its proof kernel —
 which has all kinds of wacky implications. Effectively, the kernel accepts any deductive
 step that a capable LLM can follow intuitively, meaning without the use of reasoning. The
@@ -21,7 +20,7 @@ throghout the proof, the non-deterministic nature of the approach admits both fa
 positives and negatives.
 
 Once the [uneasy feeling passes](https://en.wikipedia.org/wiki/Proofs_and_Refutations), this
-can be quite fun. `autoground` proofs can be written in (mostly) natural language and with
+can be quite fun. autoground proofs can be written in (mostly) natural language and with
 witnesses drawn from different input modalities, which means you could prove that a given
 piece of code produces the screenshot of a website you just took.
 
@@ -29,11 +28,11 @@ piece of code produces the screenshot of a website you just took.
 ## Install
 
 > [!NOTE]
-> Using `autoground` requires a [TypeSafe API key](https://docs.typesafe.ai/introduction) to
+> Using autoground requires a [TypeSafe API key](https://docs.typesafe.ai/introduction) to
 > be available as `TYPESAFE_API_KEY` in your environment.
 
-Clone the repository and run `make install`. This will install the `/brief`, `/proof`, and
-`/sweep` skills, along with the `autoground` binary itself.
+Clone the repository and run `make install`. This will install the /brief, /proof, and
+/sweep skills, along with the autoground binary itself.
 
 ```shell
 git clone git@github.com:comnik/autoground.git
@@ -41,8 +40,8 @@ cd autoground
 make install
 ```
 
-Set your TypeSafe key in the environment. Every invocation of `autoground` incurs API usage.
-By default, all commands are capped at a budget of 1 cent, adjustable via `--budget`.
+Set your TypeSafe key in the environment. Every use of autoground incurs API usage. By
+default, all commands are capped at a budget of 1 cent.
 
 <!--
 ```brief
@@ -65,16 +64,16 @@ Confirm that everything is working, by validating this README:
 
 Then try out the skills:
 
-- [`/brief`](docs/use-cases/codebase-mental-model.md): validate your mental model of a codebase
-- [`/proof`](docs/use-cases/rigorous-reasoning.md): construct a rigorously reasoned argument
-- [`/sweep`](docs/use-cases/semantic-sweep.md): scan the codebase for things that are hard to grep
+- [/brief](docs/use-cases/codebase-mental-model.md): validate your mental model of a codebase
+- [/proof](docs/use-cases/rigorous-reasoning.md): construct a rigorously reasoned argument
+- [/sweep](docs/use-cases/semantic-sweep.md): scan the codebase for things that are hard to grep
 
 
 ## The `brief` language
 
 Informal proof is a dynamic process where proof author and verifier iteratively align their
 respective mental models and expose implicit assumptions. Aligning mental models requires
-using the same name for things that relate in the same way. `brief` is a language with two
+using the same name for things that relate in the same way. brief is a language with two
 goals: 1) help establish shared terminology, and 2) support gradual decomposition of a
 complicated argument into increasingly atomic claims.
 
@@ -236,12 +235,10 @@ validated claims.
 autoground sweep examples/no-historic-comment.brief --filter "source file"
 ```
 
-`sweep` is the counterpart to `check`. Where `check` starts from specific files to validate
-a claim, `sweep` scours the entire codebase to look for files that match an as-of-yet
-unwitnessed claim.
-
-Use `check` to continuously validate your mental model, and `sweep` to identify areas that
-might deserve more attention.
+Where `check` starts from specific files to validate a claim, `sweep` scours the entire
+codebase to look for files that match an as-of-yet unwitnessed claim. Use `check` to
+continuously validate your mental model, and `sweep` to identify areas that might deserve
+more attention.
 
 Every matching file is printed along with the specific claims it matched. `sweep` also
 writes a detailed trace file that records all calls to the oracle.
