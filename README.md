@@ -122,7 +122,7 @@ A brief consists of *names*, *senses*, *claims*, and *witnesses*:
 
 ;; Claims can be supported by other claims, forming a chain of deductions.
 (sense lemma-1 "If a whole number is odd, then its square is not even.")
-(sense lemma-2 "If the square of a whole number is even, then that whole number is not odd.")
+(sense lemma-2 "If the square of a whole number is even, then that number is not odd.")
 (claim (lemma-2)
   (lemma-1))
 
@@ -150,7 +150,6 @@ Note how applying names to a sense boils down to a fully formed sentence:
    (returns Frontend AST)
 => ("{Name} returns {Name}" Frontend AST)
 => ("Frontend returns AST")
-=> Frontend returns AST
 ```
 
 There are two additional language constructs: *assume* and *intent*.
@@ -161,8 +160,8 @@ There are two additional language constructs: *assume* and *intent*.
 (sense axiom "The square of an even whole number is even.")
 (assume (axiom))
 
-;; It is often helpful to capture the intent behind a brief. What do we want the receipient
-;; to take away? What mental model are we trying to convey?
+;; It is often helpful to capture the intent behind a brief. What do we want the
+;; recipient to take away? What mental model are we trying to convey?
 (intent "This brief is intended to convey the compilation pipeline.")
 ```
 
