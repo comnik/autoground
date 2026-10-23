@@ -10,8 +10,7 @@ Apart from this primary use case, autoground can also help you and your agents m
 arguments via [/proof](docs/use-cases/rigorous-reasoning.md), and scan your codebase for
 things that are hard to grep for via [/sweep](docs/use-cases/semantic-sweep.md).
 
-Unlike formal proof assistants like [Lean](https://lean-lang.org/) or
-[Rocq](https://rocq-prover.org/), autoground uses a [system one decision
+Unlike formal proof assistants like Lean or Rocq, autoground uses a [system one decision
 model](https://typesafe.ai/blog/introducing-system-one-models-and-jev) as its proof kernel —
 which has all kinds of wacky implications. Effectively, the kernel accepts any deductive
 step that a capable LLM can follow intuitively, meaning without the use of reasoning. The
@@ -83,7 +82,7 @@ complicated argument into increasingly atomic claims.
 
 A brief consists of *names*, *senses*, *claims*, and *witnesses*:
 
-```
+```clojure
 ;; A namespace globally disambiguates this brief.
 (ns autoground)
 
@@ -144,7 +143,7 @@ A brief consists of *names*, *senses*, *claims*, and *witnesses*:
 
 Note how applying names to a sense boils down to a fully formed sentence:
 
-```
+```clojure
    (returns Frontend AST)
 => ("{Name} returns {Name}" Frontend AST)
 => ("Frontend returns AST")
@@ -153,7 +152,7 @@ Note how applying names to a sense boils down to a fully formed sentence:
 
 There are two additional language constructs: *assume* and *intent*.
 
-```
+```clojure
 ;; Sometimes, we're just looking to make an internally consistent argument that is based
 ;; on a handful of explicit assumptions, rather than some observable ground truth.
 (sense axiom "The square of an even whole number is even.")
@@ -175,7 +174,7 @@ never treated as evidence.
 
 Finally, briefs can be nested, to hide *details* of an argument for easier consumption.
 
-```
+```clojure
 (intent "Convey the relationship between front- and backend.")
 
 (name Frontend)
