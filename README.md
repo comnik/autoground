@@ -1,24 +1,24 @@
 # ⏚ autoground
 
-`autoground` is an <ins>informal</ins> proof assistant. It can help you and your agents...
+`autoground` is an <ins>informal</ins> proof assistant.
 
-- ...[(re-)establish and maintain an accurate mental model of a codebase](docs/use-cases/codebase-mental-model.md).
-- ...[build a self-validating knowledge base](docs/use-cases/self-validating-knowledge-base.md).
-- ...[make a rigorous argument](docs/use-cases/rigorous-reasoning.md).
-- ...[optimize code without changing its behaviour](docs/use-cases/equivalence.md).
-- ...[sweep your codebase for things that are hard to grep for](docs/use-cases/semantic-sweep.md).
+Together with your favourite coding agent, `autoground` helps you to (re-)establish and
+maintain an accurate mental model of a codebase that has drifted out from under you. Please
+read the [`/brief` guide](docs/use-cases/codebase-mental-model.md) to learn how.
 
-> *a **[proof assistant](https://en.wikipedia.org/wiki/Proof_assistant)** or interactive
-> theorem prover is a software tool to assist with the development of formal proofs by
-> human–machine collaboration*
+Apart from this primary use case, `autoground` can also help you and your agents make
+rigorous arguments via [`/proof`](docs/use-cases/rigorous-reasoning.md), and scan your
+codebase for things that are hard to grep for via
+[`/sweep`](docs/use-cases/semantic-sweep.md).
 
-`autoground` uses a [system one decision
-model](https://typesafe.ai/blog/introducing-system-one-models-and-jev) as its proof kernel,
-which has all kinds of wacky implications. Effectively, the kernel accepts any reasoning
-step that a capable LLM can intuitively — without reasoning — follow. The trust boundary
-shifts: while it becomes easier for you to verify assumptions and claims made throghout the
-proof, the non-deterministic nature of the approach admits both false positives and
-negatives.
+Unlike formal proof assistants like [Lean](https://lean-lang.org/) or
+[Rocq](https://rocq-prover.org/), `autoground` uses a [system one decision
+model](https://typesafe.ai/blog/introducing-system-one-models-and-jev) as its proof kernel —
+which has all kinds of wacky implications. Effectively, the kernel accepts any deductive
+step that a capable LLM can follow intuitively, meaning without the use of reasoning. The
+trust boundary shifts: while it becomes easier for you to verify assumptions and claims made
+throghout the proof, the non-deterministic nature of the approach admits both false
+positives and negatives.
 
 Once the [uneasy feeling passes](https://en.wikipedia.org/wiki/Proofs_and_Refutations), this
 can be quite fun. `autoground` proofs can be written in (mostly) natural language and with
@@ -26,7 +26,51 @@ witnesses drawn from different input modalities, which means you could prove tha
 piece of code produces the screenshot of a website you just took.
 
 
-## The `brief` Language
+## Install
+
+> [!NOTE]
+> Using `autoground` requires a [TypeSafe API key](https://docs.typesafe.ai/introduction) to
+> be available as `TYPESAFE_API_KEY` in your environment.
+
+Clone the repository and run `make install`. This will install the `/brief`, `/proof`, and
+`/sweep` skills, along with the `autoground` binary itself.
+
+```shell
+git clone git@github.com:comnik/autoground.git
+cd autoground
+make install
+```
+
+Set your TypeSafe key in the environment. Every invocation of `autoground` incurs API usage.
+By default, all commands are capped at a budget of 1 cent, adjustable via `--budget`.
+
+<!--
+```brief
+(ns readme)
+(claim ("check and sweep run with the default budget cap by default")
+  (witness "src/main.rs"))
+
+(claim ("the default budget cap is 1 cent")
+  (witness "src/oracle/jev.rs"))
+```
+-->
+
+```shell
+export TYPESAFE_API_KEY=apikey_...
+```
+
+Confirm that everything is working, by validating this README:
+
+![README Demo](docs/assets/vhs/readme.gif)
+
+Then try out the skills:
+
+- [`/brief`](docs/use-cases/codebase-mental-model.md): validate your mental model of a codebase
+- [`/proof`](docs/use-cases/rigorous-reasoning.md): construct a rigorously reasoned argument
+- [`/sweep`](docs/use-cases/semantic-sweep.md): scan the codebase for things that are hard to grep
+
+
+## The `brief` language
 
 Informal proof is a dynamic process where proof author and verifier iteratively align their
 respective mental models and expose implicit assumptions. Aligning mental models requires
@@ -40,7 +84,7 @@ complicated argument into increasingly atomic claims.
 
 A brief consists of *names*, *senses*, *claims*, and *witnesses*:
 
-```brief
+```
 ;; A namespace globally disambiguates this brief.
 (ns autoground)
 
@@ -110,7 +154,7 @@ Note how applying names to a sense boils down to a fully formed sentence:
 
 There are two additional language constructs: *assume* and *intent*.
 
-```brief
+```
 ;; Sometimes, we're just looking to make an internally consistent argument that is based
 ;; on a handful of explicit assumptions, rather than some observable ground truth.
 (sense axiom "The square of an even whole number is even.")
@@ -132,7 +176,7 @@ never treated as evidence.
 
 Finally, briefs can be nested, to hide *details* of an argument for easier consumption.
 
-```brief
+```
 (intent "Convey the relationship between front- and backend.")
 
 (name Frontend)

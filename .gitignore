@@ -3,3 +3,4 @@
 **/*.rs.bk
 .clj-kondo/
 .lsp/
+.DS_Store

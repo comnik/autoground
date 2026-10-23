@@ -1,4 +1,4 @@
-# Reclaim Your Codebase
+# Reclaim your codebase with `/brief`
 
 `autoground` helps you (re-)establish and maintain an accurate mental model of a codebase.
 
