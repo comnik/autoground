@@ -848,6 +848,7 @@ fn lower_witness(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseEr
         match &item.kind {
             SexpKind::String(text) if !text.is_empty() => paths.push(text.clone()),
             SexpKind::String(_) => return Err(err_at(item, "a witness path is not empty")),
+            SexpKind::Symbol(text) if text == "$" => paths.push("$".to_string()),
             _ => return Err(err_at(item, "a witness path is a string")),
         }
     }
@@ -1200,6 +1201,23 @@ mod tests {
     }
 
     #[test]
+    fn a_dollar_witness_is_the_symbol() {
+        let formula = parse("(claim (\"alpha\") (witness $ \"notes.md\"))")
+            .unwrap()
+            .claims()
+            .next()
+            .unwrap()
+            .clone();
+        let Formula::Claim { support, .. } = formula else {
+            panic!("claim");
+        };
+        let Formula::Witness { paths } = support.as_ref() else {
+            panic!("witness");
+        };
+        assert_eq!(paths.as_slice(), ["$".to_string(), "notes.md".to_string()]);
+    }
+
+    #[test]
     fn rejects_a_witness_that_is_not_a_path() {
         for (src, needle) in [
             ("(witness)", "takes a path"),
@@ -1371,7 +1389,27 @@ mod tests {
 
     #[test]
     fn claim_spans_are_the_source_text() {
-        let src = include_str!("../../examples/diagram.brief");
+        let src = "\
+(name Frontend)
+(name Backend)
+(name Oracle)
+(name TypeSafe)
+
+(sense depends_on \"{X} depends on {Y}\")
+(sense calls \"{caller} calls {callee}\")
+
+(depends_on Frontend Backend)
+
+(not (depends_on Backend Frontend))
+
+(or
+  (calls Oracle TypeSafe)
+  (\"Oracle calls the TypeSafe API\"))
+
+(and
+  (\"Frontend is a component of the system\")
+  (\"{Name} is a component of the system\" Backend)
+  (\"{caller} calls {callee}\" Frontend Backend))";
         let program = parse(src).unwrap();
         let spans = program.claim_spans();
         assert_eq!(spans.len(), 4);

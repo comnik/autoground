@@ -113,7 +113,11 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
             out.push_str("(witness");
             for path in paths {
                 out.push(' ');
-                out.push_str(&quote_const(path));
+                if path == "$" {
+                    out.push('$');
+                } else {
+                    out.push_str(&quote_const(path));
+                }
             }
             out.push(')');
         }
@@ -223,6 +227,16 @@ mod tests {
 "#;
         let program = parse(src).unwrap();
         let again = parse(&print_program(&program)).unwrap();
+        assert_eq!(program, again);
+    }
+
+    #[test]
+    fn round_trip_prints_a_dollar_witness_unquoted() {
+        let src = "(claim (\"alpha\") (witness $ \"notes.md\"))\n";
+        let program = parse(src).unwrap();
+        let printed = print_program(&program);
+        assert!(printed.contains("(witness $ \"notes.md\")"), "{printed}");
+        let again = parse(&printed).unwrap();
         assert_eq!(program, again);
     }
 

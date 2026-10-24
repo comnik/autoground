@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn grammar_fences_parse_and_compile() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/grammar.md");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/brief/grammar.md");
         let markdown = std::fs::read_to_string(&path).unwrap();
         let fences = extract_briefs(&markdown);
         assert_eq!(fences.len(), 6, "{path:?}");
