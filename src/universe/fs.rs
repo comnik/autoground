@@ -356,6 +356,29 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn toy_layered() -> PathBuf {
+        let root = scratch_dir("toy-layered");
+        let files = [
+            ("backend/__init__.py", ""),
+            ("backend/api.py", "def handle():\n    return \"ok\"\n"),
+            (
+                "decoy/noise.py",
+                "# Not part of the layered architecture.\nVALUE = 1\n",
+            ),
+            ("frontend/__init__.py", ""),
+            (
+                "frontend/app.py",
+                "from backend import api\n\ndef main():\n    api.handle()\n",
+            ),
+        ];
+        for (rel, body) in files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        root
+    }
+
     fn scratch_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "autoground-universe-{tag}-{}-{}",
@@ -455,7 +478,7 @@ mod tests {
 
     #[test]
     fn toy_layered_opens_on_leaf_files() {
-        let fs = Filesystem::open("examples/toy-layered").unwrap();
+        let fs = Filesystem::open(toy_layered()).unwrap();
         assert_eq!(
             fs.databases(),
             &[
@@ -470,7 +493,7 @@ mod tests {
 
     #[test]
     fn leaf_read_is_the_body_and_size_is_its_length() {
-        let mut fs = Filesystem::open("examples/toy-layered").unwrap();
+        let mut fs = Filesystem::open(toy_layered()).unwrap();
         fs.set(vec!["frontend/app.py".into()]).unwrap();
         let text = fs.read("frontend/app.py", usize::MAX).unwrap();
         assert!(text.contains("from backend import api"), "{text}");
@@ -481,7 +504,7 @@ mod tests {
 
     #[test]
     fn directory_summary_is_a_listing_not_file_bodies() {
-        let mut fs = Filesystem::open("examples/toy-layered").unwrap();
+        let mut fs = Filesystem::open(toy_layered()).unwrap();
         fs.set(vec!["frontend".into()]).unwrap();
         let text = fs.summary("frontend").unwrap().unwrap();
         assert!(text.starts_with("frontend/\n"), "{text}");
@@ -502,7 +525,7 @@ mod tests {
 
     #[test]
     fn directory_view_is_smaller_than_leaves() {
-        let mut fs = Filesystem::open("examples/toy-layered").unwrap();
+        let mut fs = Filesystem::open(toy_layered()).unwrap();
         let leaf_size = fs.size().unwrap();
         top_dirs(&mut fs);
         let dir_size = fs.size().unwrap();
@@ -514,7 +537,7 @@ mod tests {
 
     #[test]
     fn remove_and_insert_dir() {
-        let mut fs = Filesystem::open("examples/toy-layered").unwrap();
+        let mut fs = Filesystem::open(toy_layered()).unwrap();
         top_dirs(&mut fs);
         fs.remove("decoy");
         assert_eq!(
@@ -534,7 +557,7 @@ mod tests {
 
     #[test]
     fn set_replaces_the_view() {
-        let mut fs = Filesystem::open("examples/toy-layered").unwrap();
+        let mut fs = Filesystem::open(toy_layered()).unwrap();
         top_dirs(&mut fs);
         fs.set(vec!["frontend/app.py".into()]).unwrap();
         assert_eq!(fs.databases(), &["frontend/app.py".to_string()]);
@@ -542,7 +565,7 @@ mod tests {
 
     #[test]
     fn insert_unknown_is_error() {
-        let mut fs = Filesystem::open("examples/toy-layered").unwrap();
+        let mut fs = Filesystem::open(toy_layered()).unwrap();
         let err = fs.insert("no/such.py".into()).unwrap_err();
         assert!(matches!(err, UniverseError::Missing(id) if id == "no/such.py"));
     }
@@ -600,7 +623,7 @@ mod tests {
 
     #[test]
     fn children_of_a_file_are_empty() {
-        let fs = Filesystem::open("examples/toy-layered").unwrap();
+        let fs = Filesystem::open(toy_layered()).unwrap();
         assert!(fs.children("frontend/app.py").unwrap().is_empty());
         assert_eq!(
             fs.children("frontend").unwrap(),

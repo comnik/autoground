@@ -5,16 +5,12 @@
 //!
 //! Database ids are POSIX relative paths (`frontend/app.py`, root `""`).
 
-pub mod diff;
 pub mod fs;
-pub mod transcript;
 
 use std::fmt;
 use std::io;
 
-pub use diff::Diff;
 pub use fs::Filesystem;
-pub use transcript::Transcript;
 
 pub trait Universe {
     /// IDs of all databases in the current view.
