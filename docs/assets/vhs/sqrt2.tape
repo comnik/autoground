@@ -1,4 +1,4 @@
-Output sqrt2.webm
+Output sqrt2.gif
 
 Set Shell zsh
 Set FontSize 32
@@ -12,6 +12,4 @@ Sleep 2s
 Enter
 
 Sleep 10s
-
-Ctrl+C
 Sleep 10
