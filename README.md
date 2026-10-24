@@ -1,17 +1,18 @@
 # ⏚ autoground
 
-`autoground` is an <ins>informal</ins> proof assistant.
+autoground is an <ins>informal</ins> proof assistant.
 
 Together with your favourite coding agent, autoground helps you to (re-)establish and
 maintain an accurate mental model of a codebase that has drifted out from under you.
 
-**use [/brief](docs/use-cases/codebase-mental-model.md) to validate your mental model of a
+**use [`/brief`](docs/use-cases/codebase-mental-model.md) to validate your mental model of a
 codebase**
 
-**use [/proof](docs/use-cases/rigorous-reasoning.md) to construct a rigorously reasoned argument**
+**use [`/proof`](docs/use-cases/rigorous-reasoning.md) to construct a rigorously reasoned
+argument**
 
-**use [/sweep](docs/use-cases/semantic-sweep.md) to scan a codebase for things that are hard
-to grep for**
+**use [`/sweep`](docs/use-cases/semantic-sweep.md) to scan a codebase for things that are
+hard to grep for**
 
 Unlike formal proof assistants like Lean or Rocq, autoground uses a [system one
 model](https://typesafe.ai/blog/introducing-system-one-models-and-jev) as its proof kernel,
@@ -29,18 +30,18 @@ piece of code produces the screenshot of a website you just took.
 
 ## Install
 
-> [!NOTE]
-> Using autoground requires a [TypeSafe API key](https://docs.typesafe.ai/introduction) to
-> be available as `TYPESAFE_API_KEY` in your environment.
-
-Clone the repository and run `make install`. This will install the /brief, /proof, and
-/sweep skills, along with the autoground binary itself.
-
 ```shell
 git clone git@github.com:comnik/autoground.git
 cd autoground
 make install
 ```
+
+This will install the `/brief`, `/proof`, and `/sweep` skills, along with the autoground
+binary itself.
+
+> [!NOTE]
+> Using autoground requires a [TypeSafe API key](https://docs.typesafe.ai/introduction) to
+> be available as `TYPESAFE_API_KEY` in your environment.
 
 Set your TypeSafe key in the environment. Every use of autoground incurs API usage. By
 default, all commands are capped at a budget of 1 cent.
@@ -66,9 +67,11 @@ Confirm that everything is working, by validating this README:
 
 Then learn about the skills:
 
-- [/brief](docs/use-cases/codebase-mental-model.md): validate your mental model of a codebase
-- [/proof](docs/use-cases/rigorous-reasoning.md): construct a rigorously reasoned argument
-- [/sweep](docs/use-cases/semantic-sweep.md): scan the codebase for things that are hard to grep
+- [`/brief`](docs/use-cases/codebase-mental-model.md): validate your mental model of a
+  codebase
+- [`/proof`](docs/use-cases/rigorous-reasoning.md): construct a rigorously reasoned argument
+- [`/sweep`](docs/use-cases/semantic-sweep.md): scan the codebase for things that are hard
+  to grep
 
 
 ## The `brief` language
@@ -205,7 +208,7 @@ Finally, briefs can be nested, to hide *details* of an argument for easier consu
 A [full grammar](docs/brief/grammar.md) is available in the docs.
 
 
-## Verification with `autoground check`
+## Verification with `check`
 
 ```
 autoground check examples/search-calls-oracle.brief
@@ -230,7 +233,7 @@ requests sent to the oracle, a `context.md` containing the fully spelled out ver
 validated claims.
 
 
-## Search with `autoground sweep`
+## Search with `sweep`
 
 ```
 autoground sweep examples/no-historic-comment.brief --filter "source file"
