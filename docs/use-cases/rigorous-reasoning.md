@@ -43,7 +43,7 @@ steps:
 autoground check sqrt2.brief
 ```
 
-![sqrt2 demo](/docs/assets/vhs/sqrt2.webm)
+![sqrt2 demo](/docs/assets/vhs/sqrt2.gif)
 
 
 ## Example
