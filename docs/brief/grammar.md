@@ -57,18 +57,6 @@ Frontend depends on Backend
 ```
 
 ```brief
-(name Sweep)
-(name Oracle)
-(sense calls "{caller} calls {callee}")
-(claim (calls Sweep Oracle)
-  (and
-    (claim ("Sweep asks the oracle whether a path matches the filter")
-      (witness "src/sweep/mod.rs"))
-    (claim ("Sweep's oracle posts are the Jev HTTP call")
-      (witness "src/oracle/jev.rs"))))
-```
-
-```brief
 (assume ("the file is small"))
 (claim ("the brief may treat the file as small")
   ("the file is small"))

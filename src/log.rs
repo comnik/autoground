@@ -1,8 +1,7 @@
 //! Append-only session log.
 //!
-//! One JSON object per line. [`Log::create_sweep`] writes
-//! `sweep-{nanos}-{pid}-{n}.jsonl` under `/tmp/autoground`. [`Log::create_under`]
-//! writes `trace.jsonl` inside a fresh `{nanos}-{pid}-{n}` directory.
+//! One JSON object per line. [`Log::create_under`] writes `trace.jsonl`
+//! inside a fresh `{nanos}-{pid}-{n}` directory.
 //! [`Log`] is cheap to clone and safe to share across threads: each append
 //! takes the mutex, writes one line, and flushes.
 
@@ -16,28 +15,6 @@ use serde::Serialize;
 use serde_json::Value;
 
 pub const DEFAULT_TRACE_DIR: &str = "/tmp/autoground";
-
-fn allocate_named(dir: &Path, stem: &str, ext: &str) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let pid = std::process::id();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let ext = ext.trim_start_matches('.');
-    for n in 0u32..10_000 {
-        let path = dir.join(format!("{stem}-{nanos}-{pid}-{n}.{ext}"));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => return Ok(path),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "could not allocate a unique trace filename",
-    ))
-}
 
 /// Create `{parent}/{nanos}-{pid}-{n}` and return that directory.
 pub fn allocate_unique_dir(parent: &Path) -> std::io::Result<PathBuf> {
@@ -75,12 +52,6 @@ pub struct Log {
 }
 
 impl Log {
-    /// `sweep-{nanos}-{pid}-{n}.jsonl` under [`DEFAULT_TRACE_DIR`].
-    pub fn create_sweep() -> std::io::Result<Self> {
-        let path = allocate_named(Path::new(DEFAULT_TRACE_DIR), "sweep", "jsonl")?;
-        Self::open(path)
-    }
-
     /// `{dir}/{nanos}-{pid}-{n}/trace.jsonl`.
     pub fn create_under(dir: &Path) -> std::io::Result<Self> {
         let session = allocate_unique_dir(dir)?;

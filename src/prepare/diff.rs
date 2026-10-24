@@ -114,8 +114,8 @@ fn parse_diff(bytes: &[u8]) -> Result<Vec<Patch>, String> {
         let mut names = Vec::with_capacity(paths);
         for _ in 0..paths {
             let path = cstr(bytes, &mut pos)?;
-            let path = std::str::from_utf8(path)
-                .map_err(|_| "git diff: path is not utf-8".to_string())?;
+            let path =
+                std::str::from_utf8(path).map_err(|_| "git diff: path is not utf-8".to_string())?;
             if path.is_empty() {
                 return Err("git diff: empty path".into());
             }

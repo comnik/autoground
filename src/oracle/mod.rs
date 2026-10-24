@@ -1,8 +1,7 @@
 //! Classification oracle: enqueue questions, batch on wait.
 //!
-//! `check` and `sweep` `submit` one classification at a time and `wait`
-//! when they need the label. Grouping is over the [`State`] the caller
-//! passed — typically a listing of paths or a file body.
+//! `check` submits one classification at a time and waits when it needs
+//! the label. Grouping is over the [`State`] the caller passed.
 
 pub(crate) mod image;
 pub mod jev;

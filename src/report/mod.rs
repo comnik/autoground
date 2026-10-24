@@ -1,7 +1,6 @@
 pub mod context;
 pub mod run;
 pub mod summary;
-pub mod sweep_view;
 
 use std::time::Duration;
 

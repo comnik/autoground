@@ -29,7 +29,7 @@ encodes how to evaluate the overall brief from its atomic claims.
 keeps a log in `/tmp/autoground`. The log interface allows all other components to append
 their own structured events, as JSON lines, in a thread-safe way.
 
-**Universe**: a filterable view over the universe.
+**Universe**: where a witness lives. `stat` and `read`. The local filesystem is the implementation.
 
 **Oracle**: a classification oracle. Jev is the first implementation. Callers submit
 classification tickets that they can wait on. Oracle implementations are free to batch and

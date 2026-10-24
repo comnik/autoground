@@ -11,9 +11,6 @@ codebase**
 **use [`/proof`](docs/use-cases/rigorous-reasoning.md) to construct a rigorously reasoned
 argument**
 
-**use [`/sweep`](docs/use-cases/semantic-sweep.md) to scan a codebase for things that are
-hard to grep for**
-
 Unlike formal proof assistants like Lean or Rocq, autoground uses a [system one
 model](https://typesafe.ai/blog/introducing-system-one-models-and-jev) as its proof kernel,
 which has all kinds of wacky implications. The kernel effectively accepts any deductive step
@@ -36,8 +33,7 @@ cd autoground
 make install
 ```
 
-This will install the `/brief`, `/proof`, and `/sweep` skills, along with the autoground
-binary itself.
+This will install the `/brief` and `/proof` skills, along with the autoground binary itself.
 
 > [!NOTE]
 > Using autoground requires a [TypeSafe API key](https://docs.typesafe.ai/introduction) to
@@ -49,7 +45,7 @@ default, all commands are capped at a budget of 1 cent.
 <!--
 ```brief
 (ns readme)
-(claim ("check and sweep run with the default budget cap by default")
+(claim ("check runs with the default budget cap by default")
   (witness "src/main.rs"))
 
 (claim ("the default budget cap is 1 cent")
@@ -70,8 +66,6 @@ Then learn about the skills:
 - [`/brief`](docs/use-cases/codebase-mental-model.md): validate your mental model of a
   codebase
 - [`/proof`](docs/use-cases/rigorous-reasoning.md): construct a rigorously reasoned argument
-- [`/sweep`](docs/use-cases/semantic-sweep.md): scan the codebase for things that are hard
-  to grep
 
 
 ## The `brief` language
@@ -120,8 +114,8 @@ A brief consists of *names*, *senses*, *claims*, and *witnesses*:
 (claim (is_component Frontend)
   (witness "src/frontend/mod.rs"))
 
-(claim ("Sweep asks the oracle whether a path matches the filter")
-  (witness "src/sweep/mod.rs"))
+(claim ("Check asks the oracle whether a witness supports the claim")
+  (witness "src/check/mod.rs"))
 
 ;; Claims can be supported by other claims, forming a chain of deductions.
 (sense lemma-1 "If a whole number is odd, then its square is not even.")
@@ -231,33 +225,3 @@ Exit status is 0 when every top-level claim is discharged, 1 otherwise, and 3 on
 IO, or oracle failure. Each check writes a detailed trace of all proof steps along with the
 requests sent to the oracle, a `context.md` containing the fully spelled out version of all
 validated claims.
-
-
-## Search with `sweep`
-
-```
-autoground sweep examples/no-historic-comment.brief --filter "source file"
-```
-
-Where `check` starts from specific files to validate a claim, `sweep` scours the entire
-codebase to look for files that match an as-of-yet unwitnessed claim. Use `check` to
-continuously validate your mental model, and `sweep` to identify areas that might deserve
-more attention.
-
-Every matching file is printed along with the specific claims it matched. `sweep` also
-writes a detailed trace file that records all calls to the oracle.
-
-`sweep transcript` judges the tool calls and responses of an agent's session transcript.
-
-```
-autoground sweep transcript examples/no-historic-comment.brief chat_history.jsonl
-```
-
-`sweep diff` judges each change in a git diff.
-
-```
-autoground sweep diff examples/no-historic-comment.brief
-autoground sweep diff examples/no-historic-comment.brief --cached
-autoground sweep diff examples/no-historic-comment.brief HEAD~3..HEAD
-autoground sweep diff examples/no-historic-comment.brief origin/main...HEAD -- src/
-```

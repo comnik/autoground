@@ -17,9 +17,7 @@
 //! `and`, `or`, and `not` are evaluated deterministically.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value as Json};
 
@@ -27,6 +25,7 @@ use crate::confidence::SUPPORT;
 use crate::oracle::image::{image_asset, image_extension, Asset, ImageError, MAX_IMAGE_BYTES};
 use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, State, Ticket};
 use crate::syntax::{Proposition, Support};
+use crate::universe::{Filesystem, GivenFile, Universe, UniverseError};
 use crate::value::Value;
 
 /// Largest body sent in one request.
@@ -129,6 +128,12 @@ impl From<OracleError> for CheckError {
     }
 }
 
+/// Files check opens. `tree` is the brief's directory. `given` is `$`.
+struct Sources<'a> {
+    tree: &'a Filesystem,
+    given: Option<&'a GivenFile>,
+}
+
 /// The file every `(witness $)` reads.
 #[derive(Debug, Clone)]
 pub struct BoundFile {
@@ -200,9 +205,15 @@ pub fn submit<O: Oracle>(
         _ => {}
     }
     let defs = defined_heads(claims);
+    let tree = Filesystem::at(base);
+    let given = bound.map(|file| GivenFile::new(file.path.clone()));
+    let sources = Sources {
+        tree: &tree,
+        given: given.as_ref(),
+    };
     let mut work = Vec::with_capacity(claims.len());
     for claim in claims {
-        work.push(prepare(claim, &defs, base, bound, budget, oracle)?);
+        work.push(prepare(claim, &defs, &sources, bound, budget, oracle)?);
     }
     let mut tickets = Vec::new();
     for item in &work {
@@ -347,7 +358,7 @@ enum Kind {
 fn prepare<O: Oracle>(
     proposition: &Proposition,
     defs: &HashSet<String>,
-    base: &Path,
+    sources: &Sources<'_>,
     bound: Option<&BoundFile>,
     budget: usize,
     oracle: &mut O,
@@ -371,10 +382,10 @@ fn prepare<O: Oracle>(
         }
         Proposition::Claim { sentence, support } => match support {
             Support::Witness { paths } => {
-                prepare_witness(sentence, paths, base, bound, budget, oracle)
+                prepare_witness(sentence, paths, sources, bound, budget, oracle)
             }
             Support::Sentence(support) => {
-                let child = prepare(support, defs, base, bound, budget, oracle)?;
+                let child = prepare(support, defs, sources, bound, budget, oracle)?;
                 let implication = Box::new(prepare_implication(sentence, support, oracle));
                 Ok(Work {
                     text: sentence.clone(),
@@ -399,7 +410,7 @@ fn prepare<O: Oracle>(
         Proposition::Scope { intent, body } => {
             let mut children = Vec::with_capacity(body.len());
             for claim in body {
-                children.push(prepare(claim, defs, base, bound, budget, oracle)?);
+                children.push(prepare(claim, defs, sources, bound, budget, oracle)?);
             }
             Ok(Work {
                 text: intent.clone().unwrap_or_else(|| "detail".to_string()),
@@ -412,13 +423,13 @@ fn prepare<O: Oracle>(
             })
         }
         Proposition::And(xs) => {
-            prepare_bool("and", Kind::And, xs, defs, base, bound, budget, oracle)
+            prepare_bool("and", Kind::And, xs, defs, sources, bound, budget, oracle)
         }
         Proposition::Or(xs) => {
-            prepare_bool("or", Kind::Or, xs, defs, base, bound, budget, oracle)
+            prepare_bool("or", Kind::Or, xs, defs, sources, bound, budget, oracle)
         }
         Proposition::Not(inner) => {
-            let child = prepare(inner, defs, base, bound, budget, oracle)?;
+            let child = prepare(inner, defs, sources, bound, budget, oracle)?;
             Ok(Work {
                 text: "not".to_string(),
                 failure: None,
@@ -437,14 +448,14 @@ fn prepare_bool<O: Oracle>(
     kind: Kind,
     xs: &[Proposition],
     defs: &HashSet<String>,
-    base: &Path,
+    sources: &Sources<'_>,
     bound: Option<&BoundFile>,
     budget: usize,
     oracle: &mut O,
 ) -> Result<Work, CheckError> {
     let mut children = Vec::with_capacity(xs.len());
     for proposition in xs {
-        children.push(prepare(proposition, defs, base, bound, budget, oracle)?);
+        children.push(prepare(proposition, defs, sources, bound, budget, oracle)?);
     }
     Ok(Work {
         text: text.to_string(),
@@ -460,7 +471,7 @@ fn prepare_bool<O: Oracle>(
 fn prepare_witness<O: Oracle>(
     sentence: &str,
     paths: &[String],
-    base: &Path,
+    sources: &Sources<'_>,
     bound: Option<&BoundFile>,
     budget: usize,
     oracle: &mut O,
@@ -481,19 +492,18 @@ fn prepare_witness<O: Oracle>(
     }
     let mut located = Vec::with_capacity(paths.len());
     for (path, cite) in paths.iter().zip(cites) {
-        match locate(base, path, bound) {
-            Locate::Missing => {
+        match locate(sources, path, &cite)? {
+            None => {
                 work.failure = Some(Failure::MissingFile { path: cite.clone() });
                 work.cites = vec![cite];
                 return Ok(work);
             }
-            Locate::Io(err) => return Err(CheckError::Io(err)),
-            Locate::File { full, len } => located.push((cite, full, len)),
+            Some((len, origin)) => located.push((cite, origin, len)),
         }
     }
     let mut files = Vec::with_capacity(located.len());
-    for (path, full, len) in located {
-        match load_witness(&path, &full, len)? {
+    for (path, origin, len) in located {
+        match load_witness(sources, &path, origin, len)? {
             WitnessLoad::Reject(failure) => {
                 work.failure = Some(failure);
                 return Ok(work);
@@ -503,9 +513,16 @@ fn prepare_witness<O: Oracle>(
     }
     let budget = budget.max(1);
     if files.len() == 1 {
-        return submit_one(sentence, files.pop().unwrap(), budget, oracle, work);
+        return submit_one(
+            sentence,
+            files.pop().unwrap(),
+            sources,
+            budget,
+            oracle,
+            work,
+        );
     }
-    submit_joint(sentence, files, budget, oracle, work)
+    submit_joint(sentence, files, sources, budget, oracle, work)
 }
 
 enum WitnessLoad {
@@ -516,7 +533,7 @@ enum WitnessLoad {
 enum WitnessFile {
     Text {
         path: String,
-        full: PathBuf,
+        origin: Origin,
         len: u64,
     },
     Image {
@@ -525,20 +542,23 @@ enum WitnessFile {
     },
 }
 
-fn load_witness(path: &str, full: &Path, len: u64) -> Result<WitnessLoad, CheckError> {
-    let opened = full.to_string_lossy();
-    let Some(format) = image_extension(path).or_else(|| image_extension(&opened)) else {
+fn load_witness(
+    sources: &Sources<'_>,
+    path: &str,
+    origin: Origin,
+    len: u64,
+) -> Result<WitnessLoad, CheckError> {
+    let Some(format) = image_extension(path).or_else(|| image_extension(&origin.opened())) else {
         return Ok(WitnessLoad::File(WitnessFile::Text {
             path: path.to_string(),
-            full: full.to_path_buf(),
+            origin,
             len,
         }));
     };
     if len > MAX_IMAGE_BYTES as u64 {
         return Ok(WitnessLoad::Reject(Failure::ImageTooLarge));
     }
-    let bytes =
-        fs::read(full).map_err(|err| CheckError::Io(format!("{}: {err}", full.display())))?;
+    let bytes = read_origin(sources, &origin, path)?;
     match image_asset(&bytes, format) {
         Ok(asset) => Ok(WitnessLoad::File(WitnessFile::Image {
             path: path.to_string(),
@@ -559,6 +579,7 @@ fn image_failure(err: ImageError) -> Failure {
 fn submit_one<O: Oracle>(
     sentence: &str,
     file: WitnessFile,
+    sources: &Sources<'_>,
     budget: usize,
     oracle: &mut O,
     mut work: Work,
@@ -572,12 +593,12 @@ fn submit_one<O: Oracle>(
             });
             Ok(work)
         }
-        WitnessFile::Text { path, full, len } => {
+        WitnessFile::Text { path, origin, len } => {
             if len > MAX_SLICED_BYTES as u64 {
                 work.failure = Some(Failure::TooLarge);
                 return Ok(work);
             }
-            let body = read_body(&full)?;
+            let body = read_text(sources, &origin, &path)?;
             if body.len() <= budget {
                 let class = document_question(sentence, &path, &body, None);
                 work.asked.push(Asked {
@@ -604,6 +625,7 @@ fn submit_one<O: Oracle>(
 fn submit_joint<O: Oracle>(
     sentence: &str,
     files: Vec<WitnessFile>,
+    sources: &Sources<'_>,
     budget: usize,
     oracle: &mut O,
     mut work: Work,
@@ -627,8 +649,8 @@ fn submit_joint<O: Oracle>(
     let mut assets = Vec::new();
     for file in files {
         match file {
-            WitnessFile::Text { path, full, .. } => {
-                bodies.push(json!({ "path": path, "body": read_body(&full)? }));
+            WitnessFile::Text { path, origin, .. } => {
+                bodies.push(json!({ "path": path, "body": read_text(sources, &origin, &path)? }));
             }
             WitnessFile::Image { path, asset } => {
                 bodies.push(json!({ "path": path, "body": asset.reference() }));
@@ -810,10 +832,19 @@ fn statement(proposition: &Proposition) -> String {
     }
 }
 
-enum Locate {
-    Missing,
-    Io(String),
-    File { full: PathBuf, len: u64 },
+/// Which universe holds a witness, and the path used for image detection.
+enum Origin {
+    Tree { id: String },
+    Bound { opened: String },
+}
+
+impl Origin {
+    fn opened(&self) -> String {
+        match self {
+            Origin::Tree { id } => id.clone(),
+            Origin::Bound { opened } => opened.clone(),
+        }
+    }
 }
 
 fn cite_path(path: &str, bound: Option<&BoundFile>) -> String {
@@ -826,44 +857,54 @@ fn cite_path(path: &str, bound: Option<&BoundFile>) -> String {
     }
 }
 
-fn locate(base: &Path, pin: &str, bound: Option<&BoundFile>) -> Locate {
+fn locate(
+    sources: &Sources<'_>,
+    pin: &str,
+    cite: &str,
+) -> Result<Option<(u64, Origin)>, CheckError> {
     if pin == "$" {
-        let Some(bound) = bound else {
-            return Locate::Missing;
+        let Some(given) = sources.given else {
+            return Ok(None);
         };
-        return match fs::metadata(&bound.path) {
-            Ok(meta) if meta.is_file() => Locate::File {
-                full: bound.path.clone(),
-                len: meta.len(),
+        let opened = given.path().display().to_string();
+        return match open_err(cite, given.stat(pin))? {
+            Some(info) => Ok(Some((info.len, Origin::Bound { opened }))),
+            None => Ok(None),
+        };
+    }
+    match open_err(cite, sources.tree.stat(pin))? {
+        Some(info) => Ok(Some((
+            info.len,
+            Origin::Tree {
+                id: pin.to_string(),
             },
-            Ok(_) => Locate::Missing,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Locate::Missing,
-            Err(err) => Locate::Io(format!("{}: {err}", bound.cite)),
-        };
-    }
-    let path = Path::new(pin);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::Prefix(_)))
-    {
-        return Locate::Missing;
-    }
-    let full = base.join(path);
-    match fs::metadata(&full) {
-        Ok(meta) if meta.is_file() => Locate::File {
-            full,
-            len: meta.len(),
-        },
-        Ok(_) => Locate::Missing,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Locate::Missing,
-        Err(err) => Locate::Io(format!("{pin}: {err}")),
+        ))),
+        None => Ok(None),
     }
 }
 
-fn read_body(path: &Path) -> Result<String, CheckError> {
-    let bytes =
-        fs::read(path).map_err(|err| CheckError::Io(format!("{}: {err}", path.display())))?;
+fn open_err<T>(cite: &str, result: Result<T, UniverseError>) -> Result<T, CheckError> {
+    result.map_err(|err| match err {
+        UniverseError::Io(err) => CheckError::Io(format!("{cite}: {err}")),
+        UniverseError::Missing(_) => CheckError::Io(format!("{cite}: not found")),
+    })
+}
+
+fn read_origin(sources: &Sources<'_>, origin: &Origin, cite: &str) -> Result<Vec<u8>, CheckError> {
+    let result = match origin {
+        Origin::Tree { id } => sources.tree.read(id),
+        Origin::Bound { .. } => {
+            let Some(given) = sources.given else {
+                return Err(CheckError::Bind("`$` needs a file".into()));
+            };
+            given.read("$")
+        }
+    };
+    open_err(cite, result)
+}
+
+fn read_text(sources: &Sources<'_>, origin: &Origin, cite: &str) -> Result<String, CheckError> {
+    let bytes = read_origin(sources, origin, cite)?;
     if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
         return Ok(format!("<binary {} bytes>", bytes.len()));
     }
@@ -1186,6 +1227,7 @@ mod tests {
     use crate::compile;
     use crate::syntax::parse;
     use std::collections::HashMap;
+    use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn scratch(label: &str) -> PathBuf {

@@ -227,6 +227,47 @@ fn check_rejects_a_dollar_without_a_file() {
 }
 
 #[test]
+fn check_dash_reads_stdin_before_the_oracle() {
+    let dir = scratch("stdin");
+    let brief = dir.join("model.brief");
+    std::fs::write(&brief, "(claim (\"alpha\") (witness $))\n").unwrap();
+    let mut child = bin()
+        .args(["check", brief.to_str().unwrap(), "-"])
+        .env_remove("TYPESAFE_API_KEY")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(b"alpha\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
+    assert!(!stderr.contains("`$` needs a file"), "{stderr}");
+}
+
+#[test]
+fn check_dash_without_a_dollar_does_not_call_the_oracle() {
+    let dir = scratch("stdin-plain");
+    let brief = dir.join("model.brief");
+    std::fs::write(&brief, "(claim (\"alpha\") (witness \"note.txt\"))\n").unwrap();
+    let out = bin()
+        .args(["check", brief.to_str().unwrap(), "-"])
+        .env_remove("TYPESAFE_API_KEY")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("a file needs `(witness $)`"), "{stderr}");
+    assert!(!stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
+}
+
+#[test]
 fn check_rejects_a_file_without_a_dollar() {
     let dir = scratch("file");
     let brief = dir.join("model.brief");

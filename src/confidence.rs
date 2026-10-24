@@ -9,8 +9,7 @@
 //!
 //! [`SUPPORT`] (0.85) is TypeSafe's high-stakes automatic-action band
 //! (confidence-gated routing uses >0.85 for a transfer). Check treats an
-//! `entailed` or `contradicted` Choice below this bar as unsettled. Sweep
-//! uses the same bar for a file match and for a filter Noul.
+//! `entailed` or `contradicted` Choice below this bar as unsettled.
 
 /// Bar at which a Choice may settle a proposition true or false.
 ///

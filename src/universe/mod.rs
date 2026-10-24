@@ -1,23 +1,27 @@
-//! A tree of databases a caller can list.
+//! Where a witness lives.
 //!
-//! A directory has a summary: its listing. A file does not. Ids are POSIX
-//! relative paths (`frontend/app.py`, root `""`).
+//! [`Universe::stat`] reports a file's length. [`Universe::read`] returns its
+//! bytes. `Ok(None)` from `stat` means this id is not a file witness.
+//!
+//! [`fs::Filesystem`] is rooted at a directory and resolves a relative id
+//! against it. [`fs::GivenFile`] is the one file a caller supplied.
 
 pub mod fs;
 
 use std::fmt;
 use std::io;
 
-pub use fs::Filesystem;
+pub use fs::{Filesystem, GivenFile};
+
+/// Length of a file witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileInfo {
+    pub len: u64,
+}
 
 pub trait Universe {
-    /// Ids of the databases in this universe.
-    fn databases(&self) -> &[String];
-
-    fn children(&self, id: &str) -> Result<Vec<String>, UniverseError>;
-
-    /// Listing text. `Ok(None)` means this database has no summary.
-    fn summary(&self, id: &str) -> Result<Option<String>, UniverseError>;
+    fn stat(&self, id: &str) -> Result<Option<FileInfo>, UniverseError>;
+    fn read(&self, id: &str) -> Result<Vec<u8>, UniverseError>;
 }
 
 #[derive(Debug)]

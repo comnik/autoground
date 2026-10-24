@@ -65,10 +65,7 @@ fn files_of(prompts: &[PromptDraft]) -> Vec<Exchange> {
                 }
                 out.push(Exchange {
                     id: format!("{prefix}/message"),
-                    body: format!(
-                        "prompt:\n{}\n\nreaction:\n{reaction}\n",
-                        prompt.text.trim()
-                    ),
+                    body: format!("prompt:\n{}\n\nreaction:\n{reaction}\n", prompt.text.trim()),
                 });
                 continue;
             }
@@ -142,8 +139,8 @@ fn read_prompts(jsonl: &str) -> Result<Vec<PromptDraft>, String> {
         if line.is_empty() {
             continue;
         }
-        let value: Value = serde_json::from_str(line)
-            .map_err(|err| format!("line {}: {err}", number + 1))?;
+        let value: Value =
+            serde_json::from_str(line).map_err(|err| format!("line {}: {err}", number + 1))?;
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
         match kind {
             "user" => {
@@ -323,14 +320,13 @@ mod tests {
         let ids: Vec<_> = files.iter().map(|file| file.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec![
-                "p0/c0/00-read_file",
-                "p0/c0/01-grep",
-                "p0/c1/00-list_dir",
-            ]
+            vec!["p0/c0/00-read_file", "p0/c0/01-grep", "p0/c1/00-list_dir",]
         );
         let call = body(&files, "p0/c0/00-read_file");
-        assert!(call.contains("prompt:\nWhere is the universe trait?"), "{call}");
+        assert!(
+            call.contains("prompt:\nWhere is the universe trait?"),
+            "{call}"
+        );
         assert!(call.contains("read_file"), "{call}");
         assert!(call.contains("src/universe/mod.rs"), "{call}");
         assert!(call.contains("fn objects"), "{call}");
@@ -399,7 +395,10 @@ mod tests {
         let ids: Vec<_> = files.iter().map(|file| file.id.as_str()).collect();
         assert_eq!(ids, vec!["p0/c0/00-read_file", "p1/c0/00-read_file"]);
         let first = body(&files, "p0/c0/00-read_file");
-        assert!(first.contains("prompt:\nPrepare the image witness."), "{first}");
+        assert!(
+            first.contains("prompt:\nPrepare the image witness."),
+            "{first}"
+        );
         assert!(first.contains("src/check/mod.rs"), "{first}");
         assert!(!first.contains("SECRET_INFO"), "{first}");
         assert!(!first.contains("SECRET_SUMMARY"), "{first}");
