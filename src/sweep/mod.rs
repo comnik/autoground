@@ -2,9 +2,11 @@
 //!
 //! The universe is the current directory, a transcript, or a git diff. On the
 //! filesystem, sweep optionally keeps paths that match a natural-language
-//! filter, then judges each remaining file. Filter questions share a listing
-//! state, so the oracle batches them. File questions share that file's body.
-//! A diff judges each change's patch. A transcript judges each readable leaf.
+//! filter, then judges each remaining file. A filesystem PNG or JPEG is one
+//! image asset. Other non-text is skipped. A transcript and a diff stay text.
+//! Filter questions share a listing state, so the oracle batches them. File
+//! questions share that file's body. A diff judges each change's patch. A
+//! transcript judges each readable leaf.
 //! Different bodies are independent states and overlap. A database matches
 //! when any top-level claim is true. A request that fails for one database is
 //! reported on that database. The others are still judged.
@@ -20,6 +22,7 @@ use serde_json::{json, Value as Json};
 
 use crate::check::{split_body, DEFAULT_BODY_BYTES, MAX_SLICED_BYTES};
 use crate::confidence::SUPPORT;
+use crate::oracle::image::{image_asset, image_extension, Asset, MAX_IMAGE_BYTES};
 use crate::oracle::jev::QUESTION_BUDGET;
 use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, State, Ticket};
 use crate::syntax::{Proposition, Support};
@@ -347,6 +350,7 @@ struct Body {
     rel: String,
     label: PathBuf,
     parts: Vec<String>,
+    assets: Vec<Asset>,
 }
 
 fn judge<O: Oracle>(
@@ -492,7 +496,7 @@ fn queue_body<O: Oracle>(
 ) {
     let total = body.parts.len() as u32;
     for (index, part) in body.parts.iter().enumerate() {
-        let state = document_state(&body.rel, part, index as u32, total);
+        let state = document_state(&body.rel, part, index as u32, total, &body.assets);
         for sentence in sentences {
             let class = Classification {
                 state: state.clone(),
@@ -514,19 +518,24 @@ fn queue_body<O: Oracle>(
     }
 }
 
-fn document_state(path: &str, body: &str, index: u32, total: u32) -> State {
-    if total > 1 {
-        State::new(json!({
+fn document_state(path: &str, body: &str, index: u32, total: u32, assets: &[Asset]) -> State {
+    let json = if total > 1 {
+        json!({
             "path": path,
             "body": body,
             "part": index + 1,
             "parts": total,
-        }))
+        })
     } else {
-        State::new(json!({
+        json!({
             "path": path,
             "body": body,
-        }))
+        })
+    };
+    if total == 1 && !assets.is_empty() {
+        State::with_assets(json, assets.to_vec())
+    } else {
+        State::new(json)
     }
 }
 
@@ -640,6 +649,9 @@ fn push_sentences(proposition: &Proposition, sentences: &mut Vec<String>) {
 fn load_body(root: &Path, rel: &str) -> Result<Option<Body>, SweepError> {
     let path = root.join(rel);
     let meta = fs::metadata(&path).map_err(|err| SweepError::Io(format!("{rel}: {err}")))?;
+    if image_extension(rel).is_some() {
+        return load_image(root, rel, &path, meta.len());
+    }
     if meta.len() as usize > MAX_SLICED_BYTES {
         return Ok(None);
     }
@@ -651,6 +663,26 @@ fn load_body(root: &Path, rel: &str) -> Result<Option<Body>, SweepError> {
     Ok(body_from_text(rel, absolute(root, rel), text))
 }
 
+fn load_image(root: &Path, rel: &str, path: &Path, len: u64) -> Result<Option<Body>, SweepError> {
+    if len > MAX_IMAGE_BYTES as u64 {
+        return Ok(None);
+    }
+    let Some(format) = image_extension(rel) else {
+        return Ok(None);
+    };
+    let bytes = fs::read(path).map_err(|err| SweepError::Io(format!("{rel}: {err}")))?;
+    let Ok(asset) = image_asset(&bytes, format) else {
+        return Ok(None);
+    };
+    let reference = asset.reference().to_string();
+    Ok(Some(Body {
+        rel: rel.to_string(),
+        label: absolute(root, rel),
+        parts: vec![reference],
+        assets: vec![asset],
+    }))
+}
+
 fn body_from_text(rel: &str, label: PathBuf, text: String) -> Option<Body> {
     if text.len() > MAX_SLICED_BYTES || text.contains('\0') {
         return None;
@@ -659,6 +691,7 @@ fn body_from_text(rel: &str, label: PathBuf, text: String) -> Option<Body> {
         rel: rel.to_string(),
         label,
         parts: split_body(&text, DEFAULT_BODY_BYTES),
+        assets: Vec::new(),
     })
 }
 
@@ -1170,6 +1203,69 @@ mod tests {
         assert!(!outcome.incomplete);
         assert_eq!(outcome.judged, 0);
         assert_eq!(outcome.candidates, 1);
+    }
+
+    #[test]
+    fn a_png_is_judged_as_an_image_asset() {
+        use crate::oracle::image::{synthetic_png, ImageFormat};
+        let dir = scratch("png");
+        let png = synthetic_png(280, 280);
+        fs::write(dir.join("shot.png"), &png).unwrap();
+        let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
+        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        assert_eq!(outcome.judged, 1);
+        assert_eq!(outcome.candidates, 1);
+        assert_eq!(oracle.seen.len(), 1);
+        let state = &oracle.seen[0].state;
+        assert!(state["path"].as_str().unwrap().ends_with("shot.png"));
+        let reference = state["body"].as_str().unwrap();
+        assert!(reference.starts_with("img-"));
+        assert!(state.get("part").is_none());
+        assert_eq!(state.assets().len(), 1);
+        assert_eq!(state.assets()[0].reference(), reference);
+        assert_eq!(state.assets()[0].format(), ImageFormat::Png);
+        assert_eq!(state.assets()[0].bytes(), png.as_slice());
+        assert!(!outcome.text.contains("Error"));
+    }
+
+    #[test]
+    fn an_oversized_png_is_scaled_and_judged() {
+        use crate::oracle::image::{image_asset, solid_png, ImageFormat};
+        let dir = scratch("scaled-png");
+        let png = solid_png(2000, 1000);
+        let path = dir.join("shot.png");
+        fs::write(&path, &png).unwrap();
+        let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
+        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        assert_eq!(outcome.judged, 1);
+        assert_eq!(oracle.seen.len(), 1);
+        let asset = image_asset(&png, ImageFormat::Png).unwrap();
+        assert_eq!(oracle.seen[0].state.assets()[0].bytes(), asset.bytes());
+        assert_ne!(asset.bytes(), png.as_slice());
+        assert_eq!(fs::read(&path).unwrap(), png);
+    }
+
+    #[test]
+    fn a_rejected_png_is_not_judged() {
+        use crate::oracle::image::{synthetic_png, MAX_IMAGE_BYTES};
+        let dir = scratch("rejected-png");
+        fs::write(dir.join("tiny.png"), synthetic_png(10, 10)).unwrap();
+        fs::write(dir.join("note.txt"), "alpha\n").unwrap();
+        let big = dir.join("big.png");
+        fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_IMAGE_BYTES as u64 + 1)
+            .unwrap();
+        let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
+        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        assert_eq!(outcome.candidates, 1);
+        assert_eq!(outcome.judged, 1);
+        assert_eq!(oracle.seen.len(), 1);
+        assert!(oracle.seen[0].state["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("note.txt"));
+        assert!(oracle.seen[0].state.assets().is_empty());
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::log::Log;
@@ -81,11 +82,16 @@ fn post_json_with_retries(url: &str, body: &Value) -> Result<Value, OracleError>
     let mut delay_ms = 200u64;
     let mut last = String::new();
     for attempt in 0..MAX_RETRIES {
-        let req = ureq::post(url)
+        let mut req = ureq::post(url)
             .set("Authorization", &format!("Bearer {key}"))
-            .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(120));
-        match req.send_json(body.clone()) {
+            .set("Content-Type", "application/json");
+        for (name, value) in image_headers(body) {
+            req = req.set(name, value);
+        }
+        match req
+            .timeout(std::time::Duration::from_secs(120))
+            .send_json(body.clone())
+        {
             Ok(resp) => {
                 return resp
                     .into_json()
@@ -396,6 +402,7 @@ impl<T: Transport> JevOracle<T> {
         tickets: Vec<(Ticket, QuestionKind)>,
         result: Result<Posted, OracleError>,
     ) {
+        let request = redact_image_bytes(request);
         match result {
             Ok(posted) => {
                 let n = tickets.len();
@@ -570,11 +577,73 @@ fn request_body(model: &str, state: &State, items: &[Pending]) -> Value {
         }
         questions.insert(question_key(p.ticket), Value::Object(question));
     }
-    json!({
+    let mut body = json!({
         "model": model,
         "state": state.json().clone(),
         "questions": questions,
-    })
+    });
+    if !state.assets().is_empty() {
+        let mut assets = serde_json::Map::new();
+        for asset in state.assets() {
+            assets.insert(
+                asset.reference().to_string(),
+                json!({
+                    "type": "image",
+                    "format": asset.format().as_str(),
+                    "data_base64": base64::engine::general_purpose::STANDARD.encode(asset.bytes()),
+                }),
+            );
+        }
+        body["assets"] = Value::Object(assets);
+    }
+    body
+}
+
+fn requests_images(body: &Value) -> bool {
+    body.get("assets")
+        .and_then(|assets| assets.as_object())
+        .is_some_and(|assets| !assets.is_empty())
+}
+
+fn image_headers(body: &Value) -> &'static [(&'static str, &'static str)] {
+    if requests_images(body) {
+        &[("TypeSafe-Danger-Zone-Images", "true")]
+    } else {
+        &[]
+    }
+}
+
+/// Decoded size of standard base64, from the alphabet length and padding.
+fn decoded_base64_len(encoded: &str) -> u64 {
+    let mut len = 0usize;
+    let mut padding = 0usize;
+    for byte in encoded.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        len += 1;
+        if byte == b'=' {
+            padding += 1;
+        }
+    }
+    (len / 4 * 3 - padding) as u64
+}
+
+fn redact_image_bytes(mut request: Value) -> Value {
+    let Some(assets) = request.get_mut("assets").and_then(|v| v.as_object_mut()) else {
+        return request;
+    };
+    for asset in assets.values_mut() {
+        let Some(obj) = asset.as_object_mut() else {
+            continue;
+        };
+        let Some(encoded) = obj.remove("data_base64") else {
+            continue;
+        };
+        let byte_length = encoded.as_str().map(decoded_base64_len).unwrap_or(0);
+        obj.insert("byte_length".into(), json!(byte_length));
+    }
+    request
 }
 
 fn parse_answer(resp: &Value, key: &str, kind: QuestionKind) -> Result<Answer, OracleError> {
@@ -1150,5 +1219,102 @@ mod tests {
             "expected overlapping work, max inflight {}",
             max.load(Ordering::SeqCst)
         );
+    }
+
+    fn image_classification() -> (Classification, String, usize) {
+        use crate::oracle::image::{image_asset, synthetic_png, ImageFormat};
+        let png = synthetic_png(280, 280);
+        let asset = image_asset(&png, ImageFormat::Png).unwrap();
+        let reference = asset.reference().to_string();
+        let len = png.len();
+        let state = State::with_assets(
+            json!({ "path": "shot.png", "body": reference }),
+            vec![asset],
+        );
+        (
+            Classification::choice(state, "the shot", criteria(&[("yes", "yes"), ("no", "no")])),
+            reference,
+            len,
+        )
+    }
+
+    #[test]
+    fn a_text_request_omits_assets_and_the_image_header() {
+        let body = request_body("jev-latest", &State::new(json!({ "body": "hi" })), &[]);
+        assert!(body.get("assets").is_none());
+        assert!(!requests_images(&body));
+        assert!(image_headers(&body).is_empty());
+    }
+
+    #[test]
+    fn an_image_request_encodes_the_asset_and_names_the_header() {
+        use crate::oracle::image::{image_asset, synthetic_png, ImageFormat};
+        let png = synthetic_png(280, 280);
+        let asset = image_asset(&png, ImageFormat::Png).unwrap();
+        let reference = asset.reference().to_string();
+        let state = State::with_assets(
+            json!({ "path": "shot.png", "body": reference }),
+            vec![asset],
+        );
+        let body = request_body("jev-latest", &state, &[]);
+        let encoded = body["assets"][&reference]["data_base64"].as_str().unwrap();
+        let expected = base64::engine::general_purpose::STANDARD.encode(&png);
+        assert_eq!(body["assets"][&reference]["type"], "image");
+        assert_eq!(body["assets"][&reference]["format"], "png");
+        assert_eq!(encoded, expected);
+        assert!(!encoded.contains('\n'));
+        assert!(!encoded.contains("data:"));
+        assert!(requests_images(&body));
+        assert_eq!(
+            image_headers(&body),
+            &[("TypeSafe-Danger-Zone-Images", "true")][..]
+        );
+    }
+
+    #[test]
+    fn a_logged_exchange_keeps_the_image_length_and_drops_the_bytes() {
+        let (class, reference, len) = image_classification();
+        let mut o = oracle(vec![choice_resp(&["q0"], "yes")]);
+        let ticket = o.submit(class);
+        o.wait(ticket).unwrap();
+        let posted = &o.transport.bodies[0]["assets"][&reference];
+        assert!(posted["data_base64"].is_string());
+        assert!(!posted["data_base64"].as_str().unwrap().is_empty());
+        let logged = &o.last_exchanges()[0].request["assets"][&reference];
+        assert!(logged.get("data_base64").is_none());
+        assert_eq!(logged["type"], "image");
+        assert_eq!(logged["format"], "png");
+        assert_eq!(logged["byte_length"], len as u64);
+    }
+
+    #[test]
+    fn a_failed_image_post_logs_the_length_without_the_bytes() {
+        let path = std::env::temp_dir().join(format!(
+            "autoground-exchange-image-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let log = crate::log::Log::open(&path).unwrap();
+        let (class, reference, len) = image_classification();
+        let mut o = oracle_logging(vec![], Some(log));
+        let ticket = o.submit(class);
+        assert!(o.wait(ticket).is_err());
+        let posted = &o.transport.bodies[0]["assets"][&reference];
+        assert!(posted.get("data_base64").is_some());
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(!text.contains("data_base64"));
+        let events = crate::log::parse_jsonl(&text).unwrap();
+        let exchange = events
+            .iter()
+            .find(|event| event.get("kind").and_then(|kind| kind.as_str()) == Some(EXCHANGE_KIND))
+            .unwrap();
+        let logged = &exchange["request"]["assets"][&reference];
+        assert_eq!(logged["format"], "png");
+        assert_eq!(logged["byte_length"], len as u64);
+        assert!(exchange.get("response").is_none());
     }
 }

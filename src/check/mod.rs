@@ -11,7 +11,9 @@
 //! discharged when one part entails the sentence, so the proof cites the file
 //! and the kernel finds the region. A joint witness that does not fit is too
 //! large: the agent splits it into single-file witnesses, and each of those
-//! can be sliced. A witness that cites a `.brief` file is not sent. A brief is a
+//! can be sliced. An image witness is one PNG or JPEG and is not sliced. A
+//! joint witness may mix text and images; the text still has to fit in one
+//! state. A witness that cites a `.brief` file is not sent. A brief is a
 //! model, not evidence.
 //!
 //! Check builds its own oracle requests. Sweep does not call these builders,
@@ -25,6 +27,7 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{json, Value as Json};
 
 use crate::confidence::SUPPORT;
+use crate::oracle::image::{image_asset, image_extension, Asset, ImageError, MAX_IMAGE_BYTES};
 use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, State, Ticket};
 use crate::syntax::{Proposition, Support};
 use crate::value::Value;
@@ -59,6 +62,12 @@ pub enum Failure {
     Contradicted,
     /// A witness cites a `.brief` file. A brief is a model, not evidence.
     BriefWitness,
+    /// The cited image is not a PNG or JPEG this check can send.
+    UnsupportedImage,
+    /// The cited image is under the size the model accepts.
+    ImageTooSmall,
+    /// The cited image is over the size the model accepts.
+    ImageTooLarge,
 }
 
 impl Failure {
@@ -70,6 +79,9 @@ impl Failure {
             Failure::NotEntailed => "not entailed".to_string(),
             Failure::Contradicted => "contradicted".to_string(),
             Failure::BriefWitness => "briefs can't be witnesses".to_string(),
+            Failure::UnsupportedImage => "unsupported image".to_string(),
+            Failure::ImageTooSmall => "image too small".to_string(),
+            Failure::ImageTooLarge => "image too large".to_string(),
         }
     }
 }
@@ -120,9 +132,9 @@ impl From<OracleError> for CheckError {
 
 /// Judge `claims` against the files they cite. A witness path is relative to `base`.
 ///
-/// `budget` is the largest body, in bytes, sent in one request. A longer
-/// single file is sent in parts. A joint witness over bodies that do not fit
-/// is [`Failure::TooLarge`] and is not sent.
+/// `budget` is the largest text body, in bytes, sent in one request. A longer
+/// single text file is sent in parts. A joint witness whose text does not fit
+/// is [`Failure::TooLarge`] and is not sent. An image does not spend this budget.
 pub fn check<O: Oracle>(
     claims: &[Proposition],
     base: &Path,
@@ -379,7 +391,7 @@ fn prepare_witness<O: Oracle>(
         work.failure = Some(Failure::BriefWitness);
         return Ok(work);
     }
-    let mut files = Vec::with_capacity(paths.len());
+    let mut located = Vec::with_capacity(paths.len());
     for path in paths {
         match locate(base, path) {
             Locate::Missing => {
@@ -388,54 +400,170 @@ fn prepare_witness<O: Oracle>(
                 return Ok(work);
             }
             Locate::Io(err) => return Err(CheckError::Io(err)),
-            Locate::File { full, len } => files.push((path.clone(), full, len)),
+            Locate::File { full, len } => located.push((path.clone(), full, len)),
+        }
+    }
+    let mut files = Vec::with_capacity(located.len());
+    for (path, full, len) in located {
+        match load_witness(&path, &full, len)? {
+            WitnessLoad::Reject(failure) => {
+                work.failure = Some(failure);
+                return Ok(work);
+            }
+            WitnessLoad::File(file) => files.push(file),
         }
     }
     let budget = budget.max(1);
-    let total: u64 = files.iter().map(|(_, _, len)| *len).sum();
-    if files.len() > 1
-        && (total > budget as u64 || files.iter().any(|(_, _, len)| *len > budget as u64))
-    {
-        work.failure = Some(Failure::TooLarge);
-        return Ok(work);
-    }
     if files.len() == 1 {
-        let (path, full, len) = &files[0];
-        if *len > MAX_SLICED_BYTES as u64 {
-            work.failure = Some(Failure::TooLarge);
-            return Ok(work);
-        }
-        let body = read_body(full)?;
-        if body.len() <= budget {
-            let class = document_question(sentence, path, &body, None);
+        return submit_one(sentence, files.pop().unwrap(), budget, oracle, work);
+    }
+    submit_joint(sentence, files, budget, oracle, work)
+}
+
+enum WitnessLoad {
+    File(WitnessFile),
+    Reject(Failure),
+}
+
+enum WitnessFile {
+    Text {
+        path: String,
+        full: PathBuf,
+        len: u64,
+    },
+    Image {
+        path: String,
+        asset: Asset,
+    },
+}
+
+fn load_witness(path: &str, full: &Path, len: u64) -> Result<WitnessLoad, CheckError> {
+    let Some(format) = image_extension(path) else {
+        return Ok(WitnessLoad::File(WitnessFile::Text {
+            path: path.to_string(),
+            full: full.to_path_buf(),
+            len,
+        }));
+    };
+    if len > MAX_IMAGE_BYTES as u64 {
+        return Ok(WitnessLoad::Reject(Failure::ImageTooLarge));
+    }
+    let bytes =
+        fs::read(full).map_err(|err| CheckError::Io(format!("{}: {err}", full.display())))?;
+    match image_asset(&bytes, format) {
+        Ok(asset) => Ok(WitnessLoad::File(WitnessFile::Image {
+            path: path.to_string(),
+            asset,
+        })),
+        Err(err) => Ok(WitnessLoad::Reject(image_failure(err))),
+    }
+}
+
+fn image_failure(err: ImageError) -> Failure {
+    match err {
+        ImageError::Unsupported => Failure::UnsupportedImage,
+        ImageError::TooSmall => Failure::ImageTooSmall,
+        ImageError::TooLarge => Failure::ImageTooLarge,
+    }
+}
+
+fn submit_one<O: Oracle>(
+    sentence: &str,
+    file: WitnessFile,
+    budget: usize,
+    oracle: &mut O,
+    mut work: Work,
+) -> Result<Work, CheckError> {
+    match file {
+        WitnessFile::Image { path, asset } => {
+            let class = document_image(sentence, &path, asset);
             work.asked.push(Asked {
                 ticket: oracle.submit(class),
                 part: None,
             });
-            return Ok(work);
+            Ok(work)
         }
-        let parts = split_body(&body, budget);
-        let total_parts = parts.len() as u32;
-        for (index, part) in parts.iter().enumerate() {
-            let n = (index as u32) + 1;
-            let class = document_question(sentence, path, part, Some((n, total_parts)));
-            work.asked.push(Asked {
-                ticket: oracle.submit(class),
-                part: Some(format!("{path} part {n}/{total_parts}")),
-            });
+        WitnessFile::Text { path, full, len } => {
+            if len > MAX_SLICED_BYTES as u64 {
+                work.failure = Some(Failure::TooLarge);
+                return Ok(work);
+            }
+            let body = read_body(&full)?;
+            if body.len() <= budget {
+                let class = document_question(sentence, &path, &body, None);
+                work.asked.push(Asked {
+                    ticket: oracle.submit(class),
+                    part: None,
+                });
+                return Ok(work);
+            }
+            let parts = split_body(&body, budget);
+            let total_parts = parts.len() as u32;
+            for (index, part) in parts.iter().enumerate() {
+                let n = (index as u32) + 1;
+                let class = document_question(sentence, &path, part, Some((n, total_parts)));
+                work.asked.push(Asked {
+                    ticket: oracle.submit(class),
+                    part: Some(format!("{path} part {n}/{total_parts}")),
+                });
+            }
+            Ok(work)
         }
+    }
+}
+
+fn submit_joint<O: Oracle>(
+    sentence: &str,
+    files: Vec<WitnessFile>,
+    budget: usize,
+    oracle: &mut O,
+    mut work: Work,
+) -> Result<Work, CheckError> {
+    let text_total: u64 = files
+        .iter()
+        .map(|file| match file {
+            WitnessFile::Text { len, .. } => *len,
+            WitnessFile::Image { .. } => 0,
+        })
+        .sum();
+    let text_over = files.iter().any(|file| match file {
+        WitnessFile::Text { len, .. } => *len > budget as u64,
+        WitnessFile::Image { .. } => false,
+    });
+    if text_over || text_total > budget as u64 {
+        work.failure = Some(Failure::TooLarge);
         return Ok(work);
     }
     let mut bodies = Vec::with_capacity(files.len());
-    for (path, full, _) in &files {
-        bodies.push((path.clone(), read_body(full)?));
+    let mut assets = Vec::new();
+    for file in files {
+        match file {
+            WitnessFile::Text { path, full, .. } => {
+                bodies.push(json!({ "path": path, "body": read_body(&full)? }));
+            }
+            WitnessFile::Image { path, asset } => {
+                bodies.push(json!({ "path": path, "body": asset.reference() }));
+                assets.push(asset);
+            }
+        }
     }
-    let class = joint_question(sentence, &bodies);
+    let class = joint_question(sentence, bodies, dedup_assets(assets));
     work.asked.push(Asked {
         ticket: oracle.submit(class),
         part: None,
     });
     Ok(work)
+}
+
+fn dedup_assets(assets: Vec<Asset>) -> Vec<Asset> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for asset in assets {
+        if seen.insert(asset.reference().to_string()) {
+            out.push(asset);
+        }
+    }
+    out
 }
 
 /// A `.brief` file is a model, not evidence a witness can cite.
@@ -500,13 +628,28 @@ fn document_question(
     }
 }
 
-fn joint_question(sentence: &str, files: &[(String, String)]) -> Classification {
-    let files: Vec<Json> = files
-        .iter()
-        .map(|(path, body)| json!({ "path": path, "body": body }))
-        .collect();
+fn document_image(sentence: &str, path: &str, asset: Asset) -> Classification {
+    let reference = asset.reference().to_string();
     Classification {
-        state: State::new(json!({ "files": files })),
+        state: State::with_assets(
+            json!({
+                "path": path,
+                "body": reference,
+            }),
+            vec![asset],
+        ),
+        kind: QuestionKind::Choice,
+        instructions: json!({
+            "proposition": sentence,
+            "question": DOCUMENT_QUESTION,
+        }),
+        criteria: document_criteria(),
+    }
+}
+
+fn joint_question(sentence: &str, files: Vec<Json>, assets: Vec<Asset>) -> Classification {
+    Classification {
+        state: State::with_assets(json!({ "files": files }), assets),
         kind: QuestionKind::Choice,
         instructions: json!({
             "proposition": sentence,
@@ -1138,6 +1281,7 @@ mod tests {
             oracle.seen[0].state["body"].as_str().unwrap(),
             "fn search() {}"
         );
+        assert!(oracle.seen[0].state.assets().is_empty());
     }
 
     #[test]
@@ -1160,6 +1304,7 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0]["body"].as_str().unwrap(), "aaa");
         assert_eq!(files[1]["body"].as_str().unwrap(), "bbb");
+        assert!(oracle.seen[0].state.assets().is_empty());
         assert_eq!(
             report.claims[0].cites,
             vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
@@ -1528,5 +1673,197 @@ mod tests {
         assert_eq!(claim.children[0].value, Value::False);
         assert_eq!(claim.value, Value::Unknown);
         assert_eq!(claim.failure, None);
+    }
+
+    fn rejected_image(label: &str, name: &str, bytes: &[u8], failure: Failure, comment: &str) {
+        let dir = scratch(label);
+        fs::write(dir.join(name), bytes).unwrap();
+        let mut oracle = Rec::new(entailed);
+        let src = format!("(claim (\"shot\") (witness \"{name}\"))");
+        let report = check(&compiled(&src), &dir, 32, &mut oracle).unwrap();
+        assert!(oracle.seen.is_empty(), "{label}");
+        assert_eq!(report.claims[0].failure, Some(failure), "{label}");
+        assert_eq!(report.claims[0].value, Value::Unknown, "{label}");
+        assert!(write_report(&report).contains(comment), "{label}");
+    }
+
+    #[test]
+    fn a_png_witness_sends_one_asset_and_is_not_sliced() {
+        use crate::oracle::image::{synthetic_png, ImageFormat};
+        let dir = scratch("png");
+        let png = synthetic_png(280, 280);
+        fs::write(dir.join("shot.png"), &png).unwrap();
+        let mut oracle = Rec::new(entailed);
+        let report = check(
+            &compiled("(claim (\"the shot\") (witness \"shot.png\"))"),
+            &dir,
+            32,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(oracle.seen.len(), 1);
+        let state = &oracle.seen[0].state;
+        assert!(state.get("part").is_none());
+        assert_eq!(state["path"], "shot.png");
+        let reference = state["body"].as_str().unwrap();
+        assert!(reference.starts_with("img-"));
+        assert_eq!(reference.len(), 4 + 64);
+        assert_eq!(state.assets().len(), 1);
+        assert_eq!(state.assets()[0].reference(), reference);
+        assert_eq!(state.assets()[0].format(), ImageFormat::Png);
+        assert_eq!(state.assets()[0].bytes(), png.as_slice());
+    }
+
+    #[test]
+    fn an_oversized_png_is_scaled_and_sent() {
+        use crate::oracle::image::solid_png;
+        let dir = scratch("scaled-png");
+        let png = solid_png(2000, 1000);
+        let path = dir.join("shot.png");
+        fs::write(&path, &png).unwrap();
+        let mut oracle = Rec::new(entailed);
+        let report = check(
+            &compiled("(claim (\"the shot\") (witness \"shot.png\"))"),
+            &dir,
+            32,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[0].value, Value::True);
+        assert!(report.claims[0].failure.is_none());
+        assert_eq!(oracle.seen.len(), 1);
+        assert!(oracle.seen[0].state.get("part").is_none());
+        assert_eq!(oracle.seen[0].state["path"], "shot.png");
+        assert_ne!(oracle.seen[0].state.assets()[0].bytes(), png.as_slice());
+        assert_eq!(fs::read(&path).unwrap(), png);
+    }
+
+    #[test]
+    fn a_jpeg_witness_uses_the_jpg_format() {
+        use crate::oracle::image::{synthetic_jpeg, ImageFormat};
+        let dir = scratch("jpeg");
+        fs::write(dir.join("shot.jpeg"), synthetic_jpeg(280, 280)).unwrap();
+        let mut oracle = Rec::new(entailed);
+        let report = check(
+            &compiled("(claim (\"the shot\") (witness \"shot.jpeg\"))"),
+            &dir,
+            32,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(oracle.seen.len(), 1);
+        assert!(oracle.seen[0].state.get("part").is_none());
+        assert_eq!(oracle.seen[0].state["path"], "shot.jpeg");
+        assert_eq!(oracle.seen[0].state.assets()[0].format(), ImageFormat::Jpeg);
+        assert_eq!(oracle.seen[0].state.assets()[0].format().as_str(), "jpg");
+    }
+
+    #[test]
+    fn a_joint_witness_keeps_text_beside_one_image() {
+        use crate::oracle::image::synthetic_png;
+        let dir = scratch("joint-image");
+        fs::write(dir.join("note.txt"), "hello").unwrap();
+        fs::write(dir.join("shot.png"), synthetic_png(280, 280)).unwrap();
+        let mut oracle = Rec::new(entailed);
+        let report = check(
+            &compiled("(claim (\"together\") (witness \"note.txt\" \"shot.png\"))"),
+            &dir,
+            32,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(oracle.seen.len(), 1);
+        let state = &oracle.seen[0].state;
+        assert!(state.get("part").is_none());
+        let files = state["files"].as_array().unwrap();
+        assert_eq!(files[0]["body"].as_str().unwrap(), "hello");
+        assert!(files[1]["body"].as_str().unwrap().starts_with("img-"));
+        assert_eq!(state.assets().len(), 1);
+        assert_eq!(
+            state.assets()[0].reference(),
+            files[1]["body"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn two_copies_of_one_image_are_one_asset() {
+        use crate::oracle::image::synthetic_png;
+        let dir = scratch("dedup");
+        let png = synthetic_png(280, 280);
+        fs::write(dir.join("a.png"), &png).unwrap();
+        fs::write(dir.join("b.png"), &png).unwrap();
+        let mut oracle = Rec::new(entailed);
+        check(
+            &compiled("(claim (\"same\") (witness \"a.png\" \"b.png\"))"),
+            &dir,
+            32,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(oracle.seen.len(), 1);
+        let state = &oracle.seen[0].state;
+        let files = state["files"].as_array().unwrap();
+        assert_eq!(files[0]["body"], files[1]["body"]);
+        assert_ne!(files[0]["path"], files[1]["path"]);
+        assert_eq!(state.assets().len(), 1);
+        assert_eq!(
+            state.assets()[0].reference(),
+            files[0]["body"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_rejected_image_is_not_sent() {
+        use crate::oracle::image::{synthetic_jpeg, synthetic_png};
+        rejected_image(
+            "tiny-image",
+            "shot.png",
+            &synthetic_png(100, 100),
+            Failure::ImageTooSmall,
+            ";; image too small",
+        );
+        rejected_image(
+            "huge-image",
+            "shot.png",
+            &synthetic_png(4000, 4000),
+            Failure::ImageTooLarge,
+            ";; image too large",
+        );
+        rejected_image(
+            "mislabeled-image",
+            "shot.png",
+            &synthetic_jpeg(280, 280),
+            Failure::UnsupportedImage,
+            ";; unsupported image",
+        );
+        rejected_image(
+            "text-png",
+            "shot.png",
+            b"not an image",
+            Failure::UnsupportedImage,
+            ";; unsupported image",
+        );
+    }
+
+    #[test]
+    fn an_image_over_sixteen_mebibytes_is_too_large() {
+        let dir = scratch("huge-file");
+        let path = dir.join("big.png");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
+        let mut oracle = Rec::new(entailed);
+        let report = check(
+            &compiled("(claim (\"shot\") (witness \"big.png\"))"),
+            &dir,
+            32,
+            &mut oracle,
+        )
+        .unwrap();
+        assert!(oracle.seen.is_empty());
+        assert_eq!(report.claims[0].failure, Some(Failure::ImageTooLarge));
+        assert!(write_report(&report).contains(";; image too large"));
     }
 }

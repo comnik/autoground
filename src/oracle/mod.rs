@@ -4,6 +4,7 @@
 //! when they need the label. Grouping is over the [`State`] the caller
 //! passed — typically a listing of paths or a file body.
 
+pub(crate) mod image;
 pub mod jev;
 
 use std::collections::hash_map::DefaultHasher;
@@ -14,6 +15,8 @@ use std::ops::Deref;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
+
+use image::Asset;
 
 pub use jev::{JevOracle, Transport, UreqTransport};
 
@@ -35,22 +38,36 @@ impl QuestionKind {
 
 /// System One `state` document and the digest a batch groups on.
 ///
-/// The digest is fixed here. [`Clone`] copies it with the JSON, so a caller
-/// that builds one state and clones it onto many questions serializes once.
+/// The digest is fixed here, from the JSON alone. [`Clone`] copies it with
+/// the JSON and any image assets. An asset's reference is already in the
+/// JSON, so the same image shares a digest and one POST.
 #[derive(Debug, Clone, PartialEq)]
 pub struct State {
     json: serde_json::Value,
+    assets: Vec<Asset>,
     digest: u64,
 }
 
 impl State {
     pub fn new(json: serde_json::Value) -> Self {
+        Self::with_assets(json, Vec::new())
+    }
+
+    pub(crate) fn with_assets(json: serde_json::Value, assets: Vec<Asset>) -> Self {
         let digest = digest_of(&json);
-        Self { json, digest }
+        Self {
+            json,
+            assets,
+            digest,
+        }
     }
 
     pub(crate) fn json(&self) -> &serde_json::Value {
         &self.json
+    }
+
+    pub(crate) fn assets(&self) -> &[Asset] {
+        &self.assets
     }
 
     pub(crate) fn digest(&self) -> u64 {
