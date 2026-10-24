@@ -1,23 +1,20 @@
-//! Re-check a brief against the files it cites.
+//! (Re-)check all claims in a brief.
 //!
-//! A claim supported by a witness is one sentence judged against the bodies of
-//! its paths. A claim supported by a sentence is discharged when that support
-//! is true and those sentences entail the claim. When the support is true and
-//! the sentences contradict the claim, the claim is false. A sentence that a
-//! claim or an assumption defines is a use of that lemma: it takes the lemma's
-//! value, and the proof is not asked again. `and`, `or`, and `not` stay Kleene.
+//! A witness can cite one or more paths. Paths are relative to the brief. $ in place of a
+//! path is bound to a specific file `check` is called on at runtime.
 //!
-//! A file larger than the body budget is sliced into parts. The witness is
-//! discharged when one part entails the sentence, so the proof cites the file
-//! and the kernel finds the region. A joint witness that does not fit is too
-//! large: the agent splits it into single-file witnesses, and each of those
-//! can be sliced. An image witness is one PNG or JPEG and is not sliced. A
-//! joint witness may mix text and images; the text still has to fit in one
-//! state. A witness that cites a `.brief` file is not sent. A brief is a
-//! model, not evidence.
+//! A claim can be supported directly by a witness, or indirectly through other claims.
 //!
-//! Check builds its own oracle requests. Sweep does not call these builders,
-//! so the two commands can be calibrated apart.
+//! A witness larger than the body budget is sliced into parts. The claim is discharged when
+//! any one part entails the sentence. If no part is sufficient on its own, then the user is
+//! forced to split the file into more coherent pieces. An image witness is one PNG or JPEG
+//! and is never broken into parts. A witness may mix text and images; the text still has to
+//! fit in one state. A witness that cites a `.brief` is rejected. A brief is a model, not
+//! evidence.
+//!
+//! Each claim is only judged once, no matter how many other claims reference it.
+//!
+//! `and`, `or`, and `not` are evaluated deterministically.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -111,13 +108,15 @@ pub struct Report {
 pub enum CheckError {
     Oracle(OracleError),
     Io(String),
+    /// `$` was used without a file, or a file was given to a brief with no `$`.
+    Bind(String),
 }
 
 impl std::fmt::Display for CheckError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CheckError::Oracle(err) => write!(f, "{err}"),
-            CheckError::Io(err) => write!(f, "{err}"),
+            CheckError::Io(err) | CheckError::Bind(err) => write!(f, "{err}"),
         }
     }
 }
@@ -128,6 +127,92 @@ impl From<OracleError> for CheckError {
     fn from(err: OracleError) -> Self {
         CheckError::Oracle(err)
     }
+}
+
+/// The file every `(witness $)` reads.
+#[derive(Debug, Clone)]
+pub struct BoundFile {
+    /// Path named in the oracle state and in the proof's cites.
+    pub cite: String,
+    /// Opened as given. An absolute path is this file, not a missing witness.
+    pub path: PathBuf,
+}
+
+/// Tickets enqueued for one brief, in the order [`Prepared::settle`] reads answers.
+pub struct Prepared {
+    work: Vec<Work>,
+    defs: HashSet<String>,
+    tickets: Vec<Ticket>,
+}
+
+impl Prepared {
+    pub fn tickets(&self) -> &[Ticket] {
+        &self.tickets
+    }
+
+    /// `answers` follows [`Prepared::tickets`]. An oracle error fails the report.
+    pub fn settle(self, answers: &[Result<Answer, OracleError>]) -> Result<Report, CheckError> {
+        let mut cursor = 0;
+        let mut judged = Vec::with_capacity(self.work.len());
+        for item in self.work {
+            judged.push(settle(item, answers, &mut cursor)?);
+        }
+        let lemmas = lemma_values(&judged, &self.defs);
+        let claims = judged.iter().map(|node| render(node, &lemmas)).collect();
+        Ok(Report { claims })
+    }
+}
+
+/// Whether any witness path is the symbol `$`.
+pub fn cites_dollar(claims: &[Proposition]) -> bool {
+    claims.iter().any(proposition_cites_dollar)
+}
+
+fn proposition_cites_dollar(proposition: &Proposition) -> bool {
+    match proposition {
+        Proposition::And(xs) | Proposition::Or(xs) => xs.iter().any(proposition_cites_dollar),
+        Proposition::Not(inner) => proposition_cites_dollar(inner),
+        Proposition::Claim { support, .. } => match support {
+            Support::Witness { paths } => paths.iter().any(|path| path == "$"),
+            Support::Sentence(inner) => proposition_cites_dollar(inner),
+        },
+        Proposition::Scope { body, .. } => body.iter().any(proposition_cites_dollar),
+        Proposition::Sentence(_) | Proposition::Assume(_) => false,
+    }
+}
+
+/// Enqueue every ticket for `claims`. Does not wait.
+///
+/// A brief that cites `$` needs `bound`. A `bound` file needs a brief that cites `$`.
+/// Either mismatch is [`CheckError::Bind`] and submits nothing.
+pub fn submit<O: Oracle>(
+    claims: &[Proposition],
+    base: &Path,
+    budget: usize,
+    bound: Option<&BoundFile>,
+    oracle: &mut O,
+) -> Result<Prepared, CheckError> {
+    match (cites_dollar(claims), bound) {
+        (true, None) => return Err(CheckError::Bind("`$` needs a file".into())),
+        (false, Some(_)) => {
+            return Err(CheckError::Bind("a file needs `(witness $)`".into()));
+        }
+        _ => {}
+    }
+    let defs = defined_heads(claims);
+    let mut work = Vec::with_capacity(claims.len());
+    for claim in claims {
+        work.push(prepare(claim, &defs, base, bound, budget, oracle)?);
+    }
+    let mut tickets = Vec::new();
+    for item in &work {
+        push_tickets(item, &mut tickets);
+    }
+    Ok(Prepared {
+        work,
+        defs,
+        tickets,
+    })
 }
 
 /// Judge `claims` against the files they cite. A witness path is relative to `base`.
@@ -141,27 +226,20 @@ pub fn check<O: Oracle>(
     budget: usize,
     oracle: &mut O,
 ) -> Result<Report, CheckError> {
-    let defs = defined_heads(claims);
-    let mut work = Vec::with_capacity(claims.len());
-    for claim in claims {
-        work.push(prepare(claim, &defs, base, budget, oracle)?);
-    }
-    let tickets = {
-        let mut tickets = Vec::new();
-        for item in &work {
-            push_tickets(item, &mut tickets);
-        }
-        tickets
-    };
-    let answers = oracle.wait_many(&tickets);
-    let mut cursor = 0;
-    let mut judged = Vec::with_capacity(work.len());
-    for item in work {
-        judged.push(settle(item, &answers, &mut cursor)?);
-    }
-    let lemmas = lemma_values(&judged, &defs);
-    let claims = judged.iter().map(|node| render(node, &lemmas)).collect();
-    Ok(Report { claims })
+    check_bound(claims, base, budget, None, oracle)
+}
+
+/// [`check`], with `bound` standing for every `(witness $)`.
+pub fn check_bound<O: Oracle>(
+    claims: &[Proposition],
+    base: &Path,
+    budget: usize,
+    bound: Option<&BoundFile>,
+    oracle: &mut O,
+) -> Result<Report, CheckError> {
+    let prepared = submit(claims, base, budget, bound, oracle)?;
+    let answers = oracle.wait_many(prepared.tickets());
+    prepared.settle(&answers)
 }
 
 fn defined_heads(claims: &[Proposition]) -> HashSet<String> {
@@ -270,6 +348,7 @@ fn prepare<O: Oracle>(
     proposition: &Proposition,
     defs: &HashSet<String>,
     base: &Path,
+    bound: Option<&BoundFile>,
     budget: usize,
     oracle: &mut O,
 ) -> Result<Work, CheckError> {
@@ -291,9 +370,11 @@ fn prepare<O: Oracle>(
             })
         }
         Proposition::Claim { sentence, support } => match support {
-            Support::Witness { paths } => prepare_witness(sentence, paths, base, budget, oracle),
+            Support::Witness { paths } => {
+                prepare_witness(sentence, paths, base, bound, budget, oracle)
+            }
             Support::Sentence(support) => {
-                let child = prepare(support, defs, base, budget, oracle)?;
+                let child = prepare(support, defs, base, bound, budget, oracle)?;
                 let implication = Box::new(prepare_implication(sentence, support, oracle));
                 Ok(Work {
                     text: sentence.clone(),
@@ -318,7 +399,7 @@ fn prepare<O: Oracle>(
         Proposition::Scope { intent, body } => {
             let mut children = Vec::with_capacity(body.len());
             for claim in body {
-                children.push(prepare(claim, defs, base, budget, oracle)?);
+                children.push(prepare(claim, defs, base, bound, budget, oracle)?);
             }
             Ok(Work {
                 text: intent.clone().unwrap_or_else(|| "detail".to_string()),
@@ -330,10 +411,14 @@ fn prepare<O: Oracle>(
                 kind: Kind::Scope,
             })
         }
-        Proposition::And(xs) => prepare_bool("and", Kind::And, xs, defs, base, budget, oracle),
-        Proposition::Or(xs) => prepare_bool("or", Kind::Or, xs, defs, base, budget, oracle),
+        Proposition::And(xs) => {
+            prepare_bool("and", Kind::And, xs, defs, base, bound, budget, oracle)
+        }
+        Proposition::Or(xs) => {
+            prepare_bool("or", Kind::Or, xs, defs, base, bound, budget, oracle)
+        }
         Proposition::Not(inner) => {
-            let child = prepare(inner, defs, base, budget, oracle)?;
+            let child = prepare(inner, defs, base, bound, budget, oracle)?;
             Ok(Work {
                 text: "not".to_string(),
                 failure: None,
@@ -353,12 +438,13 @@ fn prepare_bool<O: Oracle>(
     xs: &[Proposition],
     defs: &HashSet<String>,
     base: &Path,
+    bound: Option<&BoundFile>,
     budget: usize,
     oracle: &mut O,
 ) -> Result<Work, CheckError> {
     let mut children = Vec::with_capacity(xs.len());
     for proposition in xs {
-        children.push(prepare(proposition, defs, base, budget, oracle)?);
+        children.push(prepare(proposition, defs, base, bound, budget, oracle)?);
     }
     Ok(Work {
         text: text.to_string(),
@@ -375,13 +461,15 @@ fn prepare_witness<O: Oracle>(
     sentence: &str,
     paths: &[String],
     base: &Path,
+    bound: Option<&BoundFile>,
     budget: usize,
     oracle: &mut O,
 ) -> Result<Work, CheckError> {
+    let cites: Vec<String> = paths.iter().map(|path| cite_path(path, bound)).collect();
     let mut work = Work {
         text: sentence.to_string(),
         failure: None,
-        cites: paths.to_vec(),
+        cites: cites.clone(),
         children: Vec::new(),
         implication: None,
         asked: Vec::new(),
@@ -392,15 +480,15 @@ fn prepare_witness<O: Oracle>(
         return Ok(work);
     }
     let mut located = Vec::with_capacity(paths.len());
-    for path in paths {
-        match locate(base, path) {
+    for (path, cite) in paths.iter().zip(cites) {
+        match locate(base, path, bound) {
             Locate::Missing => {
-                work.failure = Some(Failure::MissingFile { path: path.clone() });
-                work.cites = vec![path.clone()];
+                work.failure = Some(Failure::MissingFile { path: cite.clone() });
+                work.cites = vec![cite];
                 return Ok(work);
             }
             Locate::Io(err) => return Err(CheckError::Io(err)),
-            Locate::File { full, len } => located.push((path.clone(), full, len)),
+            Locate::File { full, len } => located.push((cite, full, len)),
         }
     }
     let mut files = Vec::with_capacity(located.len());
@@ -438,7 +526,8 @@ enum WitnessFile {
 }
 
 fn load_witness(path: &str, full: &Path, len: u64) -> Result<WitnessLoad, CheckError> {
-    let Some(format) = image_extension(path) else {
+    let opened = full.to_string_lossy();
+    let Some(format) = image_extension(path).or_else(|| image_extension(&opened)) else {
         return Ok(WitnessLoad::File(WitnessFile::Text {
             path: path.to_string(),
             full: full.to_path_buf(),
@@ -727,7 +816,31 @@ enum Locate {
     File { full: PathBuf, len: u64 },
 }
 
-fn locate(base: &Path, pin: &str) -> Locate {
+fn cite_path(path: &str, bound: Option<&BoundFile>) -> String {
+    if path == "$" {
+        bound
+            .map(|bound| bound.cite.clone())
+            .unwrap_or_else(|| "$".to_string())
+    } else {
+        path.to_string()
+    }
+}
+
+fn locate(base: &Path, pin: &str, bound: Option<&BoundFile>) -> Locate {
+    if pin == "$" {
+        let Some(bound) = bound else {
+            return Locate::Missing;
+        };
+        return match fs::metadata(&bound.path) {
+            Ok(meta) if meta.is_file() => Locate::File {
+                full: bound.path.clone(),
+                len: meta.len(),
+            },
+            Ok(_) => Locate::Missing,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Locate::Missing,
+            Err(err) => Locate::Io(format!("{}: {err}", bound.cite)),
+        };
+    }
     let path = Path::new(pin);
     if path.is_absolute()
         || path
@@ -1865,5 +1978,70 @@ mod tests {
         assert!(oracle.seen.is_empty());
         assert_eq!(report.claims[0].failure, Some(Failure::ImageTooLarge));
         assert!(write_report(&report).contains(";; image too large"));
+    }
+
+    #[test]
+    fn a_dollar_witness_reads_the_bound_file() {
+        let dir = scratch("dollar");
+        let file = dir.join("note.txt");
+        fs::write(&file, "alpha\n").unwrap();
+        let bound = BoundFile {
+            cite: "note.txt".to_string(),
+            path: file,
+        };
+        let mut oracle = Rec::new(entailed);
+        let report = check_bound(
+            &compiled("(claim (\"alpha\") (witness $))"),
+            Path::new("/tmp"),
+            DEFAULT_BODY_BYTES,
+            Some(&bound),
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(oracle.seen.len(), 1);
+        assert_eq!(oracle.seen[0].state["path"], "note.txt");
+        assert_eq!(oracle.seen[0].state["body"], "alpha\n");
+    }
+
+    #[test]
+    fn a_dollar_without_a_file_submits_nothing() {
+        let mut oracle = Rec::new(entailed);
+        let err = match submit(
+            &compiled("(claim (\"alpha\") (witness $))"),
+            Path::new("."),
+            DEFAULT_BODY_BYTES,
+            None,
+            &mut oracle,
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("`$` without a file submitted tickets"),
+        };
+        assert!(err.to_string().contains("`$` needs a file"), "{err}");
+        assert!(oracle.seen.is_empty());
+    }
+
+    #[test]
+    fn a_file_without_a_dollar_submits_nothing() {
+        let bound = BoundFile {
+            cite: "note.txt".to_string(),
+            path: PathBuf::from("note.txt"),
+        };
+        let mut oracle = Rec::new(entailed);
+        let err = match submit(
+            &compiled("(claim (\"alpha\") (witness \"note.txt\"))"),
+            Path::new("."),
+            DEFAULT_BODY_BYTES,
+            Some(&bound),
+            &mut oracle,
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("a file without `$` submitted tickets"),
+        };
+        assert!(
+            err.to_string().contains("a file needs `(witness $)`"),
+            "{err}"
+        );
+        assert!(oracle.seen.is_empty());
     }
 }

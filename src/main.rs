@@ -45,6 +45,8 @@ enum Commands {
     Check {
         /// Brief source, a `.brief` file, or a Markdown file of `brief` blocks.
         input: String,
+        /// File every `(witness $)` reads. Other witness paths stay relative to the brief.
+        file: Option<PathBuf>,
         /// Cost cap for this check, in cents. The request that crosses the
         /// cap still finishes. Later requests are refused.
         #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
@@ -168,7 +170,12 @@ enum SweepUniverse {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Check { input, budget, out } => match check_cmd(&input, budget, out.as_deref()) {
+        Commands::Check {
+            input,
+            file,
+            budget,
+            out,
+        } => match check_cmd(&input, file.as_deref(), budget, out.as_deref()) {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
                 eprintln!("{err}");
@@ -260,7 +267,9 @@ fn sweep_cmd(
     let started = Instant::now();
     let base = brief_dir(input);
     let (_src, _program, compiled) = load_compiled(input, &base)?;
-    sweep::ensure_constraints(&compiled.claims)?;
+    if !check::cites_dollar(&compiled.claims) {
+        return Err("a sweep brief needs `(witness $)`".into());
+    }
     let log = Log::create_sweep()?;
     let mut oracle = JevOracle::from_env(log.clone())?;
     oracle.set_run_cost_limit_usd(budget_cents as f64 / 100.0);
@@ -271,6 +280,7 @@ fn sweep_cmd(
     };
     let outcome = sweep::sweep_watching(
         &compiled.claims,
+        &base,
         scope,
         filter,
         &mut oracle,
@@ -364,6 +374,7 @@ fn sweep_cmd(
 
 fn check_cmd(
     input: &str,
+    file: Option<&Path>,
     budget_cents: u64,
     out: Option<&Path>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
@@ -377,6 +388,15 @@ fn check_cmd(
     };
     let base = brief_dir(input);
     let (src, program, compiled) = load_compiled(input, &base)?;
+    let bound = file.map(|path| check::BoundFile {
+        cite: path.display().to_string(),
+        path: path.to_path_buf(),
+    });
+    match (check::cites_dollar(&compiled.claims), bound.is_some()) {
+        (true, false) => return Err("`$` needs a file".into()),
+        (false, true) => return Err("a file needs `(witness $)`".into()),
+        _ => {}
+    }
     let log = Log::create_under(out.unwrap_or_else(|| Path::new(DEFAULT_TRACE_DIR)))?;
     if let Some(live) = &live {
         let ui = live.clone();
@@ -390,6 +410,7 @@ fn check_cmd(
         &compiled.claims,
         &compiled.assumptions,
         &base,
+        bound.as_ref(),
         &mut oracle,
         &log,
         live,
@@ -403,12 +424,13 @@ fn finish_check<O: Oracle>(
     claims: &[Proposition],
     assumptions: &[String],
     base: &Path,
+    bound: Option<&check::BoundFile>,
     oracle: &mut O,
     log: &Log,
     live: Option<autoground::report::run::Live>,
     started: std::time::Instant,
 ) -> Result<u8, Box<dyn std::error::Error>> {
-    let report = check::check(claims, base, DEFAULT_BODY_BYTES, oracle)?;
+    let report = check::check_bound(claims, base, DEFAULT_BODY_BYTES, bound, oracle)?;
     log.clear_hook();
     let usage = oracle.usage();
     let flights = oracle.flights().to_vec();

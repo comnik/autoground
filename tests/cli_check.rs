@@ -208,3 +208,39 @@ fn check_rejects_markdown_without_brief_blocks() {
     assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(stderr.contains("no brief blocks"), "{stderr}");
 }
+
+#[test]
+fn check_rejects_a_dollar_without_a_file() {
+    let dir = scratch("dollar");
+    let brief = dir.join("model.brief");
+    std::fs::write(&brief, "(claim (\"alpha\") (witness $))\n").unwrap();
+    let out = bin()
+        .args(["check", brief.to_str().unwrap()])
+        .env_remove("TYPESAFE_API_KEY")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("`$` needs a file"), "{stderr}");
+    assert!(!stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
+}
+
+#[test]
+fn check_rejects_a_file_without_a_dollar() {
+    let dir = scratch("file");
+    let brief = dir.join("model.brief");
+    std::fs::write(&brief, "(claim (\"alpha\") (witness \"note.txt\"))\n").unwrap();
+    let note = dir.join("note.txt");
+    std::fs::write(&note, "alpha\n").unwrap();
+    let out = bin()
+        .args(["check", brief.to_str().unwrap(), note.to_str().unwrap()])
+        .env_remove("TYPESAFE_API_KEY")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("a file needs `(witness $)`"), "{stderr}");
+    assert!(!stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
+}

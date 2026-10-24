@@ -16,20 +16,25 @@ fn scratch(label: &str) -> PathBuf {
 }
 
 #[test]
-fn sweep_rejects_a_witness_before_the_oracle() {
-    let dir = scratch("witness");
+fn sweep_rejects_a_brief_without_a_dollar_before_the_oracle() {
+    let dir = scratch("dollar");
     let brief = dir.join("model.brief");
     std::fs::write(&brief, "(claim (\"alpha\") (witness \"note.txt\"))\n").unwrap();
+    std::fs::write(dir.join("note.txt"), "alpha\n").unwrap();
     let out = bin()
         .current_dir(&dir)
         .args(["sweep", "model.brief"])
+        .env_remove("TYPESAFE_API_KEY")
         .output()
         .unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(!out.status.success(), "{stderr}");
     assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(
-        stderr.contains("`witness` is not a sweep constraint"),
+        stderr.contains("a sweep brief needs `(witness $)`"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("TYPESAFE_API_KEY"),
         "{stderr}"
     );
 }
