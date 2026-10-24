@@ -1,37 +1,32 @@
-//! Judge a witness-free brief against every readable database in a universe.
+//! Judge a brief against each candidate file by submitting it to check.
 //!
-//! The universe is the current directory, a transcript, or a git diff. On the
-//! filesystem, sweep optionally keeps paths that match a natural-language
-//! filter, then judges each remaining file. A filesystem PNG or JPEG is one
-//! image asset. Other non-text is skipped. A transcript and a diff stay text.
-//! Filter questions share a listing state, so the oracle batches them. File
-//! questions share that file's body. A diff judges each change's patch. A
-//! transcript judges each readable leaf.
-//! Different bodies are independent states and overlap. A database matches
-//! when any top-level claim is true. A request that fails for one database is
-//! reported on that database. The others are still judged.
-//!
-//! Sweep builds its own oracle requests. The file Choice matches check's
-//! wording today, and the two are free to diverge.
+//! The filesystem lists the working tree. A transcript and a git diff are
+//! written out as one file per call or patch, then swept the same way.
+//! `--filter` stays on the filesystem and finishes before any file is
+//! submitted. Every candidate is one work item: the same brief, and that
+//! file bound to `$`. Sweep submits every item before it waits. A file
+//! matches when every top-level claim is true.
+
+mod diff;
+mod transcript;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde_json::{json, Value as Json};
+use serde_json::json;
 
-use crate::check::{split_body, DEFAULT_BODY_BYTES, MAX_SLICED_BYTES};
+use crate::check::{self, BoundFile, CheckError, DEFAULT_BODY_BYTES, MAX_SLICED_BYTES};
 use crate::confidence::SUPPORT;
-use crate::oracle::image::{image_asset, image_extension, Asset, MAX_IMAGE_BYTES};
+use crate::oracle::image::{image_asset, image_extension, MAX_IMAGE_BYTES};
 use crate::oracle::jev::QUESTION_BUDGET;
-use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, State, Ticket};
-use crate::syntax::{Proposition, Support};
-use crate::universe::{Diff, Filesystem, Transcript, Universe, UniverseError};
+use crate::oracle::{Answer, Classification, Oracle, OracleError, State, Ticket};
+use crate::syntax::Proposition;
+use crate::universe::{Filesystem, Universe, UniverseError};
 use crate::value::Value;
 
 const FILTER_QUESTION: &str = "Does `path` match `filter`?";
-const DOCUMENT_QUESTION: &str = "How does `body` at `path` ground the proposition?";
-const PART_QUESTION: &str = "How does this part of `body` at `path` ground the proposition? Text outside this part is not visible.";
 
 #[derive(Debug)]
 pub enum SweepError {
@@ -51,7 +46,7 @@ impl std::fmt::Display for SweepError {
 
 impl std::error::Error for SweepError {}
 
-/// One file with at least one true top-level claim.
+/// One file whose every top-level claim is true.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
     pub path: PathBuf,
@@ -96,42 +91,7 @@ pub fn failed_message(failed: usize) -> String {
     }
 }
 
-/// A sweep brief is boolean structure over sentences. `claim`, `witness`,
-/// `assume`, and `detail` belong to check.
-pub fn ensure_constraints(claims: &[Proposition]) -> Result<(), SweepError> {
-    for claim in claims {
-        reject(claim)?;
-    }
-    Ok(())
-}
-
-fn reject(proposition: &Proposition) -> Result<(), SweepError> {
-    match proposition {
-        Proposition::Claim { support, .. } => {
-            let message = match support {
-                Support::Witness { .. } => "`witness` is not a sweep constraint",
-                Support::Sentence(_) => "`claim` is not a sweep constraint",
-            };
-            Err(SweepError::Constraint(message.into()))
-        }
-        Proposition::Assume(_) => Err(SweepError::Constraint(
-            "`assume` is not a sweep constraint".into(),
-        )),
-        Proposition::Scope { .. } => Err(SweepError::Constraint(
-            "`detail` is not a sweep constraint".into(),
-        )),
-        Proposition::And(xs) | Proposition::Or(xs) => {
-            for proposition in xs {
-                reject(proposition)?;
-            }
-            Ok(())
-        }
-        Proposition::Not(inner) => reject(inner),
-        Proposition::Sentence(_) => Ok(()),
-    }
-}
-
-/// Where a sweep reads its databases.
+/// Where a sweep reads its candidates.
 pub enum Scope<'a> {
     /// The filesystem at `root`.
     Files {
@@ -150,11 +110,12 @@ pub enum Scope<'a> {
 
 pub fn sweep<O: Oracle>(
     claims: &[Proposition],
+    base: &Path,
     scope: Scope<'_>,
     filter: Option<&str>,
     oracle: &mut O,
 ) -> Result<Outcome, SweepError> {
-    sweep_watching(claims, scope, filter, oracle, &mut |_| {})
+    sweep_watching(claims, base, scope, filter, oracle, &mut |_| {})
 }
 
 /// Judge `claims` and call `watch` as the report changes.
@@ -163,20 +124,21 @@ pub fn sweep<O: Oracle>(
 /// [`Outcome`] is the finished report.
 pub fn sweep_watching<O: Oracle>(
     claims: &[Proposition],
+    base: &Path,
     scope: Scope<'_>,
     filter: Option<&str>,
     oracle: &mut O,
     watch: &mut dyn FnMut(&Snapshot),
 ) -> Result<Outcome, SweepError> {
-    ensure_constraints(claims)?;
+    if !check::cites_dollar(claims) {
+        return Err(SweepError::Constraint(
+            "a sweep brief needs `(witness $)`".into(),
+        ));
+    }
     if filter.is_some() && !matches!(&scope, Scope::Files { .. }) {
         return Err(SweepError::Constraint(
             "`filter` applies to a filesystem sweep".into(),
         ));
-    }
-    let sentences = sentences_of(claims);
-    if sentences.is_empty() {
-        return Ok(render(Vec::new(), Vec::new(), false, 0, 0));
     }
     let opened = open(scope)?;
     let paths = opened.ids()?;
@@ -189,19 +151,54 @@ pub fn sweep_watching<O: Oracle>(
         },
         None => paths,
     };
-    let mut bodies = Vec::new();
+    let mut candidates = Vec::new();
     for rel in &kept {
-        if let Some(body) = opened.load(rel)? {
-            bodies.push(body);
+        if let Some(candidate) = opened.candidate(rel)? {
+            candidates.push(candidate);
         }
     }
-    judge(claims, &sentences, bodies, oracle, watch)
+    judge(claims, base, candidates, oracle, watch)
+}
+
+struct Candidate {
+    /// Printed path: absolute for a working-tree file, the git path, or the transcript id.
+    label: PathBuf,
+    /// File check reads. For a diff or a transcript this lives under `scratch`.
+    path: PathBuf,
+}
+
+struct Scratch {
+    path: PathBuf,
+}
+
+impl Scratch {
+    fn new() -> Result<Self, SweepError> {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join("autoground").join(format!(
+            "sweep-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).map_err(|err| SweepError::Io(format!("creating {path:?}: {err}")))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 enum Opened<'a> {
-    Files { root: &'a Path, files: Filesystem },
-    Transcript(Transcript),
-    Diff(Diff),
+    Files {
+        root: &'a Path,
+        files: Filesystem,
+    },
+    Exploded {
+        scratch: Scratch,
+        items: Vec<Candidate>,
+    },
 }
 
 fn open(scope: Scope<'_>) -> Result<Opened<'_>, SweepError> {
@@ -213,40 +210,101 @@ fn open(scope: Scope<'_>) -> Result<Opened<'_>, SweepError> {
             }
             Ok(Opened::Files { root, files })
         }
-        Scope::Transcript(path) => Ok(Opened::Transcript(
-            Transcript::open(path).map_err(universe_io)?,
-        )),
+        Scope::Transcript(path) => {
+            let exchanges = transcript::exchanges(path).map_err(SweepError::Io)?;
+            let scratch = Scratch::new()?;
+            let owned: Vec<(&str, &str)> = exchanges
+                .iter()
+                .map(|exchange| (exchange.id.as_str(), exchange.body.as_str()))
+                .collect();
+            let items = write_bodies(&scratch, &owned)?;
+            Ok(Opened::Exploded { scratch, items })
+        }
         Scope::Diff {
             root,
             git_args,
             hide,
-        } => Ok(Opened::Diff(
-            Diff::open(root, git_args, hide).map_err(universe_io)?,
-        )),
+        } => {
+            let patches = diff::changes(root, git_args, hide).map_err(SweepError::Io)?;
+            let scratch = Scratch::new()?;
+            let items = write_bodies(
+                &scratch,
+                &patches
+                    .iter()
+                    .map(|patch| (patch.id.as_str(), patch.body.as_str()))
+                    .collect::<Vec<_>>(),
+            )?;
+            Ok(Opened::Exploded { scratch, items })
+        }
     }
+}
+
+fn write_bodies(scratch: &Scratch, bodies: &[(&str, &str)]) -> Result<Vec<Candidate>, SweepError> {
+    let mut items = Vec::with_capacity(bodies.len());
+    for (id, body) in bodies {
+        let rel = Path::new(id);
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(SweepError::Io(format!("`{id}` is not a relative path")));
+        }
+        let path = scratch.path.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| SweepError::Io(format!("creating {}: {err}", parent.display())))?;
+        }
+        fs::write(&path, body)
+            .map_err(|err| SweepError::Io(format!("writing {}: {err}", path.display())))?;
+        items.push(Candidate {
+            label: PathBuf::from(id),
+            path,
+        });
+    }
+    Ok(items)
 }
 
 impl Opened<'_> {
     fn ids(&self) -> Result<Vec<String>, SweepError> {
         match self {
             Opened::Files { files, .. } => readable_ids(files),
-            Opened::Transcript(tree) => readable_ids(tree),
-            Opened::Diff(diff) => readable_ids(diff),
+            Opened::Exploded { scratch, items } => {
+                let _ = &scratch.path;
+                Ok(items
+                    .iter()
+                    .map(|item| item.label.display().to_string())
+                    .collect())
+            }
         }
     }
 
-    fn load(&self, rel: &str) -> Result<Option<Body>, SweepError> {
+    fn candidate(&self, rel: &str) -> Result<Option<Candidate>, SweepError> {
         match self {
-            Opened::Files { root, .. } => load_body(root, rel),
-            Opened::Transcript(tree) => read_database(tree, rel),
-            Opened::Diff(diff) => read_database(diff, rel),
+            Opened::Files { root, .. } => {
+                let path = root.join(rel);
+                if !admit(&path)? {
+                    return Ok(None);
+                }
+                Ok(Some(Candidate {
+                    label: absolute(root, rel),
+                    path,
+                }))
+            }
+            Opened::Exploded { items, .. } => {
+                let Some(item) = items.iter().find(|item| item.label.display().to_string() == rel) else {
+                    return Ok(None);
+                };
+                if !admit(&item.path)? {
+                    return Ok(None);
+                }
+                Ok(Some(Candidate {
+                    label: item.label.clone(),
+                    path: item.path.clone(),
+                }))
+            }
         }
     }
-}
-
-fn read_database(universe: &impl Universe, rel: &str) -> Result<Option<Body>, SweepError> {
-    let text = universe.read(rel, usize::MAX).map_err(universe_io)?;
-    Ok(body_from_text(rel, PathBuf::from(rel), text))
 }
 
 /// Files in the current view. A summarized database contributes its readable descendants.
@@ -346,138 +404,160 @@ fn matches_filter(answer: &Answer) -> bool {
     answer.noul.unwrap_or(0.0) >= SUPPORT
 }
 
-struct Body {
-    rel: String,
-    label: PathBuf,
-    parts: Vec<String>,
-    assets: Vec<Asset>,
-}
-
 fn judge<O: Oracle>(
     claims: &[Proposition],
-    sentences: &[String],
-    bodies: Vec<Body>,
+    base: &Path,
+    candidates: Vec<Candidate>,
     oracle: &mut O,
     watch: &mut dyn FnMut(&Snapshot),
 ) -> Result<Outcome, SweepError> {
-    let candidates = bodies.len();
-    if candidates == 0 {
+    let total = candidates.len();
+    if total == 0 {
         return Ok(render(Vec::new(), Vec::new(), false, 0, 0));
     }
-    let mut files: HashMap<String, FileState> = HashMap::new();
-    let mut pending: Vec<(Ticket, Part)> = Vec::new();
-    for body in &bodies {
-        let expected = sentences.len() * body.parts.len();
-        files.insert(
-            body.rel.clone(),
-            FileState {
-                label: body.label.clone(),
-                expected,
-                left: expected,
-                got: Vec::new(),
-                errors: Vec::new(),
-                limited: false,
-            },
-        );
-        queue_body(body, sentences, oracle, &mut pending);
+    let mut jobs: Vec<Option<FileJob>> = Vec::with_capacity(total);
+    let mut pending: Vec<(Ticket, Queued)> = Vec::new();
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        let bound = BoundFile {
+            cite: candidate.label.display().to_string(),
+            path: candidate.path,
+        };
+        let prepared = check::submit(claims, base, DEFAULT_BODY_BYTES, Some(&bound), oracle)
+            .map_err(check_err)?;
+        for ticket in prepared.tickets() {
+            pending.push((*ticket, Queued { ticket: *ticket, index }));
+        }
+        jobs.push(Some(FileJob {
+            label: candidate.label,
+            prepared,
+            answers: HashMap::new(),
+        }));
     }
     let mut matches = Vec::new();
     let mut errors = Vec::new();
     let mut incomplete = false;
     let mut judged = 0usize;
     let mut done = 0usize;
-    emit_progress(watch, &mut matches, &mut errors, done, candidates);
-    while !pending.is_empty() {
-        for (part, answer) in take_ready(oracle, &mut pending)? {
-            let state = files.get_mut(&part.rel).expect("queued file");
-            match answer {
-                Ok(answer) => state.got.push(PartAnswer {
-                    sentence: part.sentence,
-                    answer,
-                }),
-                Err(OracleError::Limit(_)) => state.limited = true,
-                Err(err) => note_error(&mut state.errors, &err),
-            }
-            state.left = state.left.saturating_sub(1);
-        }
-        let finished: Vec<String> = files
-            .iter()
-            .filter(|(_, state)| state.left == 0)
-            .map(|(rel, _)| rel.clone())
-            .collect();
-        for rel in finished {
-            let state = files.remove(&rel).expect("finished file");
-            settle(
-                state,
-                claims,
-                sentences,
-                &mut matches,
-                &mut errors,
-                &mut incomplete,
-                &mut judged,
-            );
-            done += 1;
-        }
-        emit_progress(watch, &mut matches, &mut errors, done, candidates);
+    emit_progress(watch, &mut matches, &mut errors, done, total);
+    while settle_next(
+        &mut jobs,
+        &mut matches,
+        &mut errors,
+        &mut incomplete,
+        &mut judged,
+    ) {
+        done += 1;
+        emit_progress(watch, &mut matches, &mut errors, done, total);
     }
-    Ok(render(matches, errors, incomplete, judged, candidates))
+    while !pending.is_empty() {
+        for (queued, answer) in take_ready(oracle, &mut pending)? {
+            let job = jobs[queued.index].as_mut().expect("file still open");
+            job.answers.insert(queued.ticket, answer);
+        }
+        while settle_next(
+            &mut jobs,
+            &mut matches,
+            &mut errors,
+            &mut incomplete,
+            &mut judged,
+        ) {
+            done += 1;
+            emit_progress(watch, &mut matches, &mut errors, done, total);
+        }
+    }
+    Ok(render(matches, errors, incomplete, judged, total))
 }
 
-struct Part {
-    rel: String,
-    sentence: String,
+struct Queued {
+    ticket: Ticket,
+    index: usize,
 }
 
-struct PartAnswer {
-    sentence: String,
-    answer: Answer,
-}
-
-struct FileState {
+struct FileJob {
     label: PathBuf,
-    expected: usize,
-    left: usize,
-    got: Vec<PartAnswer>,
-    errors: Vec<String>,
-    limited: bool,
+    prepared: check::Prepared,
+    answers: HashMap<Ticket, Result<Answer, OracleError>>,
 }
 
-fn settle(
-    state: FileState,
-    claims: &[Proposition],
-    sentences: &[String],
+/// Settle one file whose tickets have all arrived.
+fn settle_next(
+    jobs: &mut [Option<FileJob>],
+    matches: &mut Vec<Match>,
+    errors: &mut Vec<FileError>,
+    incomplete: &mut bool,
+    judged: &mut usize,
+) -> bool {
+    for slot in jobs.iter_mut() {
+        let ready = slot
+            .as_ref()
+            .is_some_and(|job| job.answers.len() == job.prepared.tickets().len());
+        if !ready {
+            continue;
+        }
+        let job = slot.take().expect("ready file");
+        settle_file(job, matches, errors, incomplete, judged);
+        return true;
+    }
+    false
+}
+
+fn settle_file(
+    job: FileJob,
     matches: &mut Vec<Match>,
     errors: &mut Vec<FileError>,
     incomplete: &mut bool,
     judged: &mut usize,
 ) {
-    if state.limited {
+    let answers: Vec<Result<Answer, OracleError>> = job
+        .prepared
+        .tickets()
+        .iter()
+        .map(|ticket| {
+            job.answers
+                .get(ticket)
+                .cloned()
+                .unwrap_or_else(|| Err(OracleError::Parse("missing oracle answer".into())))
+        })
+        .collect();
+    let mut limited = false;
+    let mut messages = Vec::new();
+    for answer in &answers {
+        match answer {
+            Ok(_) => {}
+            Err(OracleError::Limit(_)) => limited = true,
+            Err(err) => note_error(&mut messages, err),
+        }
+    }
+    if limited {
         *incomplete = true;
     }
-    if !state.errors.is_empty() {
+    if !messages.is_empty() {
         errors.push(FileError {
-            path: state.label,
-            message: state.errors.join("; "),
+            path: job.label,
+            message: messages.join("; "),
         });
         return;
     }
-    if state.got.len() != state.expected {
-        *incomplete = true;
+    if limited {
         return;
     }
+    let report = match job.prepared.settle(&answers) {
+        Ok(report) => report,
+        Err(err) => {
+            errors.push(FileError {
+                path: job.label,
+                message: err.to_string(),
+            });
+            return;
+        }
+    };
     *judged += 1;
-    let values = sentence_values(sentences, &state.got);
-    let matched: Vec<String> = claims
-        .iter()
-        .filter(|claim| value_of(claim, &values) == Value::True)
-        .map(statement)
-        .collect();
-    if matched.is_empty() {
+    if report.claims.is_empty() || report.claims.iter().any(|claim| claim.value != Value::True) {
         return;
     }
     matches.push(Match {
-        path: state.label,
-        claims: matched,
+        path: job.label,
+        claims: report.claims.into_iter().map(|claim| claim.text).collect(),
     });
 }
 
@@ -488,216 +568,48 @@ fn note_error(errors: &mut Vec<String>, err: &OracleError) {
     }
 }
 
-fn queue_body<O: Oracle>(
-    body: &Body,
-    sentences: &[String],
-    oracle: &mut O,
-    pending: &mut Vec<(Ticket, Part)>,
-) {
-    let total = body.parts.len() as u32;
-    for (index, part) in body.parts.iter().enumerate() {
-        let state = document_state(&body.rel, part, index as u32, total, &body.assets);
-        for sentence in sentences {
-            let class = Classification {
-                state: state.clone(),
-                kind: QuestionKind::Choice,
-                instructions: json!({
-                    "proposition": sentence,
-                    "question": if total > 1 { PART_QUESTION } else { DOCUMENT_QUESTION },
-                }),
-                criteria: document_criteria(),
-            };
-            pending.push((
-                oracle.submit(class),
-                Part {
-                    rel: body.rel.clone(),
-                    sentence: sentence.clone(),
-                },
-            ));
+fn admit(path: &Path) -> Result<bool, SweepError> {
+    let meta = fs::metadata(path)
+        .map_err(|err| SweepError::Io(format!("{}: {err}", path.display())))?;
+    if !meta.is_file() {
+        return Ok(false);
+    }
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    if is_brief_name(name) {
+        return Ok(false);
+    }
+    let text = path.to_string_lossy();
+    if let Some(format) = image_extension(&text) {
+        if meta.len() > MAX_IMAGE_BYTES as u64 {
+            return Ok(false);
         }
-    }
-}
-
-fn document_state(path: &str, body: &str, index: u32, total: u32, assets: &[Asset]) -> State {
-    let json = if total > 1 {
-        json!({
-            "path": path,
-            "body": body,
-            "part": index + 1,
-            "parts": total,
-        })
-    } else {
-        json!({
-            "path": path,
-            "body": body,
-        })
-    };
-    if total == 1 && !assets.is_empty() {
-        State::with_assets(json, assets.to_vec())
-    } else {
-        State::new(json)
-    }
-}
-
-fn document_criteria() -> Json {
-    json!({
-        "entailed": "`body` supplies information that makes the proposition true",
-        "contradicted": "`body` supplies information that makes the proposition false",
-        "neutral": "`body` neither supports nor refutes the proposition",
-    })
-}
-
-fn sentence_values(sentences: &[String], answers: &[PartAnswer]) -> HashMap<String, Value> {
-    let mut values = HashMap::new();
-    for sentence in sentences {
-        let matching: Vec<&Answer> = answers
-            .iter()
-            .filter(|answer| answer.sentence == *sentence)
-            .map(|answer| &answer.answer)
-            .collect();
-        values.insert(sentence.clone(), settle_parts(&matching));
-    }
-    values
-}
-
-fn settle_parts(answers: &[&Answer]) -> Value {
-    let mut contradicted = false;
-    for answer in answers {
-        match polarity(answer) {
-            Some(Value::True) => return Value::True,
-            Some(Value::False) => contradicted = true,
-            _ => {}
-        }
-    }
-    if contradicted {
-        Value::False
-    } else {
-        Value::Unknown
-    }
-}
-
-fn polarity(answer: &Answer) -> Option<Value> {
-    if answer.confidence < SUPPORT {
-        return None;
-    }
-    match answer.choice.as_str() {
-        "entailed" => Some(Value::True),
-        "contradicted" => Some(Value::False),
-        _ => None,
-    }
-}
-
-fn value_of(proposition: &Proposition, sentences: &HashMap<String, Value>) -> Value {
-    match proposition {
-        Proposition::Sentence(sentence) => {
-            sentences.get(sentence).copied().unwrap_or(Value::Unknown)
-        }
-        Proposition::And(xs) => xs
-            .iter()
-            .map(|proposition| value_of(proposition, sentences))
-            .reduce(Value::and)
-            .unwrap_or(Value::True),
-        Proposition::Or(xs) => xs
-            .iter()
-            .map(|proposition| value_of(proposition, sentences))
-            .reduce(Value::or)
-            .unwrap_or(Value::False),
-        Proposition::Not(inner) => value_of(inner, sentences).not(),
-        Proposition::Claim { .. } | Proposition::Assume(_) | Proposition::Scope { .. } => {
-            Value::Unknown
-        }
-    }
-}
-
-fn statement(proposition: &Proposition) -> String {
-    match proposition {
-        Proposition::Sentence(sentence)
-        | Proposition::Assume(sentence)
-        | Proposition::Claim { sentence, .. } => sentence.clone(),
-        Proposition::Scope { intent, .. } => intent.clone().unwrap_or_else(|| "detail".to_string()),
-        Proposition::And(xs) => xs.iter().map(statement).collect::<Vec<_>>().join(" and "),
-        Proposition::Or(xs) => xs.iter().map(statement).collect::<Vec<_>>().join(" or "),
-        Proposition::Not(inner) => format!("not ({})", statement(inner)),
-    }
-}
-
-fn sentences_of(claims: &[Proposition]) -> Vec<String> {
-    let mut sentences = Vec::new();
-    for claim in claims {
-        push_sentences(claim, &mut sentences);
-    }
-    sentences
-}
-
-fn push_sentences(proposition: &Proposition, sentences: &mut Vec<String>) {
-    match proposition {
-        Proposition::Sentence(sentence) => {
-            if !sentences.contains(sentence) {
-                sentences.push(sentence.clone());
-            }
-        }
-        Proposition::And(xs) | Proposition::Or(xs) => {
-            for proposition in xs {
-                push_sentences(proposition, sentences);
-            }
-        }
-        Proposition::Not(inner) => push_sentences(inner, sentences),
-        Proposition::Claim { .. } | Proposition::Assume(_) | Proposition::Scope { .. } => {}
-    }
-}
-
-fn load_body(root: &Path, rel: &str) -> Result<Option<Body>, SweepError> {
-    let path = root.join(rel);
-    let meta = fs::metadata(&path).map_err(|err| SweepError::Io(format!("{rel}: {err}")))?;
-    if image_extension(rel).is_some() {
-        return load_image(root, rel, &path, meta.len());
+        let bytes = fs::read(path)
+            .map_err(|err| SweepError::Io(format!("{}: {err}", path.display())))?;
+        return Ok(image_asset(&bytes, format).is_ok());
     }
     if meta.len() as usize > MAX_SLICED_BYTES {
-        return Ok(None);
+        return Ok(false);
     }
-    let bytes = fs::read(&path).map_err(|err| SweepError::Io(format!("{rel}: {err}")))?;
-    if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
-        return Ok(None);
-    }
-    let text = String::from_utf8(bytes).expect("utf-8 checked");
-    Ok(body_from_text(rel, absolute(root, rel), text))
+    let bytes = fs::read(path)
+        .map_err(|err| SweepError::Io(format!("{}: {err}", path.display())))?;
+    Ok(!bytes.contains(&0) && std::str::from_utf8(&bytes).is_ok())
 }
 
-fn load_image(root: &Path, rel: &str, path: &Path, len: u64) -> Result<Option<Body>, SweepError> {
-    if len > MAX_IMAGE_BYTES as u64 {
-        return Ok(None);
-    }
-    let Some(format) = image_extension(rel) else {
-        return Ok(None);
-    };
-    let bytes = fs::read(path).map_err(|err| SweepError::Io(format!("{rel}: {err}")))?;
-    let Ok(asset) = image_asset(&bytes, format) else {
-        return Ok(None);
-    };
-    let reference = asset.reference().to_string();
-    Ok(Some(Body {
-        rel: rel.to_string(),
-        label: absolute(root, rel),
-        parts: vec![reference],
-        assets: vec![asset],
-    }))
-}
-
-fn body_from_text(rel: &str, label: PathBuf, text: String) -> Option<Body> {
-    if text.len() > MAX_SLICED_BYTES || text.contains('\0') {
-        return None;
-    }
-    Some(Body {
-        rel: rel.to_string(),
-        label,
-        parts: split_body(&text, DEFAULT_BODY_BYTES),
-        assets: Vec::new(),
-    })
+fn is_brief_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == ".brief" || name.ends_with(".brief")
 }
 
 fn absolute(root: &Path, rel: &str) -> PathBuf {
     let path = root.join(rel);
     fs::canonicalize(&path).unwrap_or(path)
+}
+
+fn check_err(err: CheckError) -> SweepError {
+    match err {
+        CheckError::Oracle(err) => SweepError::Oracle(err),
+        CheckError::Io(message) | CheckError::Bind(message) => SweepError::Io(message),
+    }
 }
 
 fn render(
@@ -849,6 +761,7 @@ fn universe_io(err: UniverseError) -> SweepError {
 mod tests {
     use super::*;
     use crate::compile;
+    use crate::oracle::QuestionKind;
     use crate::syntax::parse;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -926,47 +839,33 @@ mod tests {
         }
     }
 
-    const NORTHSTAR: &str =
-        "(not (\"Contains a comment that references a historic state of the codebase.\"))\n";
+    const NORTHSTAR: &str = "(claim (\"Contains no comment that references a historic state of the codebase.\") (witness $))\n";
     const NORTHSTAR_CLAIM: &str =
-        "not (Contains a comment that references a historic state of the codebase.)";
+        "Contains no comment that references a historic state of the codebase.";
 
     fn matched_line(path: &std::path::Path) -> String {
         format!("{}\n  {NORTHSTAR_CLAIM}\n", path.display())
     }
 
     #[test]
-    fn a_claim_a_witness_an_assumption_and_a_detail_are_not_constraints() {
-        let witness =
-            ensure_constraints(&compiled("(claim (\"a\") (witness \"a.rs\"))")).unwrap_err();
+    fn a_brief_without_a_dollar_submits_nothing() {
+        let dir = scratch("bind");
+        fs::write(dir.join("a.txt"), "alpha\n").unwrap();
+        let mut oracle = Script::new(|_| Ok(answer("entailed", 0.9)));
+        let err = sweep(
+            &compiled("(claim (\"alpha\") (witness \"a.txt\"))\n"),
+            Path::new("."),
+            files(&dir),
+            None,
+            &mut oracle,
+        )
+        .unwrap_err();
         assert!(
-            witness
-                .to_string()
-                .contains("`witness` is not a sweep constraint"),
-            "{witness}"
+            err.to_string()
+                .contains("a sweep brief needs `(witness $)`"),
+            "{err}"
         );
-        let claim = ensure_constraints(&compiled("(claim (\"a\") (\"b\"))")).unwrap_err();
-        assert!(
-            claim
-                .to_string()
-                .contains("`claim` is not a sweep constraint"),
-            "{claim}"
-        );
-        let assume = ensure_constraints(&compiled("(assume (\"a\"))")).unwrap_err();
-        assert!(
-            assume
-                .to_string()
-                .contains("`assume` is not a sweep constraint"),
-            "{assume}"
-        );
-        let detail = ensure_constraints(&compiled("(detail (assume (\"a\")))")).unwrap_err();
-        assert!(
-            detail
-                .to_string()
-                .contains("`detail` is not a sweep constraint"),
-            "{detail}"
-        );
-        ensure_constraints(&compiled(NORTHSTAR)).unwrap();
+        assert!(oracle.seen.is_empty());
     }
 
     #[test]
@@ -977,9 +876,9 @@ mod tests {
         let mut oracle = Script::new(|req| {
             assert_eq!(req.kind, QuestionKind::Choice);
             assert!(req.state.get("body").is_some());
-            Ok(answer("contradicted", 0.9))
+            Ok(answer("entailed", 0.9))
         });
-        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
         let a = fs::canonicalize(dir.join("a.txt")).unwrap();
         let b = fs::canonicalize(dir.join("b.txt")).unwrap();
         assert_eq!(
@@ -1014,11 +913,12 @@ mod tests {
             QuestionKind::Choice => {
                 assert!(req.state.get("body").is_some());
                 assert!(req.state["path"].as_str().unwrap().ends_with("src.rs"));
-                Ok(answer("contradicted", 0.9))
+                Ok(answer("entailed", 0.9))
             }
         });
         let outcome = sweep(
             &compiled(NORTHSTAR),
+            Path::new("."),
             files(&dir),
             Some("source file"),
             &mut oracle,
@@ -1053,16 +953,16 @@ mod tests {
         fs::write(dir.join("unsure.rs"), "maybe\n").unwrap();
         let mut oracle = Script::new(|req| {
             let path = req.state["path"].as_str().unwrap();
-            let choice = if path.ends_with("old.rs") {
+            let choice = if path.ends_with("new.rs") {
                 "entailed"
-            } else if path.ends_with("new.rs") {
+            } else if path.ends_with("old.rs") {
                 "contradicted"
             } else {
                 "neutral"
             };
             Ok(answer(choice, 0.9))
         });
-        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
         let path = fs::canonicalize(dir.join("new.rs")).unwrap();
         assert_eq!(outcome.text, matched_line(&path));
         assert!(!outcome.text.contains("old.rs"));
@@ -1071,17 +971,19 @@ mod tests {
     }
 
     #[test]
-    fn any_true_claim_matches_the_file() {
-        let dir = scratch("any");
-        fs::write(dir.join("has-alpha.txt"), "one\n").unwrap();
+    fn a_file_matches_when_every_top_level_claim_holds() {
+        let dir = scratch("every");
+        fs::write(dir.join("both.txt"), "one\n").unwrap();
+        fs::write(dir.join("one.txt"), "half\n").unwrap();
         fs::write(dir.join("low.txt"), "none\n").unwrap();
         let mut oracle = Script::new(|req| {
             let path = req.state["path"].as_str().unwrap();
             let proposition = req.instructions["proposition"].as_str().unwrap();
-            let (choice, confidence) = if path.ends_with("has-alpha.txt") && proposition == "alpha"
-            {
+            let (choice, confidence) = if path.ends_with("both.txt") {
                 ("entailed", 0.9)
-            } else if path.ends_with("has-alpha.txt") {
+            } else if path.ends_with("one.txt") && proposition == "alpha" {
+                ("entailed", 0.9)
+            } else if path.ends_with("one.txt") {
                 ("contradicted", 0.9)
             } else {
                 ("entailed", 0.5)
@@ -1089,16 +991,20 @@ mod tests {
             Ok(answer(choice, confidence))
         });
         let outcome = sweep(
-            &compiled("(\"alpha\")\n(\"beta\")\n"),
+            &compiled("(claim (\"alpha\") (witness $))\n(claim (\"beta\") (witness $))\n"),
+            Path::new("."),
             files(&dir),
             None,
             &mut oracle,
         )
         .unwrap();
-        let path = fs::canonicalize(dir.join("has-alpha.txt")).unwrap();
-        assert_eq!(outcome.text, format!("{}\n  alpha\n", path.display()));
+        let path = fs::canonicalize(dir.join("both.txt")).unwrap();
+        assert_eq!(
+            outcome.text,
+            format!("{}\n  alpha\n  beta\n", path.display())
+        );
+        assert!(!outcome.text.contains("one.txt"));
         assert!(!outcome.text.contains("low.txt"));
-        assert!(!outcome.text.contains("beta"));
     }
 
     #[test]
@@ -1110,9 +1016,9 @@ mod tests {
             if req.state["path"].as_str().unwrap().ends_with("b.txt") {
                 return Err(OracleError::Limit("capped".into()));
             }
-            Ok(answer("entailed", 0.9))
+            Ok(answer("contradicted", 0.9))
         });
-        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
         assert_eq!(outcome.text, "INCOMPLETE\n");
         assert!(!outcome.text.contains("CLEAN"));
         assert_eq!(outcome.judged, 1);
@@ -1135,16 +1041,12 @@ mod tests {
                     "HTTP 400: {\"detail\":{\"error_type\":\"max_tokens_exceeded\"}}".into(),
                 ));
             }
-            let proposition = req.instructions["proposition"].as_str().unwrap();
-            if proposition == "alpha" {
-                Ok(answer("entailed", 0.9))
-            } else {
-                Ok(answer("contradicted", 0.9))
-            }
+            Ok(answer("entailed", 0.9))
         });
         let mut statuses = Vec::new();
         let outcome = sweep_watching(
-            &compiled("(\"alpha\")\n(\"beta\")\n"),
+            &compiled("(claim (\"alpha\") (witness $))\n(claim (\"beta\") (witness $))\n"),
+            Path::new("."),
             files(&dir),
             None,
             &mut oracle,
@@ -1160,7 +1062,7 @@ mod tests {
         assert_eq!(
             outcome.text,
             format!(
-                "{}\n  alpha\nError: {}\n  HTTP 400: {{\"detail\":{{\"error_type\":\"max_tokens_exceeded\"}}}}\n",
+                "{}\n  alpha\n  beta\nError: {}\n  HTTP 400: {{\"detail\":{{\"error_type\":\"max_tokens_exceeded\"}}}}\n",
                 ok.display(),
                 big.display()
             )
@@ -1190,7 +1092,7 @@ mod tests {
                 "HTTP 400: {\"detail\":{\"error_type\":\"max_tokens_exceeded\"}}".into(),
             ))
         });
-        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
         let big = fs::canonicalize(dir.join("big.py")).unwrap();
         assert_eq!(
             outcome.text,
@@ -1212,7 +1114,7 @@ mod tests {
         let png = synthetic_png(280, 280);
         fs::write(dir.join("shot.png"), &png).unwrap();
         let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
-        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
         assert_eq!(outcome.judged, 1);
         assert_eq!(outcome.candidates, 1);
         assert_eq!(oracle.seen.len(), 1);
@@ -1236,7 +1138,7 @@ mod tests {
         let path = dir.join("shot.png");
         fs::write(&path, &png).unwrap();
         let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
-        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
         assert_eq!(outcome.judged, 1);
         assert_eq!(oracle.seen.len(), 1);
         let asset = image_asset(&png, ImageFormat::Png).unwrap();
@@ -1257,7 +1159,7 @@ mod tests {
             .set_len(MAX_IMAGE_BYTES as u64 + 1)
             .unwrap();
         let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
-        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
         assert_eq!(outcome.candidates, 1);
         assert_eq!(outcome.judged, 1);
         assert_eq!(oracle.seen.len(), 1);
@@ -1273,8 +1175,8 @@ mod tests {
         let dir = scratch("clean");
         fs::write(dir.join("a.txt"), "alpha\n").unwrap();
         fs::write(dir.join("b.txt"), "beta\n").unwrap();
-        let mut oracle = Script::new(|_| Ok(answer("entailed", 0.9)));
-        let outcome = sweep(&compiled(NORTHSTAR), files(&dir), None, &mut oracle).unwrap();
+        let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
+        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
         assert_eq!(outcome.text, "CLEAN\n");
         assert!(outcome.matches.is_empty());
         assert!(!outcome.incomplete);
@@ -1297,14 +1199,15 @@ mod tests {
         let mut oracle = Script::new(|req| {
             let body = req.state["body"].as_str().unwrap();
             let choice = if body.contains("alpha is here") {
-                "contradicted"
-            } else {
                 "entailed"
+            } else {
+                "contradicted"
             };
             Ok(answer(choice, 0.9))
         });
         let outcome = sweep(
             &compiled(NORTHSTAR),
+            Path::new("."),
             Scope::Transcript(&path),
             None,
             &mut oracle,
@@ -1315,17 +1218,10 @@ mod tests {
             .iter()
             .map(|req| req.state["path"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(
-            paths,
-            vec![
-                "p0/c0/00-call-read_file",
-                "p0/c0/01-result-read_file",
-                "p0/c1/00-message",
-            ]
-        );
+        assert_eq!(paths, vec!["p0/c0/00-read_file", "p0/c1/message"]);
         assert_eq!(
             outcome.text,
-            format!("p0/c0/01-result-read_file\n  {NORTHSTAR_CLAIM}\n")
+            format!("p0/c0/00-read_file\n  {NORTHSTAR_CLAIM}\n")
         );
         assert!(!outcome.text.contains("SECRET_SYSTEM"));
     }
@@ -1350,15 +1246,16 @@ mod tests {
             let choice =
                 if body.contains("diff --git") && body.contains("-alpha") && body.contains("+beta")
                 {
-                    "contradicted"
-                } else {
                     "entailed"
+                } else {
+                    "contradicted"
                 };
             Ok(answer(choice, 0.9))
         });
         let git_args: &[String] = &[];
         let outcome = sweep(
             &compiled(NORTHSTAR),
+            Path::new("."),
             Scope::Diff {
                 root: &dir,
                 git_args,
@@ -1385,6 +1282,7 @@ mod tests {
         let git_args: &[String] = &[];
         let err = sweep(
             &compiled(NORTHSTAR),
+            Path::new("."),
             Scope::Diff {
                 root: Path::new("."),
                 git_args,
