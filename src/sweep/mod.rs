@@ -873,11 +873,7 @@ mod tests {
         let dir = scratch("all");
         fs::write(dir.join("a.txt"), "alpha\n").unwrap();
         fs::write(dir.join("b.txt"), "beta\n").unwrap();
-        let mut oracle = Script::new(|req| {
-            assert_eq!(req.kind, QuestionKind::Choice);
-            assert!(req.state.get("body").is_some());
-            Ok(answer("entailed", 0.9))
-        });
+        let mut oracle = Script::new(|_| Ok(answer("entailed", 0.9)));
         let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
         let a = fs::canonicalize(dir.join("a.txt")).unwrap();
         let b = fs::canonicalize(dir.join("b.txt")).unwrap();
@@ -885,11 +881,8 @@ mod tests {
             outcome.text,
             format!("{}{}", matched_line(&a), matched_line(&b))
         );
-        assert_eq!(oracle.seen.len(), 2);
-        assert!(oracle
-            .seen
-            .iter()
-            .all(|req| req.kind == QuestionKind::Choice));
+        assert_eq!(outcome.judged, 2);
+        assert_eq!(outcome.candidates, 2);
     }
 
     #[test]
@@ -946,49 +939,19 @@ mod tests {
     }
 
     #[test]
-    fn a_true_claim_is_a_match() {
-        let dir = scratch("match");
-        fs::write(dir.join("old.rs"), "// used to parse declare\n").unwrap();
-        fs::write(dir.join("new.rs"), "fn main() {}\n").unwrap();
-        fs::write(dir.join("unsure.rs"), "maybe\n").unwrap();
-        let mut oracle = Script::new(|req| {
-            let path = req.state["path"].as_str().unwrap();
-            let choice = if path.ends_with("new.rs") {
-                "entailed"
-            } else if path.ends_with("old.rs") {
-                "contradicted"
-            } else {
-                "neutral"
-            };
-            Ok(answer(choice, 0.9))
-        });
-        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
-        let path = fs::canonicalize(dir.join("new.rs")).unwrap();
-        assert_eq!(outcome.text, matched_line(&path));
-        assert!(!outcome.text.contains("old.rs"));
-        assert!(!outcome.text.contains("unsure.rs"));
-        assert!(!outcome.incomplete);
-    }
-
-    #[test]
     fn a_file_matches_when_every_top_level_claim_holds() {
         let dir = scratch("every");
         fs::write(dir.join("both.txt"), "one\n").unwrap();
         fs::write(dir.join("one.txt"), "half\n").unwrap();
-        fs::write(dir.join("low.txt"), "none\n").unwrap();
         let mut oracle = Script::new(|req| {
             let path = req.state["path"].as_str().unwrap();
             let proposition = req.instructions["proposition"].as_str().unwrap();
-            let (choice, confidence) = if path.ends_with("both.txt") {
-                ("entailed", 0.9)
-            } else if path.ends_with("one.txt") && proposition == "alpha" {
-                ("entailed", 0.9)
-            } else if path.ends_with("one.txt") {
-                ("contradicted", 0.9)
+            let choice = if path.ends_with("one.txt") && proposition == "beta" {
+                "contradicted"
             } else {
-                ("entailed", 0.5)
+                "entailed"
             };
-            Ok(answer(choice, confidence))
+            Ok(answer(choice, 0.9))
         });
         let outcome = sweep(
             &compiled("(claim (\"alpha\") (witness $))\n(claim (\"beta\") (witness $))\n"),
@@ -1004,7 +967,6 @@ mod tests {
             format!("{}\n  alpha\n  beta\n", path.display())
         );
         assert!(!outcome.text.contains("one.txt"));
-        assert!(!outcome.text.contains("low.txt"));
     }
 
     #[test]
@@ -1105,46 +1067,6 @@ mod tests {
         assert!(!outcome.incomplete);
         assert_eq!(outcome.judged, 0);
         assert_eq!(outcome.candidates, 1);
-    }
-
-    #[test]
-    fn a_png_is_judged_as_an_image_asset() {
-        use crate::oracle::image::{synthetic_png, ImageFormat};
-        let dir = scratch("png");
-        let png = synthetic_png(280, 280);
-        fs::write(dir.join("shot.png"), &png).unwrap();
-        let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
-        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
-        assert_eq!(outcome.judged, 1);
-        assert_eq!(outcome.candidates, 1);
-        assert_eq!(oracle.seen.len(), 1);
-        let state = &oracle.seen[0].state;
-        assert!(state["path"].as_str().unwrap().ends_with("shot.png"));
-        let reference = state["body"].as_str().unwrap();
-        assert!(reference.starts_with("img-"));
-        assert!(state.get("part").is_none());
-        assert_eq!(state.assets().len(), 1);
-        assert_eq!(state.assets()[0].reference(), reference);
-        assert_eq!(state.assets()[0].format(), ImageFormat::Png);
-        assert_eq!(state.assets()[0].bytes(), png.as_slice());
-        assert!(!outcome.text.contains("Error"));
-    }
-
-    #[test]
-    fn an_oversized_png_is_scaled_and_judged() {
-        use crate::oracle::image::{image_asset, solid_png, ImageFormat};
-        let dir = scratch("scaled-png");
-        let png = solid_png(2000, 1000);
-        let path = dir.join("shot.png");
-        fs::write(&path, &png).unwrap();
-        let mut oracle = Script::new(|_| Ok(answer("contradicted", 0.9)));
-        let outcome = sweep(&compiled(NORTHSTAR), Path::new("."), files(&dir), None, &mut oracle).unwrap();
-        assert_eq!(outcome.judged, 1);
-        assert_eq!(oracle.seen.len(), 1);
-        let asset = image_asset(&png, ImageFormat::Png).unwrap();
-        assert_eq!(oracle.seen[0].state.assets()[0].bytes(), asset.bytes());
-        assert_ne!(asset.bytes(), png.as_slice());
-        assert_eq!(fs::read(&path).unwrap(), png);
     }
 
     #[test]

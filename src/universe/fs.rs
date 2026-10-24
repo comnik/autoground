@@ -84,20 +84,6 @@ pub fn repo_join(root: &Path, rel: &str) -> PathBuf {
     }
 }
 
-/// Parent path component. Top-level names (`frontend`) have no parent here;
-/// [`Filesystem::parent`] maps that to the root id `""`.
-pub fn parent_dir(rel: &str) -> Option<&str> {
-    rel.rsplit_once('/').map(|(p, _)| p)
-}
-
-pub fn parent_id(id: &str) -> Option<String> {
-    if id.is_empty() {
-        None
-    } else {
-        Some(parent_dir(id).unwrap_or("").to_string())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
@@ -157,7 +143,7 @@ pub fn list_files_recursive(
     Ok(out)
 }
 
-/// Local filesystem as a tree of databases. The initial view is every reachable
+/// Local filesystem as a tree of databases. The databases are every reachable
 /// leaf file.
 #[derive(Clone)]
 pub struct Filesystem {
@@ -220,22 +206,6 @@ impl Filesystem {
             is_dir,
         })
     }
-
-    fn insert_sorted(vec: &mut Vec<String>, id: String) {
-        if let Err(i) = vec.binary_search(&id) {
-            vec.insert(i, id);
-        }
-    }
-
-    /// Summary length of a directory, or the metadata length of a file.
-    fn measured_len(&self, id: &str) -> Result<usize, UniverseError> {
-        let entry = self.lookup(id)?;
-        if entry.is_dir {
-            Ok(render_listing(id, &list_entries(&self.root, id, &self.filter)?).len())
-        } else {
-            Ok(fs::metadata(repo_join(&self.root, id))?.len() as usize)
-        }
-    }
 }
 
 fn listing_title(id: &str) -> String {
@@ -262,26 +232,9 @@ fn render_listing(id: &str, children: &[Entry]) -> String {
     s
 }
 
-enum LeafBody {
-    Text(String),
-    Binary(usize),
-}
-
-fn read_leaf(path: &Path) -> io::Result<LeafBody> {
-    let bytes = fs::read(path)?;
-    match String::from_utf8(bytes) {
-        Ok(text) => Ok(LeafBody::Text(text)),
-        Err(e) => Ok(LeafBody::Binary(e.as_bytes().len())),
-    }
-}
-
 impl Universe for Filesystem {
     fn databases(&self) -> &[String] {
         &self.databases
-    }
-
-    fn parent(&self, id: &str) -> Option<String> {
-        parent_id(id)
     }
 
     fn children(&self, id: &str) -> Result<Vec<String>, UniverseError> {
@@ -305,49 +258,6 @@ impl Universe for Filesystem {
         } else {
             Ok(None)
         }
-    }
-
-    fn size(&self) -> Result<usize, UniverseError> {
-        let mut total = 0usize;
-        for id in &self.databases {
-            total += self.measured_len(id)?;
-        }
-        Ok(total)
-    }
-
-    fn read(&self, id: &str, budget: usize) -> Result<String, UniverseError> {
-        let entry = self.lookup(id)?;
-        if entry.is_dir {
-            return Err(UniverseError::Summarizable(id.to_string()));
-        }
-        let text = match read_leaf(&repo_join(&self.root, id))? {
-            LeafBody::Text(text) => text,
-            LeafBody::Binary(n) => format!("<binary {n} bytes>"),
-        };
-        crate::universe::within_budget(id, text, budget)
-    }
-
-    fn insert(&mut self, id: String) -> Result<(), UniverseError> {
-        let _ = self.lookup(&id)?;
-        Self::insert_sorted(&mut self.databases, id);
-        Ok(())
-    }
-
-    fn remove(&mut self, id: &str) {
-        if let Ok(i) = self.databases.binary_search(&id.to_string()) {
-            self.databases.remove(i);
-        }
-    }
-
-    fn set(&mut self, ids: Vec<String>) -> Result<(), UniverseError> {
-        let mut next = ids;
-        next.sort();
-        next.dedup();
-        for id in &next {
-            let _ = self.lookup(id)?;
-        }
-        self.databases = next;
-        Ok(())
     }
 }
 
@@ -492,116 +402,19 @@ mod tests {
     }
 
     #[test]
-    fn leaf_read_is_the_body_and_size_is_its_length() {
-        let mut fs = Filesystem::open(toy_layered()).unwrap();
-        fs.set(vec!["frontend/app.py".into()]).unwrap();
-        let text = fs.read("frontend/app.py", usize::MAX).unwrap();
-        assert!(text.contains("from backend import api"), "{text}");
-        assert!(!text.contains("==="), "{text}");
+    fn a_file_has_no_summary() {
+        let fs = Filesystem::open(toy_layered()).unwrap();
         assert!(fs.summary("frontend/app.py").unwrap().is_none());
-        assert_eq!(fs.size().unwrap(), text.len());
     }
 
     #[test]
     fn directory_summary_is_a_listing_not_file_bodies() {
-        let mut fs = Filesystem::open(toy_layered()).unwrap();
-        fs.set(vec!["frontend".into()]).unwrap();
+        let fs = Filesystem::open(toy_layered()).unwrap();
         let text = fs.summary("frontend").unwrap().unwrap();
         assert!(text.starts_with("frontend/\n"), "{text}");
         assert!(text.contains("  __init__.py"), "{text}");
         assert!(text.contains("  app.py"), "{text}");
         assert!(!text.contains("from backend import api"), "{text}");
-        assert!(matches!(
-            fs.read("frontend", usize::MAX),
-            Err(UniverseError::Summarizable(_))
-        ));
-        assert_eq!(fs.size().unwrap(), text.len());
-    }
-
-    fn top_dirs(fs: &mut Filesystem) {
-        fs.set(vec!["backend".into(), "decoy".into(), "frontend".into()])
-            .unwrap();
-    }
-
-    #[test]
-    fn directory_view_is_smaller_than_leaves() {
-        let mut fs = Filesystem::open(toy_layered()).unwrap();
-        let leaf_size = fs.size().unwrap();
-        top_dirs(&mut fs);
-        let dir_size = fs.size().unwrap();
-        assert!(
-            dir_size < leaf_size,
-            "dirs {dir_size} vs leaves {leaf_size}"
-        );
-    }
-
-    #[test]
-    fn remove_and_insert_dir() {
-        let mut fs = Filesystem::open(toy_layered()).unwrap();
-        top_dirs(&mut fs);
-        fs.remove("decoy");
-        assert_eq!(
-            fs.databases(),
-            &["backend".to_string(), "frontend".to_string()]
-        );
-        fs.insert("decoy".into()).unwrap();
-        assert_eq!(
-            fs.databases(),
-            &[
-                "backend".to_string(),
-                "decoy".to_string(),
-                "frontend".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn set_replaces_the_view() {
-        let mut fs = Filesystem::open(toy_layered()).unwrap();
-        top_dirs(&mut fs);
-        fs.set(vec!["frontend/app.py".into()]).unwrap();
-        assert_eq!(fs.databases(), &["frontend/app.py".to_string()]);
-    }
-
-    #[test]
-    fn insert_unknown_is_error() {
-        let mut fs = Filesystem::open(toy_layered()).unwrap();
-        let err = fs.insert("no/such.py".into()).unwrap_err();
-        assert!(matches!(err, UniverseError::Missing(id) if id == "no/such.py"));
-    }
-
-    #[test]
-    fn binary_leaf_reads_as_a_placeholder() {
-        let root = scratch_dir("binary");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("ok.txt"), "hello\n").unwrap();
-        std::fs::write(root.join("blob.bin"), [0u8, 159, 146, 150]).unwrap();
-        let mut fs = Filesystem::open(&root).unwrap();
-        fs.set(vec!["blob.bin".into()]).unwrap();
-        let text = fs.read("blob.bin", usize::MAX).unwrap();
-        let summary = fs.summary("blob.bin").unwrap();
-        let size = fs.size().unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(text, "<binary 4 bytes>");
-        assert!(summary.is_none());
-        assert_eq!(size, 4);
-    }
-
-    #[test]
-    fn read_returns_the_body_when_it_fits_and_refuses_when_it_does_not() {
-        let root = scratch_dir("budget");
-        std::fs::create_dir_all(&root).unwrap();
-        let body = "0123456789";
-        std::fs::write(root.join("a.txt"), body).unwrap();
-        let fs = Filesystem::open(&root).unwrap();
-        assert_eq!(fs.read("a.txt", body.len()).unwrap(), body);
-        assert_eq!(fs.read("a.txt", usize::MAX).unwrap(), body);
-        let err = fs.read("a.txt", body.len() - 1).unwrap_err();
-        assert!(
-            matches!(err, UniverseError::TooLarge { ref id, bytes } if id == "a.txt" && bytes == body.len()),
-            "{err}"
-        );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

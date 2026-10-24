@@ -6,9 +6,7 @@
 screenshot, a web resource, or really any other serializable information. The witness can
 entail or contradict a proposition, or be neutral towards it.
 
-**Universe:** `autoground sweep` can currently operate on codebases, agent session
-transcripts, or git diffs. We refer to these generically as the *universe* $\mathbf{U}$.
-Other implementations are conceivable.
+**Universe:** the environment in which the witnesses live. Currently always a filesystem.
 
 **Oracle:** the fundamental operation in `autoground` is determining how a witness $\Gamma$
 bears on a proposition $p$. Does it support ($\Gamma \vdash p$) or contradict ($\Gamma
@@ -39,17 +37,8 @@ paralellize pending tickets. Report usage statistics like spend, input tokens, r
 count, latency percentiles, mean batch size (questions per request / max questions per
 request), and mean fill factor (input tokens / the 32k state-side cap).
 
-**Sweep**: takes a brief, a universe, and an oracle. The filesystem universe takes an
-optional filter, based on which the oracle prunes the listing. Every remaining file is
-judged against the brief. A file matches when any top-level claim is true. All matching
-files are reported along with the corresponding claims.
-
 **Check**: takes the compiled claims and an oracle. Each witness is judged and the rest of
 the plan evaluated deterministically.
-
-```brief
-The oracle hashes the `state` it is given (a listing of paths, a file body). Universe itself has no digest method. Sweep and check use this interface.
-```
 
 ### jev best practices
 
