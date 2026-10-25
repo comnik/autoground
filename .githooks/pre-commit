@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Git runs this before creating a commit. A non-zero exit rejects the commit.
+# Add further checks below `cargo test`.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+cargo test
