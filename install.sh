@@ -6,10 +6,16 @@
 #   ./install.sh --all      also install for agents that are not detected
 #   ./install.sh --copy     copy each skill directory instead of symlinking
 #   ./install.sh --dry-run  print the actions without writing
+#
+# skills/brief/references and skills/proof/references point at docs/brief, so
+# both installed skills read one copy of the language docs. --copy snapshots
+# those files into each skill, because the relative link only resolves here.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILLS_DIR="$ROOT/skills"
+BRIEF_DOCS="$ROOT/docs/brief"
+BRIEF_LINK="../../docs/brief"
 
 ALL=0
 COPY=0
@@ -22,6 +28,9 @@ Usage: ./install.sh [--all] [--copy] [--dry-run]
 Link each skills/<name>/ directory that contains a SKILL.md into the skills
 directory of every detected agent. Edits in this repo apply immediately.
 Re-run after moving the repo. --copy writes a snapshot instead of a link.
+
+references/ in the brief and proof skills is docs/brief. --copy snapshots
+those files into each skill.
 EOF
 }
 
@@ -89,9 +98,69 @@ for name in brief proof; do
   fi
 done
 
+# True when this skill's references/ is the shared docs/brief link.
+references_are_shared() { # $1 skill directory
+  if [ -L "$1/references" ] && [ "$(readlink "$1/references")" = "$BRIEF_LINK" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# brief and proof share docs/brief unless references/ is already something else.
+shares_brief_docs() { # $1 skill name, $2 skill directory
+  case "$1" in
+    brief|proof) ;;
+    *)
+      if references_are_shared "$2"; then
+        return 0
+      fi
+      return 1
+      ;;
+  esac
+  if [ ! -d "$BRIEF_DOCS" ]; then
+    return 1
+  fi
+  if [ -e "$2/references" ] || [ -L "$2/references" ]; then
+    if references_are_shared "$2"; then
+      return 0
+    fi
+    return 1
+  fi
+  return 0
+}
+
+ensure_shared_brief() { # $1 skill name
+  local dir="$SKILLS_DIR/$1"
+  [ -f "$dir/SKILL.md" ] || return 0
+  if [ ! -d "$BRIEF_DOCS" ]; then
+    echo "Warning: docs/brief is missing, so skills/$1 cannot share it." >&2
+    return 0
+  fi
+  if references_are_shared "$dir"; then
+    return 0
+  fi
+  if [ -e "$dir/references" ] || [ -L "$dir/references" ]; then
+    echo "Warning: skills/$1/references is not a link to docs/brief; left it in place." >&2
+    return 0
+  fi
+  if [ "$DRY" = 1 ]; then
+    echo "link skills/$1/references -> $BRIEF_LINK"
+    return 0
+  fi
+  ln -s "$BRIEF_LINK" "$dir/references"
+}
+
+for name in brief proof; do
+  ensure_shared_brief "$name"
+done
+
 place() { # $1 dest root, $2 skill name
   local src="$SKILLS_DIR/$2"
   local dest="$1/$2"
+  local share=1
+  if ! shares_brief_docs "$2" "$src"; then
+    share=0
+  fi
 
   if [ -L "$dest" ]; then
     :
@@ -105,6 +174,9 @@ place() { # $1 dest root, $2 skill name
   if [ "$DRY" = 1 ]; then
     if [ "$COPY" = 1 ]; then
       echo "copy $src -> $dest"
+      if [ "$share" = 1 ]; then
+        echo "copy $BRIEF_DOCS -> $dest/references"
+      fi
     else
       echo "link $dest -> $src"
     fi
@@ -116,8 +188,17 @@ place() { # $1 dest root, $2 skill name
     rm "$dest"
   fi
   if [ "$COPY" = 1 ]; then
+    # A real references/ directory would make cp keep the source symlink out.
+    if [ "$share" = 1 ]; then
+      rm -rf "$dest/references"
+    fi
     mkdir -p "$dest"
     cp -R "$src/." "$dest/"
+    if [ "$share" = 1 ]; then
+      rm -rf "$dest/references"
+      mkdir -p "$dest/references"
+      cp -R "$BRIEF_DOCS/." "$dest/references/"
+    fi
   else
     ln -s "$src" "$dest"
   fi
@@ -176,7 +257,9 @@ echo
 if [ "$DRY" = 1 ]; then
   echo "Dry run. Nothing written."
 elif [ "$COPY" = 1 ]; then
-  echo "Copied. Re-run ./install.sh --copy after editing a skill."
+  echo "Copied. Re-run ./install.sh --copy after editing a skill or docs/brief."
+  echo "references/ in brief and proof is a copy of docs/brief."
 else
   echo "Linked to $SKILLS_DIR. Edits apply immediately. Re-run ./install.sh after moving this repo."
+  echo "references/ in brief and proof is docs/brief."
 fi
