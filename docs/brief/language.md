@@ -21,10 +21,9 @@ namespace ::= segments separated by ".", no empty segment, no "/"
 require   ::= "(" ":require" libspec+ ")"
 libspec   ::= "[" namespace [":as" alias] [":refer" refer] "]"
 refer     ::= ":all" | "[" ident-name* "]"
-form      ::= name | sense | intent | assume | detail | claim
+form      ::= name | sense | assume | detail | claim
 name      ::= "(" "name" ident-name ")"
 sense     ::= "(" "sense" ident-name string ")"
-intent    ::= "(" "intent" string ")"
 assume    ::= "(" "assume" sentence ")"
 detail    ::= "(" "detail" form+ ")"
 formula   ::= claim | and | or | not | sentence
@@ -43,8 +42,7 @@ path      ::= string | "$"
 `ident-name` is an unqualified identifier. A comma is whitespace. `;;` comments through the
 end of the line.
 
-A scope is the file, or one `detail`. It has at most one `intent`, and the string is not
-empty. A second intent is a compile error. A `detail` contains a claim or an assumption,
+A scope is the file, or one `detail`. A `detail` contains a claim or an assumption,
 walking into nested details. `ns` stays at the top of the file.
 
 `witness` is only the support of a `claim`. A path is relative to the brief. The symbol `$`
@@ -134,7 +132,6 @@ Senses instantiated with names can be used to make claims for autoground to judg
 (name Concept)
 (sense input "{X} is an input into {Y}")
 (detail
-  (intent "inputs")
   (name LogicBlock)
   (claim (input Concept LogicBlock)
     "Concept is closed over"))

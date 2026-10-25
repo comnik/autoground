@@ -206,7 +206,6 @@ pub(crate) fn compile_with(program: &Program, imports: &Imports) -> Result<Compi
     let mut senses = Vec::new();
     let mut sense_seen = HashSet::new();
 
-    scope_intent(&program.forms)?;
     for form in &program.forms {
         match form {
             Form::Name(name) => {
@@ -225,7 +224,7 @@ pub(crate) fn compile_with(program: &Program, imports: &Imports) -> Result<Compi
                 }
                 senses.push(sense.clone());
             }
-            Form::Intent(_) | Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => {}
+            Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => {}
         }
     }
 
@@ -400,27 +399,12 @@ fn prop_deps(proposition: &Proposition, defs: &HashMap<String, Def>) -> Vec<Stri
     }
 }
 
-fn scope_intent(forms: &[Form]) -> Result<Option<String>, CompileError> {
-    let mut intent = None;
-    for form in forms {
-        if let Form::Intent(text) = form {
-            if intent.is_some() {
-                return Err(CompileError {
-                    message: "a scope has two intents".into(),
-                });
-            }
-            intent = Some(text.clone());
-        }
-    }
-    Ok(intent)
-}
-
 fn contains_claim_or_assume(forms: &[Form]) -> bool {
     forms.iter().any(|form| match form {
         Form::Assume(_) => true,
         Form::Formula(Formula::Claim { .. }) => true,
         Form::Detail(body) => contains_claim_or_assume(body),
-        Form::Name(_) | Form::Sense(_) | Form::Intent(_) | Form::Formula(_) => false,
+        Form::Name(_) | Form::Sense(_) | Form::Formula(_) => false,
     })
 }
 
@@ -434,7 +418,7 @@ fn resolve_forms(
     let mut claims = Vec::new();
     for form in forms {
         match form {
-            Form::Name(_) | Form::Sense(_) | Form::Intent(_) => {}
+            Form::Name(_) | Form::Sense(_) => {}
             Form::Assume(sentence) => {
                 let text = require_sentence(
                     sentence,
@@ -466,7 +450,6 @@ fn resolve_detail(
     imports: &Imports,
     assumptions: &mut Vec<String>,
 ) -> Result<Proposition, CompileError> {
-    let intent = scope_intent(body)?;
     if !contains_claim_or_assume(body) {
         return Err(CompileError {
             message: "a detail has no claim".into(),
@@ -474,7 +457,7 @@ fn resolve_detail(
     }
     let (names, senses) = extend_scope(body, names, senses)?;
     let body = resolve_forms(body, &names, &senses, imports, assumptions)?;
-    Ok(Proposition::Scope { intent, body })
+    Ok(Proposition::Scope { body })
 }
 
 fn resolve(
@@ -615,7 +598,7 @@ pub fn extend_scope(
                 }
                 senses.insert(sense.name.clone(), sense.clone());
             }
-            Form::Intent(_) | Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => {}
+            Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => {}
         }
     }
     Ok((names, senses))
@@ -842,7 +825,6 @@ mod tests {
         assert_eq!(
             c.claims,
             vec![Proposition::Scope {
-                intent: None,
                 body: vec![Proposition::Claim {
                     sentence: "Concept is an input into LogicBlock".into(),
                     support: Support::Sentence(Box::new(Proposition::And(vec![

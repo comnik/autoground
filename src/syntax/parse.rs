@@ -536,9 +536,6 @@ fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
         Some(SexpKind::Symbol(head)) if head == "sense" => {
             Ok((Form::Sense(lower_sense(xs)?), None))
         }
-        Some(SexpKind::Symbol(head)) if head == "intent" => {
-            Ok((Form::Intent(lower_intent(xs)?), None))
-        }
         Some(SexpKind::Symbol(head)) if head == "assume" => {
             let (formula, span) = lower_assume(s, xs)?;
             Ok((formula, Some(span)))
@@ -618,11 +615,7 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
     };
     match &xs[0].kind {
         SexpKind::Symbol(head)
-            if head == "name"
-                || head == "sense"
-                || head == "ns"
-                || head == "intent"
-                || head == "assume" =>
+            if head == "name" || head == "sense" || head == "ns" || head == "assume" =>
         {
             Err(err_at(
                 &xs[0],
@@ -677,17 +670,6 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
             &xs[0],
             "a formula starts with `and`, `or`, `not`, a sense name, or a reading",
         )),
-    }
-}
-
-fn lower_intent(xs: &[Sexp]) -> Result<String, ParseError> {
-    if xs.len() != 2 {
-        return Err(err_at(&xs[0], "`intent` takes one string"));
-    }
-    match &xs[1].kind {
-        SexpKind::String(text) if !text.is_empty() => Ok(text.clone()),
-        SexpKind::String(_) => Err(err_at(&xs[1], "an intent is not empty")),
-        _ => Err(err_at(&xs[1], "`intent` takes one string")),
     }
 }
 
@@ -963,17 +945,7 @@ pub(crate) fn is_declared_name(spelling: &str) -> bool {
 fn is_reserved_word(spelling: &str) -> bool {
     matches!(
         spelling,
-        "name"
-            | "sense"
-            | "ns"
-            | "and"
-            | "or"
-            | "not"
-            | "claim"
-            | "witness"
-            | "assume"
-            | "detail"
-            | "intent"
+        "name" | "sense" | "ns" | "and" | "or" | "not" | "claim" | "witness" | "assume" | "detail"
     )
 }
 
@@ -996,11 +968,10 @@ mod tests {
 
     #[test]
     fn a_brief_keeps_unicode_text() {
-        let src = "(intent \"Nestlé\")\n(assume \"Nestlé\")\n(name Café)\n";
+        let src = "(assume \"Nestlé\")\n(name Café)\n";
         let program = parse(src).unwrap();
-        assert_eq!(&src[program.spans[0].clone()], "(intent \"Nestlé\")");
-        assert!(matches!(&program.forms[0], Form::Intent(text) if text == "Nestlé"));
-        match &program.forms[1] {
+        assert_eq!(&src[program.spans[0].clone()], "(assume \"Nestlé\")");
+        match &program.forms[0] {
             Form::Assume(Formula::Apply {
                 reading: Reading::Inline { template, .. },
                 args,
@@ -1049,7 +1020,6 @@ mod tests {
     fn parses_a_detail_with_local_declarations() {
         let src = r#"
 (detail
-  (intent "how a block is fed")
   (name Concept)
   (name LogicBlock)
   (sense input "{X} is an input into {Y}")
@@ -1061,10 +1031,9 @@ mod tests {
         let Form::Detail(body) = &program.forms[0] else {
             panic!("detail");
         };
-        assert!(matches!(body[0], Form::Intent(_)));
-        assert!(matches!(body[1], Form::Name(_)));
-        assert!(matches!(body[3], Form::Sense(_)));
-        assert!(matches!(body[4], Form::Formula(Formula::Claim { .. })));
+        assert!(matches!(body[0], Form::Name(_)));
+        assert!(matches!(body[2], Form::Sense(_)));
+        assert!(matches!(body[3], Form::Formula(Formula::Claim { .. })));
         assert_eq!(program.clauses[0].children.len(), 1);
     }
 
@@ -1125,8 +1094,6 @@ mod tests {
             ("(claim (and \"a\" \"b\") \"c\")", "heads a sentence"),
             ("(assume)", "takes a sentence"),
             ("(assume (and \"a\" \"b\"))", "takes a sentence"),
-            ("(intent)", "takes one string"),
-            ("(intent \"\")", "not empty"),
         ] {
             let err = parse(src).unwrap_err();
             assert!(err.message.contains(needle), "{src}: {err}");
@@ -1142,7 +1109,6 @@ mod tests {
             ("(name witness)", "reserved"),
             ("(name claim)", "reserved"),
             ("(name assume)", "reserved"),
-            ("(name intent)", "reserved"),
         ] {
             let err = parse(src).unwrap_err();
             assert!(err.message.contains(needle), "{src}: {err}");

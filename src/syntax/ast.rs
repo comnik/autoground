@@ -122,7 +122,6 @@ pub enum Proposition {
     /// A detail. Names declared in the body stay there. `body` is the claims,
     /// assumptions, and nested details, in order.
     Scope {
-        intent: Option<String>,
         body: Vec<Proposition>,
     },
 }
@@ -132,7 +131,6 @@ pub enum Proposition {
 pub enum Form {
     Name(String),
     Sense(Sense),
-    Intent(String),
     Assume(Formula),
     Detail(Vec<Form>),
     Formula(Formula),
@@ -172,33 +170,21 @@ impl Program {
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.forms.iter().filter_map(|form| match form {
             Form::Name(name) => Some(name.as_str()),
-            Form::Sense(_)
-            | Form::Intent(_)
-            | Form::Assume(_)
-            | Form::Detail(_)
-            | Form::Formula(_) => None,
+            Form::Sense(_) | Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => None,
         })
     }
 
     pub fn senses(&self) -> impl Iterator<Item = &Sense> {
         self.forms.iter().filter_map(|form| match form {
             Form::Sense(sense) => Some(sense),
-            Form::Name(_)
-            | Form::Intent(_)
-            | Form::Assume(_)
-            | Form::Detail(_)
-            | Form::Formula(_) => None,
+            Form::Name(_) | Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => None,
         })
     }
 
     pub fn claims(&self) -> impl Iterator<Item = &Formula> {
         self.forms.iter().filter_map(|form| match form {
             Form::Formula(formula) => Some(formula),
-            Form::Name(_)
-            | Form::Sense(_)
-            | Form::Intent(_)
-            | Form::Assume(_)
-            | Form::Detail(_) => None,
+            Form::Name(_) | Form::Sense(_) | Form::Assume(_) | Form::Detail(_) => None,
         })
     }
 
@@ -209,7 +195,7 @@ impl Program {
             .zip(self.spans.iter())
             .filter_map(|(form, span)| match form {
                 Form::Formula(_) | Form::Assume(_) | Form::Detail(_) => Some(span.clone()),
-                Form::Name(_) | Form::Sense(_) | Form::Intent(_) => None,
+                Form::Name(_) | Form::Sense(_) => None,
             })
             .collect()
     }

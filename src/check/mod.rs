@@ -407,13 +407,13 @@ fn prepare<O: Oracle>(
             asked: Vec::new(),
             kind: Kind::Assume,
         }),
-        Proposition::Scope { intent, body } => {
+        Proposition::Scope { body } => {
             let mut children = Vec::with_capacity(body.len());
             for claim in body {
                 children.push(prepare(claim, defs, sources, bound, budget, oracle)?);
             }
             Ok(Work {
-                text: intent.clone().unwrap_or_else(|| "detail".to_string()),
+                text: "detail".to_string(),
                 failure: None,
                 cites: Vec::new(),
                 children,
@@ -828,7 +828,7 @@ fn statement(proposition: &Proposition) -> String {
         Proposition::And(xs) => xs.iter().map(statement).collect::<Vec<_>>().join(" and "),
         Proposition::Or(xs) => xs.iter().map(statement).collect::<Vec<_>>().join(" or "),
         Proposition::Not(inner) => format!("not ({})", statement(inner)),
-        Proposition::Scope { intent, .. } => intent.clone().unwrap_or_else(|| "detail".to_string()),
+        Proposition::Scope { .. } => "detail".to_string(),
     }
 }
 

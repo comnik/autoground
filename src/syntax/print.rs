@@ -66,11 +66,6 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
             out.push_str(&quote_const(&sense.template));
             out.push(')');
         }
-        Form::Intent(text) => {
-            out.push_str("(intent ");
-            out.push_str(&quote_const(text));
-            out.push(')');
-        }
         Form::Assume(sentence) => {
             out.push_str("(assume ");
             write_formula(sentence, indent, out);
@@ -225,7 +220,6 @@ mod tests {
     #[test]
     fn round_trip_keeps_a_detail() {
         let src = r#"(detail
-  (intent "how a block is fed")
   (name Concept)
   (sense input "{X} is an input into {Y}")
   (claim "fed"

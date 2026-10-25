@@ -69,7 +69,7 @@ fn declarations(
                 senses.insert((sense.name.clone(), sense.template.clone()));
             }
             Form::Detail(body) => declarations(body, names, senses),
-            Form::Intent(_) | Form::Assume(_) | Form::Formula(_) => {}
+            Form::Assume(_) | Form::Formula(_) => {}
         }
     }
 }
