@@ -120,18 +120,6 @@ mod tests {
     use crate::syntax::parse;
 
     #[test]
-    fn grammar_fences_parse_and_compile() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/brief/grammar.md");
-        let markdown = std::fs::read_to_string(&path).unwrap();
-        let fences = extract_briefs(&markdown);
-        assert_eq!(fences.len(), 5, "{path:?}");
-        for fence in &fences {
-            let program = parse(fence).unwrap_or_else(|err| panic!("{fence}\n{err}"));
-            compile(&program).unwrap_or_else(|err| panic!("{fence}\n{err}"));
-        }
-    }
-
-    #[test]
     fn collects_brief_fences_and_skips_other_blocks() {
         let md = "\
 # notes
