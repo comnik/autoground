@@ -35,9 +35,9 @@ enum Commands {
     /// where that support is a sentence, those sentences entail the claim. An
     /// assumption is taken as true. A detail is discharged when its body is.
     /// `--budget` caps this run in cents and defaults to 1. On a terminal the
-    /// spinner names the sentence in flight, and the finished view is the
-    /// brief: each judged clause carries its own mark, and an undischarged
-    /// clause carries its failure comment. The trace is written in a new
+    /// finished view is the brief: each judged clause carries its own mark,
+    /// and an undischarged clause carries its failure comment. The trace is
+    /// written in a new
     /// directory under `/tmp/autoground/`, or under `--out`.
     /// Exit status is 1 when a top-level claim is not discharged.
     ///
@@ -156,13 +156,6 @@ fn check_cmd(
     out: Option<&Path>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let started = std::time::Instant::now();
-    let live = if std::io::stdout().is_terminal() {
-        let live = autoground::report::run::Live::open()?;
-        live.show_checking()?;
-        Some(live)
-    } else {
-        None
-    };
     let base = brief_dir(input);
     let (src, program, compiled) = load_compiled(input, &base)?;
     let (bound, stdin_tmp) = match file {
@@ -195,10 +188,6 @@ fn check_cmd(
             _ => {}
         }
         let log = Log::create_under(out.unwrap_or_else(|| Path::new(DEFAULT_TRACE_DIR)))?;
-        if let Some(live) = &live {
-            let ui = live.clone();
-            log.set_hook(move |event| ui.on_event(event));
-        }
         let mut oracle = JevOracle::from_env(log.clone())?;
         oracle.set_run_cost_limit_usd(budget_cents as f64 / 100.0);
         finish_check(
@@ -210,7 +199,6 @@ fn check_cmd(
             bound.as_ref(),
             &mut oracle,
             &log,
-            live,
             started,
         )
     })();
@@ -251,6 +239,19 @@ fn read_stdin_file() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Err("could not allocate a stdin file".into())
 }
 
+fn print_report(
+    src: &str,
+    program: &autoground::Program,
+    report: &check::Report,
+) -> io::Result<()> {
+    if std::io::stdout().is_terminal() {
+        autoground::report::run::write_brief(src, &program.clauses, report)
+    } else {
+        print!("{}", write_report(report));
+        Ok(())
+    }
+}
+
 fn finish_check<O: Oracle>(
     src: &str,
     program: &autoground::Program,
@@ -260,11 +261,9 @@ fn finish_check<O: Oracle>(
     bound: Option<&check::BoundFile>,
     oracle: &mut O,
     log: &Log,
-    live: Option<autoground::report::run::Live>,
     started: std::time::Instant,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let report = check::check_bound(claims, base, DEFAULT_BODY_BYTES, bound, oracle)?;
-    log.clear_hook();
     let usage = oracle.usage();
     let flights = oracle.flights().to_vec();
     let flight_limit = oracle.flight_limit();
@@ -290,11 +289,7 @@ fn finish_check<O: Oracle>(
             "usage": UsageRecord::from_usage(&usage),
         }),
     )?;
-    if let Some(live) = live {
-        live.finish(src, &program.clauses, &report)?;
-    } else {
-        print!("{}", write_report(&report));
-    }
+    print_report(src, program, &report)?;
     let true_count = report
         .claims
         .iter()

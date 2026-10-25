@@ -1,31 +1,22 @@
-//! Live view of `autoground check` on a terminal.
+//! Annotated brief printed when `autoground check` finishes on a terminal.
 //!
-//! While requests are in flight, one status line names the sentence being
-//! judged. The working line stops short of the last column and leaves the
-//! last row free. When the check finishes, the view is the brief, printed
-//! once: each judged clause carries its own mark, and an undischarged clause
-//! carries its failure comment. Piped output never draws this.
+//! Each judged clause carries its own mark, and an undischarged clause
+//! carries its failure comment. A pipe prints the indented tree instead.
 
 use std::io::{self, stdout, Write};
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
 
 use crossterm::{
-    cursor, execute, queue,
+    queue,
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
-    terminal::{self, Clear, ClearType},
 };
-use serde_json::Value as Json;
 
 use crate::check::{Failure, Node, Report};
 use crate::syntax::ClauseSpan;
 use crate::value::Value;
 
-const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tone {
-    Rule,
     Source,
     TrueMark,
     FalseMark,
@@ -36,18 +27,6 @@ enum Tone {
     FalseNote,
     /// A `;; assumed` comment. The sentence was not checked against a file.
     Assumed,
-}
-
-enum Mode {
-    Checking,
-    Done,
-}
-
-struct CheckView {
-    mode: Mode,
-    sentence: String,
-    tick: usize,
-    done: Vec<Row>,
 }
 
 #[derive(Clone)]
@@ -78,133 +57,37 @@ fn piece(text: impl Into<String>, tone: Tone) -> Piece {
     }
 }
 
-fn row_one(text: impl Into<String>, tone: Tone) -> Row {
-    Row {
-        pieces: vec![piece(text, tone)],
+/// Print the brief. Each judged clause carries its own mark.
+pub fn write_brief(source: &str, clauses: &[ClauseSpan], report: &Report) -> io::Result<()> {
+    let mut out = stdout();
+    for row in brief_rows(source, clauses, report) {
+        for piece in &row.pieces {
+            if tone_is_bold(piece.tone) {
+                queue!(out, SetAttribute(Attribute::Bold))?;
+            }
+            if let Some(color) = tone_color(piece.tone) {
+                queue!(out, SetForegroundColor(color))?;
+            }
+            queue!(
+                out,
+                Print(&piece.text),
+                ResetColor,
+                SetAttribute(Attribute::Reset)
+            )?;
+        }
+        queue!(out, Print("\n"))?;
     }
+    out.flush()
 }
 
-impl CheckView {
-    fn checking() -> Self {
-        Self {
-            mode: Mode::Checking,
-            sentence: String::new(),
-            tick: 0,
-            done: Vec::new(),
-        }
-    }
-
-    fn on_event(&mut self, event: &Json) {
-        if !matches!(self.mode, Mode::Checking) {
-            return;
-        }
-        if event.get("kind").and_then(|kind| kind.as_str()) != Some("exchange") {
-            return;
-        }
-        let sentence = sentence_of(event);
-        if sentence.is_empty() {
-            return;
-        }
-        self.sentence = sentence;
-        self.tick = self.tick.wrapping_add(1);
-    }
-
-    fn finish(&mut self, source: &str, clauses: &[ClauseSpan], report: &Report) {
-        self.mode = Mode::Done;
-        self.sentence.clear();
-        let paints = paints(clauses, &report.claims);
-        let notes = notes(clauses, &report.claims);
-        self.done = source_rows(source, &paints, &notes);
-    }
-
-    #[cfg(test)]
-    fn rows(&self, width: usize) -> Vec<Row> {
-        self.frame(width.max(20), usize::MAX)
-    }
-
-    /// `max_rows` bounds the working line. The finished brief ignores it and
-    /// is printed once, so a long file may scroll.
-    fn frame(&self, width: usize, _max_rows: usize) -> Vec<Row> {
-        let width = width.max(1);
-        match self.mode {
-            Mode::Checking => vec![status_row(&self.sentence, self.tick, width)],
-            Mode::Done => self.done.clone(),
-        }
-    }
-}
-
-/// Columns and rows a working frame may occupy. The finished brief is not
-/// limited: it is drawn once.
-fn viewport(cols: usize, rows: usize, done: bool) -> (usize, usize) {
-    let width = cols.saturating_sub(1).max(1);
-    let max_rows = if done {
-        usize::MAX
-    } else {
-        rows.saturating_sub(1).max(1)
-    };
-    (width, max_rows)
-}
-
-fn status_row(sentence: &str, tick: usize, width: usize) -> Row {
-    let width = width.max(1);
-    let spin = SPIN[tick % SPIN.len()];
-    let label = format!(" {spin} checking ");
-    let label_len = label.chars().count();
-    if label_len >= width {
-        return row_one(fit(&label, width), Tone::Rule);
-    }
-    let mut tail = if sentence.is_empty() {
-        String::new()
-    } else {
-        format!(" {sentence} ")
-    };
-    let budget = width - label_len;
-    if tail.chars().count() > budget {
-        tail = fit(&tail, budget);
-    }
-    let fill = budget - tail.chars().count();
-    row_one(format!("{label}{}{tail}", "─".repeat(fill)), Tone::Rule)
-}
-
-fn sentence_of(event: &Json) -> String {
-    let Some(questions) = event
-        .get("request")
-        .and_then(|request| request.get("questions"))
-        .and_then(|questions| questions.as_object())
-    else {
-        return String::new();
-    };
-    let mut sentences = Vec::new();
-    for question in questions.values() {
-        let Some(text) = question
-            .get("instructions")
-            .and_then(|instructions| instructions.get("proposition"))
-            .and_then(|proposition| proposition.as_str())
-        else {
-            continue;
-        };
-        if !text.is_empty() && !sentences.iter().any(|seen| seen == text) {
-            sentences.push(text.to_string());
-        }
-    }
-    sentences.join(" · ")
-}
-
-fn fit(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let mut out: String = text.chars().take(width - 1).collect();
-    out.push('…');
-    out
+fn brief_rows(source: &str, clauses: &[ClauseSpan], report: &Report) -> Vec<Row> {
+    let paints = paints(clauses, &report.claims);
+    let notes = notes(clauses, &report.claims);
+    source_rows(source, &paints, &notes)
 }
 
 fn tone_color(tone: Tone) -> Option<Color> {
     Some(match tone {
-        Tone::Rule => Color::DarkGrey,
         Tone::TrueMark => Color::DarkGreen,
         Tone::FalseMark | Tone::FalseText | Tone::FalseNote => Color::Red,
         Tone::UnknownMark | Tone::UnknownText | Tone::Assumed => Color::Yellow,
@@ -482,121 +365,6 @@ fn text_tone(value: Value) -> Tone {
     }
 }
 
-struct Body {
-    view: CheckView,
-    drawn: u16,
-}
-
-impl Body {
-    fn draw(&mut self) -> io::Result<()> {
-        let (cols, term_rows) = terminal::size()
-            .map(|(w, h)| (w as usize, h as usize))
-            .unwrap_or((80, 24));
-        let done = matches!(self.view.mode, Mode::Done);
-        let (width, max_rows) = viewport(cols, term_rows, done);
-        let rows = self.view.frame(width, max_rows);
-        let mut out = stdout();
-        if self.drawn > 0 {
-            queue!(out, cursor::MoveToColumn(0), cursor::MoveUp(self.drawn))?;
-        }
-        for row in &rows {
-            queue!(out, Clear(ClearType::CurrentLine))?;
-            for piece in &row.pieces {
-                if tone_is_bold(piece.tone) {
-                    queue!(out, SetAttribute(Attribute::Bold))?;
-                }
-                if let Some(color) = tone_color(piece.tone) {
-                    queue!(out, SetForegroundColor(color))?;
-                }
-                queue!(
-                    out,
-                    Print(&piece.text),
-                    ResetColor,
-                    SetAttribute(Attribute::Reset)
-                )?;
-            }
-            queue!(out, Print("\r\n"))?;
-        }
-        let extra = (self.drawn as usize).saturating_sub(rows.len());
-        for _ in 0..extra {
-            queue!(out, Clear(ClearType::CurrentLine), Print("\r\n"))?;
-        }
-        if extra > 0 {
-            queue!(out, cursor::MoveUp(extra as u16))?;
-        }
-        out.flush()?;
-        self.drawn = rows.len() as u16;
-        Ok(())
-    }
-}
-
-/// In-place status line. Dropping it shows the cursor again.
-#[derive(Clone)]
-pub struct Live {
-    body: Arc<Mutex<Body>>,
-    hidden: Arc<Mutex<bool>>,
-}
-
-impl Live {
-    pub fn open() -> io::Result<Self> {
-        execute!(stdout(), cursor::Hide)?;
-        Ok(Self {
-            body: Arc::new(Mutex::new(Body {
-                view: CheckView::checking(),
-                drawn: 0,
-            })),
-            hidden: Arc::new(Mutex::new(true)),
-        })
-    }
-
-    pub fn show_checking(&self) -> io::Result<()> {
-        let mut body = self.lock();
-        body.view = CheckView::checking();
-        body.draw()
-    }
-
-    /// Apply one shared-log event and redraw. Draw errors are ignored so a
-    /// display glitch does not fail the check.
-    pub fn on_event(&self, event: &Json) {
-        if event.get("kind").and_then(|kind| kind.as_str()) != Some("exchange") {
-            return;
-        }
-        let mut body = self.lock();
-        body.view.on_event(event);
-        let _ = body.draw();
-    }
-
-    pub fn finish(&self, source: &str, clauses: &[ClauseSpan], report: &Report) -> io::Result<()> {
-        let mut body = self.lock();
-        body.view.finish(source, clauses, report);
-        body.draw()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Body> {
-        self.body
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    }
-}
-
-impl Drop for Live {
-    fn drop(&mut self) {
-        // The log hook holds one clone. Only the last clone restores the cursor,
-        // so clearing the hook mid-run does not show it early.
-        if Arc::strong_count(&self.body) > 1 {
-            return;
-        }
-        let mut hidden = self
-            .hidden
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if *hidden {
-            let _ = execute!(stdout(), cursor::Show);
-            *hidden = false;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,60 +417,7 @@ mod tests {
 
     fn finished(src: &str, report: &Report) -> Vec<Row> {
         let program = parse(src).unwrap();
-        let mut view = CheckView::checking();
-        view.finish(src, &program.clauses, report);
-        view.rows(160)
-    }
-
-    #[test]
-    fn checking_names_the_sentence() {
-        let mut view = CheckView::checking();
-        let idle = view.rows(40);
-        assert_eq!(idle.len(), 1);
-        assert!(idle[0].plain().contains("checking"), "{}", idle[0].plain());
-        assert!(idle[0].plain().contains('─'), "{}", idle[0].plain());
-
-        view.on_event(&serde_json::json!({
-            "kind": "search_step",
-            "proposition": "ignored"
-        }));
-        assert!(view.rows(80)[0].plain().contains("checking"));
-        assert!(!view.rows(80)[0].plain().contains("ignored"));
-
-        view.on_event(&serde_json::json!({
-            "kind": "exchange",
-            "request": {
-                "questions": {
-                    "q1": {"instructions": {"proposition": "Search calls Oracle"}},
-                    "q2": {"instructions": {"proposition": "Search calls Oracle"}}
-                }
-            }
-        }));
-        let named = view.rows(80)[0].plain();
-        assert!(named.contains('⠙') || named.contains('⠹'), "{named}");
-        assert!(named.contains("Search calls Oracle"), "{named}");
-        assert!(!named.contains(" · "), "{named}");
-    }
-
-    #[test]
-    fn a_working_line_stays_inside_the_terminal() {
-        assert_eq!(viewport(120, 40, false), (119, 39));
-        assert_eq!(viewport(120, 40, true), (119, usize::MAX));
-        assert_eq!(viewport(1, 1, false), (1, 1));
-
-        let mut view = CheckView::checking();
-        view.on_event(&serde_json::json!({
-            "kind": "exchange",
-            "request": {
-                "questions": {
-                    "q1": {"instructions": {"proposition": "Search calls Oracle and the sentence is long"}}
-                }
-            }
-        }));
-        let row = view.frame(24, 8);
-        assert_eq!(row.len(), 1);
-        assert!(row[0].plain().chars().count() <= 24, "{}", row[0].plain());
-        assert!(row[0].plain().contains("checking"), "{}", row[0].plain());
+        brief_rows(src, &program.clauses, report)
     }
 
     #[test]
