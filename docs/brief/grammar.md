@@ -22,8 +22,7 @@ witness   ::= "(" "witness" path+ ")"
 and       ::= "(" "and" formula* ")"
 or        ::= "(" "or" formula* ")"
 not       ::= "(" "not" formula ")"
-sentence  ::= "(" reading arg* ")"
-reading   ::= ident | string
+sentence  ::= string | "(" ident arg* ")" | "(" string arg+ ")"
 arg       ::= ident | string
 ident     ::= [qualifier "/"] ident-name
 path      ::= string | "$"
@@ -50,14 +49,14 @@ senses declared outside gain the sentences validated inside.
 ```
 
 ```brief
-(claim ("alpha is the first letter.")
+(claim "alpha is the first letter."
   (witness "note.txt"))
 ```
 
 ```brief
-(assume ("the file is small"))
-(claim ("the brief may treat the file as small")
-  ("the file is small"))
+(assume "the file is small")
+(claim "the brief may treat the file as small"
+  "the file is small")
 ```
 
 ```brief
@@ -67,7 +66,7 @@ senses declared outside gain the sentences validated inside.
   (intent "inputs")
   (name LogicBlock)
   (claim (input Concept LogicBlock)
-    ("Concept is closed over")))
+    "Concept is closed over"))
 ```
 
 ```brief

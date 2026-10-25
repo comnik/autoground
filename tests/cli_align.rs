@@ -80,8 +80,8 @@ fn align_names_a_one_sided_statement() {
     let dir = scratch("differ");
     let left = dir.join("left.brief");
     let right = dir.join("right.brief");
-    std::fs::write(&left, "(\"alpha\")\n").unwrap();
-    std::fs::write(&right, "(\"beta\")\n").unwrap();
+    std::fs::write(&left, "\"alpha\"\n").unwrap();
+    std::fs::write(&right, "\"beta\"\n").unwrap();
     let out = bin()
         .args(["align", left.to_str().unwrap(), right.to_str().unwrap()])
         .output()

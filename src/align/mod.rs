@@ -201,13 +201,13 @@ See the model.
 
 ```brief
 (name Frontend)
-(\"Frontend serves pages\")
+\"Frontend serves pages\"
 ```
 
 The rest is prose.
 ";
         let src = crate::brief_source(markdown).unwrap();
-        let left = model_from("(name Frontend)\n(\"Frontend serves pages\")\n");
+        let left = model_from("(name Frontend)\n\"Frontend serves pages\"\n");
         assert!(mismatch(&left, &model_from(&src)).is_none());
     }
 
@@ -217,7 +217,7 @@ The rest is prose.
             r#"
 (name Frontend)
 (sense depends_on "{X} depends on {Y}")
-(claim ("Frontend serves pages") (witness "web.rs"))
+(claim "Frontend serves pages" (witness "web.rs"))
 "#,
         );
         let right = model_from(
@@ -225,7 +225,7 @@ The rest is prose.
 (name Frontend)
 (name Cache)
 (sense depends_on "{X} calls {Y}")
-(claim ("Cache stores pages") (witness "cache.rs"))
+(claim "Cache stores pages" (witness "cache.rs"))
 "#,
         );
         assert_eq!(
@@ -250,23 +250,23 @@ statements
 
     #[test]
     fn a_witness_path_is_not_a_statement() {
-        let left = model_from("(claim (\"alpha\") (witness \"note.txt\"))\n");
-        let right = model_from("(claim (\"alpha\") (witness \"other.txt\"))\n");
+        let left = model_from("(claim \"alpha\" (witness \"note.txt\"))\n");
+        let right = model_from("(claim \"alpha\" (witness \"other.txt\"))\n");
         assert!(mismatch(&left, &right).is_none());
     }
 
     #[test]
     fn and_and_or_contribute_the_same_sentences() {
-        let and = model_from("(and (\"alpha\") (\"beta\"))\n");
-        let or = model_from("(or (\"alpha\") (\"beta\"))\n");
+        let and = model_from("(and \"alpha\" \"beta\")\n");
+        let or = model_from("(or \"alpha\" \"beta\")\n");
         assert!(mismatch(&and, &or).is_none());
     }
 
     #[test]
     fn a_second_not_restores_the_sentence() {
-        let once = model_from("(not (\"alpha\"))\n");
-        let twice = model_from("(not (not (\"alpha\")))\n");
-        let positive = model_from("(\"alpha\")\n");
+        let once = model_from("(not \"alpha\")\n");
+        let twice = model_from("(not (not \"alpha\"))\n");
+        let positive = model_from("\"alpha\"\n");
         assert!(mismatch(&twice, &positive).is_none());
         let diff = mismatch(&once, &positive).unwrap();
         assert!(diff.contains("only in left\n    not alpha\n"), "{diff}");
@@ -280,10 +280,10 @@ statements
 (name Frontend)
 (detail
   (name Cache)
-  (assume ("Cache stores pages")))
+  (assume "Cache stores pages"))
 "#,
         );
-        let right = model_from("(name Frontend)\n(assume (\"Cache stores pages\"))\n");
+        let right = model_from("(name Frontend)\n(assume \"Cache stores pages\")\n");
         let diff = mismatch(&left, &right).unwrap();
         assert_eq!(
             diff,

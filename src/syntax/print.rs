@@ -122,6 +122,12 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
             out.push(')');
         }
         Formula::Apply { reading, args } => {
+            if args.is_empty() {
+                if let Reading::Inline { template, holes: _ } = reading {
+                    out.push_str(&quote_const(template));
+                    return;
+                }
+            }
             out.push('(');
             match reading {
                 Reading::Sense(name) => push_ident(name, out),
@@ -187,7 +193,7 @@ mod tests {
 (sense borrowed_from "{borrower} borrows from {lender}")
 ("{X} depends on {Y}" aaa bbb)
 ("{X} is deprecated" aaa)
-("Oracle calls the TypeSafe API")
+"Oracle calls the TypeSafe API"
 (depends_on aaa bbb)
 (and
   (depends_on aaa bbb)
@@ -223,7 +229,7 @@ mod tests {
   (sense input "{X} is an input into {Y}")
   (and
     (input Concept LogicBlock)
-    ("Concept is named")))
+    "Concept is named"))
 "#;
         let program = parse(src).unwrap();
         let again = parse(&print_program(&program)).unwrap();
@@ -232,7 +238,7 @@ mod tests {
 
     #[test]
     fn round_trip_prints_a_dollar_witness_unquoted() {
-        let src = "(claim (\"alpha\") (witness $ \"notes.md\"))\n";
+        let src = "(claim \"alpha\" (witness $ \"notes.md\"))\n";
         let program = parse(src).unwrap();
         let printed = print_program(&program);
         assert!(printed.contains("(witness $ \"notes.md\")"), "{printed}");

@@ -423,9 +423,9 @@ mod tests {
     #[test]
     fn finished_view_marks_the_brief() {
         let src = "\
-(claim (\"search finds the window\") (witness \"src/search.rs\"))
-(\"bare sentence\")
-(or (\"kept\") (\"dropped\"))
+(claim \"search finds the window\" (witness \"src/search.rs\"))
+\"bare sentence\"
+(or \"kept\" \"dropped\")
 ";
         let report = Report {
             claims: vec![
@@ -461,10 +461,10 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "✓ (claim (\"search finds the window\") (witness \"src/search.rs\"))".to_string(),
+                "✓ (claim \"search finds the window\" (witness \"src/search.rs\"))".to_string(),
                 "  ;; unpinned".to_string(),
-                "? (\"bare sentence\")".to_string(),
-                "✓ (or (\"kept\") (\"dropped\"))".to_string(),
+                "? \"bare sentence\"".to_string(),
+                "✓ (or \"kept\" \"dropped\")".to_string(),
             ]
         );
         assert!(rows[2]
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn a_contradicted_witness_is_the_red_clause() {
-        let src = "(and (claim (\"nope\") (witness \"gone.rs\")) (claim (\"search finds the window\") (witness \"src/search.rs\")))\n";
+        let src = "(and (claim \"nope\" (witness \"gone.rs\")) (claim \"search finds the window\" (witness \"src/search.rs\")))\n";
         let report = Report {
             claims: vec![connective(
                 "and",
@@ -520,8 +520,8 @@ mod tests {
     #[test]
     fn an_implication_failure_comments_the_detail() {
         let src = "\
-(claim (\"the head\")
-  (claim (\"search finds the window\") (witness \"src/search.rs\")))
+(claim \"the head\"
+  (claim \"search finds the window\" (witness \"src/search.rs\")))
 ";
         let report = Report {
             claims: vec![detail(
@@ -539,7 +539,7 @@ mod tests {
         let rows = finished(src, &report);
         let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
         assert_eq!(text[0], "  ;; not entailed");
-        assert!(text[1].starts_with("? (claim (\"the head\")"), "{text:?}");
+        assert!(text[1].starts_with("? (claim \"the head\""), "{text:?}");
         assert!(
             text.iter()
                 .any(|line| line.starts_with('✓') && line.contains("(witness")),
@@ -550,10 +550,10 @@ mod tests {
     #[test]
     fn a_detail_marks_each_body_witness() {
         let src = "\
-(claim (\"the head\")
+(claim \"the head\"
   (and
-    (claim (\"search finds the window\") (witness \"src/search.rs\"))
-    (claim (\"nope\") (witness \"gone.rs\"))))
+    (claim \"search finds the window\" (witness \"src/search.rs\"))
+    (claim \"nope\" (witness \"gone.rs\"))))
 ";
         let report = Report {
             claims: vec![detail(
@@ -585,12 +585,12 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "? (claim (\"the head\")".to_string(),
+                "? (claim \"the head\"".to_string(),
                 "?   (and".to_string(),
-                "✓     (claim (\"search finds the window\") (witness \"src/search.rs\"))"
+                "✓     (claim \"search finds the window\" (witness \"src/search.rs\"))"
                     .to_string(),
                 "      ;; not entailed".to_string(),
-                "?     (claim (\"nope\") (witness \"gone.rs\"))))".to_string(),
+                "?     (claim \"nope\" (witness \"gone.rs\"))))".to_string(),
             ]
         );
         assert!(rows[4]
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn an_assumption_is_marked_assumed() {
-        let src = "(assume (\"the premise holds\"))\n";
+        let src = "(assume \"the premise holds\")\n";
         let report = Report {
             claims: vec![Node {
                 text: "the premise holds".to_string(),

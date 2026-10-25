@@ -21,7 +21,7 @@ fn quoted_witness(dir: &Path) -> PathBuf {
     let brief = dir.join("model.brief");
     std::fs::write(
         &brief,
-        "(claim (\"alpha is the first letter.\") (witness \"note.txt\"))\n",
+        "(claim \"alpha is the first letter.\" (witness \"note.txt\"))\n",
     )
     .unwrap();
     brief
@@ -79,7 +79,7 @@ fn check_discharges_a_quoted_witness() {
 fn check_exits_nonzero_when_a_claim_is_undischarged() {
     let dir = scratch("open");
     let brief = dir.join("model.brief");
-    std::fs::write(&brief, "(\"nothing cites this\")\n").unwrap();
+    std::fs::write(&brief, "\"nothing cites this\"\n").unwrap();
     let out = bin()
         .args(["check", brief.to_str().unwrap()])
         .output()
@@ -165,7 +165,7 @@ fn check_reads_brief_blocks_from_markdown() {
     let path = dir.join("notes.md");
     std::fs::write(
         &path,
-        "# notes\n\n```brief\n(\"Frontend is a component\")\n```\n",
+        "# notes\n\n```brief\n\"Frontend is a component\"\n```\n",
     )
     .unwrap();
     let out = bin()
@@ -203,7 +203,7 @@ fn check_rejects_markdown_without_brief_blocks() {
 fn check_rejects_a_dollar_without_a_file() {
     let dir = scratch("dollar");
     let brief = dir.join("model.brief");
-    std::fs::write(&brief, "(claim (\"alpha\") (witness $))\n").unwrap();
+    std::fs::write(&brief, "(claim \"alpha\" (witness $))\n").unwrap();
     let out = bin()
         .args(["check", brief.to_str().unwrap()])
         .env_remove("TYPESAFE_API_KEY")
@@ -220,7 +220,7 @@ fn check_rejects_a_dollar_without_a_file() {
 fn check_dash_reads_stdin_before_the_oracle() {
     let dir = scratch("stdin");
     let brief = dir.join("model.brief");
-    std::fs::write(&brief, "(claim (\"alpha\") (witness $))\n").unwrap();
+    std::fs::write(&brief, "(claim \"alpha\" (witness $))\n").unwrap();
     let mut child = bin()
         .args(["check", brief.to_str().unwrap(), "-"])
         .env_remove("TYPESAFE_API_KEY")
@@ -243,7 +243,7 @@ fn check_dash_reads_stdin_before_the_oracle() {
 fn check_dash_without_a_dollar_does_not_call_the_oracle() {
     let dir = scratch("stdin-plain");
     let brief = dir.join("model.brief");
-    std::fs::write(&brief, "(claim (\"alpha\") (witness \"note.txt\"))\n").unwrap();
+    std::fs::write(&brief, "(claim \"alpha\" (witness \"note.txt\"))\n").unwrap();
     let out = bin()
         .args(["check", brief.to_str().unwrap(), "-"])
         .env_remove("TYPESAFE_API_KEY")
@@ -261,7 +261,7 @@ fn check_dash_without_a_dollar_does_not_call_the_oracle() {
 fn check_rejects_a_file_without_a_dollar() {
     let dir = scratch("file");
     let brief = dir.join("model.brief");
-    std::fs::write(&brief, "(claim (\"alpha\") (witness \"note.txt\"))\n").unwrap();
+    std::fs::write(&brief, "(claim \"alpha\" (witness \"note.txt\"))\n").unwrap();
     let note = dir.join("note.txt");
     std::fs::write(&note, "alpha\n").unwrap();
     let out = bin()

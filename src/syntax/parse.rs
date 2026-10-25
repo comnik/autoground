@@ -525,6 +525,9 @@ fn validate_namespace(name: &str) -> Result<(), String> {
 }
 
 fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
+    if let Some((formula, span)) = inline_sentence(s)? {
+        return Ok((Form::Formula(formula), Some(span)));
+    }
     let xs = list(s)?;
     match xs.first().map(|item| &item.kind) {
         Some(SexpKind::Symbol(head)) if head == "name" => {
@@ -586,6 +589,9 @@ fn lower_sense(xs: &[Sexp]) -> Result<Sense, ParseError> {
 }
 
 fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
+    if let Some(sentence) = inline_sentence(s)? {
+        return Ok(sentence);
+    }
     let xs = list(s)?;
     if xs.is_empty() {
         return Err(err(1, 1, "empty list is not a formula"));
@@ -636,6 +642,9 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
             clause(Vec::new()),
         )),
         SexpKind::String(template) => {
+            if xs.len() == 1 {
+                return Err(err_at(s, "a finished sentence is written as a string"));
+            }
             let holes = hole_names(template).map_err(|message| err(1, 1, message))?;
             Ok((
                 Formula::Apply {
@@ -874,6 +883,27 @@ fn use_symbol(s: &Sexp, spelling: &str) -> Result<Ident, ParseError> {
     })
 }
 
+/// A string where a formula is expected is that sentence.
+fn inline_sentence(s: &Sexp) -> Result<Option<(Formula, ClauseSpan)>, ParseError> {
+    let SexpKind::String(template) = &s.kind else {
+        return Ok(None);
+    };
+    let holes = hole_names(template).map_err(|message| err_at(s, message))?;
+    Ok(Some((
+        Formula::Apply {
+            reading: Reading::Inline {
+                template: template.clone(),
+                holes,
+            },
+            args: Vec::new(),
+        },
+        ClauseSpan {
+            span: s.span.clone(),
+            children: Vec::new(),
+        },
+    )))
+}
+
 fn list(s: &Sexp) -> Result<&[Sexp], ParseError> {
     match &s.kind {
         SexpKind::List(xs) => Ok(xs),
@@ -950,7 +980,7 @@ mod tests {
 
     #[test]
     fn a_brief_keeps_unicode_text() {
-        let src = "(intent \"Nestlé\")\n(\"Nestlé\")\n(name Café)\n";
+        let src = "(intent \"Nestlé\")\n\"Nestlé\"\n(name Café)\n";
         let program = parse(src).unwrap();
         assert_eq!(&src[program.spans[0].clone()], "(intent \"Nestlé\")");
         assert!(matches!(&program.forms[0], Form::Intent(text) if text == "Nestlé"));
@@ -978,7 +1008,7 @@ mod tests {
 
 ("{X} depends on {Y}" aaa bbb)
 ("{X} is deprecated" aaa)
-("Oracle calls the TypeSafe API")
+"Oracle calls the TypeSafe API"
 (depends_on aaa bbb)
 (and (depends_on aaa bbb) (not (borrowed_from aaa bbb)))
 "#;
@@ -1007,7 +1037,7 @@ mod tests {
   (name Concept)
   (name LogicBlock)
   (sense input "{X} is an input into {Y}")
-  (claim (input Concept LogicBlock) ("Concept is named")))
+  (claim (input Concept LogicBlock) "Concept is named"))
 "#;
         let program = parse(src).unwrap();
         assert_eq!(program.names().count(), 0);
@@ -1025,7 +1055,7 @@ mod tests {
     #[test]
     fn parses_a_witness_as_the_support_of_a_claim() {
         let src = r#"
-(claim ("Search posts listings to the oracle") (witness "src/search/mod.rs" "src/oracle/jev.rs"))
+(claim "Search posts listings to the oracle" (witness "src/search/mod.rs" "src/oracle/jev.rs"))
 "#;
         let formula = parse(src).unwrap().claims().next().unwrap().clone();
         let Formula::Claim { sentence, support } = formula else {
@@ -1046,7 +1076,7 @@ mod tests {
 
     #[test]
     fn a_dollar_witness_is_the_symbol() {
-        let formula = parse("(claim (\"alpha\") (witness $ \"notes.md\"))")
+        let formula = parse("(claim \"alpha\" (witness $ \"notes.md\"))")
             .unwrap()
             .claims()
             .next()
@@ -1067,15 +1097,15 @@ mod tests {
             ("(witness)", "takes a path"),
             ("(witness (\"only the fact\"))", "path is a string"),
             (
-                "(witness (and (\"a\") (\"b\")) \"a.rs\")",
+                "(witness (and \"a\" \"b\") \"a.rs\")",
                 "path is a string",
             ),
             ("(witness path)", "path is a string"),
             ("(witness \"\")", "not empty"),
             ("(claim)", "takes a sentence and a support"),
-            ("(claim (and (\"a\") (\"b\")) (\"c\"))", "heads a sentence"),
+            ("(claim (and \"a\" \"b\") \"c\")", "heads a sentence"),
             ("(assume)", "takes a sentence"),
-            ("(assume (and (\"a\") (\"b\")))", "takes a sentence"),
+            ("(assume (and \"a\" \"b\"))", "takes a sentence"),
             ("(intent)", "takes one string"),
             ("(intent \"\")", "not empty"),
         ] {
@@ -1106,9 +1136,9 @@ mod tests {
         assert!(err.message.contains("declaration"));
         let err = parse("(and (ns com.acme.product))").unwrap_err();
         assert!(err.message.contains("declaration"), "{err}");
-        let err = parse("(and (assume (\"a\")))").unwrap_err();
+        let err = parse("(and (assume \"a\"))").unwrap_err();
         assert!(err.message.contains("declaration"), "{err}");
-        let err = parse("(and (detail (claim (\"a\") (\"b\"))))").unwrap_err();
+        let err = parse("(and (detail (claim \"a\" \"b\")))").unwrap_err();
         assert!(err.message.contains("scope"), "{err}");
     }
 
@@ -1227,8 +1257,46 @@ mod tests {
 
     #[test]
     fn skips_comments() {
-        let program = parse(";; hi\n(\"Oracle calls the TypeSafe API\")\n").unwrap();
+        let program = parse(";; hi\n\"Oracle calls the TypeSafe API\"\n").unwrap();
         assert_eq!(program.forms.len(), 1);
+    }
+
+    #[test]
+    fn a_string_is_a_finished_sentence() {
+        let src = "\"the file is small\"\n";
+        let program = parse(src).unwrap();
+        match &program.forms[0] {
+            Form::Formula(Formula::Apply {
+                reading: Reading::Inline { template, holes },
+                args,
+            }) => {
+                assert_eq!(template, "the file is small");
+                assert!(holes.is_empty());
+                assert!(args.is_empty());
+            }
+            other => panic!("sentence: {other:?}"),
+        }
+        assert_eq!(&src[program.spans[0].clone()], "\"the file is small\"");
+
+        let wrapped = parse("(\"the file is small\")").unwrap_err();
+        assert!(
+            wrapped
+                .message
+                .contains("a finished sentence is written as a string"),
+            "{wrapped}"
+        );
+
+        let applied = parse("(\"{Name} is a component\" Backend)").unwrap();
+        match &applied.forms[0] {
+            Form::Formula(Formula::Apply {
+                reading: Reading::Inline { template, .. },
+                args,
+            }) => {
+                assert_eq!(template, "{Name} is a component");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("template: {other:?}"),
+        }
     }
 
     #[test]
@@ -1248,10 +1316,10 @@ mod tests {
 
 (or
   (calls Oracle TypeSafe)
-  (\"Oracle calls the TypeSafe API\"))
+  \"Oracle calls the TypeSafe API\")
 
 (and
-  (\"Frontend is a component of the system\")
+  \"Frontend is a component of the system\"
   (\"{Name} is a component of the system\" Backend)
   (\"{caller} calls {callee}\" Frontend Backend))";
         let program = parse(src).unwrap();
@@ -1271,7 +1339,7 @@ mod tests {
         assert_eq!(program.clauses[3].children.len(), 3);
         assert_eq!(
             &src[program.clauses[3].children[0].span.clone()],
-            "(\"Frontend is a component of the system\")"
+            "\"Frontend is a component of the system\""
         );
         assert_eq!(
             &src[program.clauses[3].children[2].span.clone()],

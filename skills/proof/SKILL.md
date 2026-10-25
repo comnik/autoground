@@ -56,7 +56,7 @@ A brief consists of *names*, *senses*, *claims*, and *witnesses*:
 (claim (is_component Frontend)
   (witness "src/frontend/mod.rs"))
 
-(claim ("Sweep asks the oracle whether a path matches the filter")
+(claim "Sweep asks the oracle whether a path matches the filter"
   (witness "src/sweep/mod.rs"))
 
 ;; A claim can be supported by another claim. Cite a sentence already claimed.
@@ -69,8 +69,8 @@ A brief consists of *names*, *senses*, *claims*, and *witnesses*:
 
 (claim (calls Sweep Oracle)
   (and
-    ("Sweep asks the oracle whether a path matches the filter")
-    (claim ("Sweep's oracle posts are the Jev HTTP call")
+    "Sweep asks the oracle whether a path matches the filter"
+    (claim "Sweep's oracle posts are the Jev HTTP call"
       (witness "src/sweep/mod.rs" "src/oracle/jev.rs"))))
 
 ;; A claim that cannot be validated from one witness takes `not`, `and`, or `or` as its support.
@@ -81,7 +81,7 @@ A brief consists of *names*, *senses*, *claims*, and *witnesses*:
   (and
     (is_component Frontend)
     (is_data AST)
-    (claim ("Frontend parses the program and returns AST")
+    (claim "Frontend parses the program and returns AST"
       (witness "src/frontend/parser.rs"))))
 
 (claim (related Frontend Backend)
@@ -95,7 +95,7 @@ Applying a sense to names fills the template:
 ```
    (returns Frontend AST)
 => ("{Name} returns {Name}" Frontend AST)
-=> ("Frontend returns AST")
+=> "Frontend returns AST"
 => Frontend returns AST
 ```
 

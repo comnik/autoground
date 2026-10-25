@@ -812,7 +812,7 @@ mod tests {
   (sense input "{X} is an input into {Y}")
   (claim (input Concept LogicBlock)
     (and
-      ("Concept is closed over by a LogicBlock")
+      "Concept is closed over by a LogicBlock"
       (input Relationship LogicBlock))))
 "#,
         );
@@ -856,7 +856,7 @@ mod tests {
                 r#"
 (detail
   (name Local)
-  (claim ("Local holds") ("given")))
+  (claim "Local holds" "given"))
 ("{Name} holds" Local)
 "#,
             )
@@ -874,8 +874,8 @@ mod tests {
 (detail
   (detail
     (name Hidden)
-    (claim ("Hidden holds") ("given")))
-  (claim ("{Name} holds" Hidden) ("given")))
+    (claim "Hidden holds" "given"))
+  (claim ("{Name} holds" Hidden) "given"))
 "#,
             )
             .unwrap(),
@@ -892,7 +892,7 @@ mod tests {
 (name Concept)
 (detail
   (name Concept)
-  (claim ("Concept holds") ("given")))
+  (claim "Concept holds" "given"))
 "#,
             )
             .unwrap(),
@@ -909,8 +909,8 @@ mod tests {
         let twice = compile(
             &parse(
                 r#"
-(claim ("arrow") ("one"))
-(claim ("arrow") ("two"))
+(claim "arrow" "one")
+(claim "arrow" "two")
 "#,
             )
             .unwrap(),
@@ -924,8 +924,8 @@ mod tests {
         let cycle = compile(
             &parse(
                 r#"
-(claim ("arrow") ("leaf"))
-(claim ("leaf") ("arrow"))
+(claim "arrow" "leaf")
+(claim "leaf" "arrow")
 "#,
             )
             .unwrap(),
@@ -966,9 +966,9 @@ mod tests {
     #[test]
     fn a_witness_path_is_relative_to_the_brief() {
         for (src, path) in [
-            ("(claim (\"a\") (witness \"../notes.txt\"))", "../notes.txt"),
+            ("(claim \"a\" (witness \"../notes.txt\"))", "../notes.txt"),
             (
-                "(claim (\"a\") (witness \"examples/sqrt2.brief\"))",
+                "(claim \"a\" (witness \"examples/sqrt2.brief\"))",
                 "examples/sqrt2.brief",
             ),
         ] {
@@ -985,11 +985,11 @@ mod tests {
         }
         for (src, needle) in [
             (
-                "(claim (\"a\") (witness \"/etc/passwd\"))",
+                "(claim \"a\" (witness \"/etc/passwd\"))",
                 "`/etc/passwd` is not a path relative to the brief",
             ),
             (
-                "(claim (\"a\") (witness \"src/a.rs\" \"src/a.rs\"))",
+                "(claim \"a\" (witness \"src/a.rs\" \"src/a.rs\"))",
                 "witness cites `src/a.rs` twice",
             ),
             (
@@ -1007,7 +1007,7 @@ mod tests {
         let err = compile(
             &parse(
                 r#"
-(claim ("arrow") (claim ("arrow") (witness "src/a.rs")))
+(claim "arrow" (claim "arrow" (witness "src/a.rs")))
 "#,
             )
             .unwrap(),
@@ -1023,10 +1023,10 @@ mod tests {
     fn an_assumption_is_recorded_in_source_order() {
         let c = compiled(
             r#"
-(assume ("the file is small"))
+(assume "the file is small")
 (detail
-  (assume ("a local step holds"))
-  (claim ("the conclusion") ("a local step holds")))
+  (assume "a local step holds")
+  (claim "the conclusion" "a local step holds"))
 "#,
         );
         assert_eq!(

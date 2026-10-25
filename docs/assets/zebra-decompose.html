@@ -381,7 +381,7 @@
     phase(2, 1);
     const top = claim('The Spaniard does not smoke Old Gold.', 400, 285);
     await sleep(600);
-    await caption('It breaks down into two smaller claims.', '(and ("The Spaniard does not own snails.") (c-oldgold-snails))');
+    await caption('It breaks down into two smaller claims.', '(and "The Spaniard does not own snails." (c-oldgold-snails))');
     const c1 = [connect('M400,301 L400,308'), connect('M400,332 C400,344 220,334 220,346'), connect('M400,332 C400,344 580,334 580,346')];
     const and1 = op(400, 320);
     await sleep(400);
@@ -416,7 +416,7 @@
     await sleep(2000);
 
     phase(2, 2);
-    await caption('The stuck claim gets a premise that says so.', '(claim ("The dog and the snails are different pets.") (frame-pets))');
+    await caption('The stuck claim gets a premise that says so.', '(claim "The dog and the snails are different pets." (frame-pets))');
     left.classList.remove('neutral');
     top.classList.remove('neutral');
     const c2 = [

@@ -1323,7 +1323,7 @@ mod tests {
         let dir = scratch("unpinned");
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(\"Search calls Oracle\")"),
+            &compiled("\"Search calls Oracle\""),
             &dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
@@ -1340,7 +1340,7 @@ mod tests {
         let dir = scratch("missing");
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(claim (\"Search calls Oracle\") (witness \"src/nope.rs\"))"),
+            &compiled("(claim \"Search calls Oracle\" (witness \"src/nope.rs\"))"),
             &dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
@@ -1366,10 +1366,10 @@ mod tests {
         fs::write(brief_dir.join("file.briefing"), "alpha\n").unwrap();
         let mut oracle = Rec::new(entailed);
         for src in [
-            "(claim (\"alpha\") (witness \"notes.brief\"))",
-            "(claim (\"alpha\") (witness \"../Notes.BRIEF\"))",
-            "(claim (\"alpha\") (witness \".brief\"))",
-            "(claim (\"alpha\") (witness \"note.txt\" \"notes.brief\"))",
+            "(claim \"alpha\" (witness \"notes.brief\"))",
+            "(claim \"alpha\" (witness \"../Notes.BRIEF\"))",
+            "(claim \"alpha\" (witness \".brief\"))",
+            "(claim \"alpha\" (witness \"note.txt\" \"notes.brief\"))",
         ] {
             let report =
                 check(&compiled(src), &brief_dir, DEFAULT_BODY_BYTES, &mut oracle).unwrap();
@@ -1387,7 +1387,7 @@ mod tests {
         assert!(oracle.seen.is_empty());
 
         let report = check(
-            &compiled("(claim (\"alpha\") (witness \"file.briefing\"))"),
+            &compiled("(claim \"alpha\" (witness \"file.briefing\"))"),
             &brief_dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
@@ -1405,7 +1405,7 @@ mod tests {
         fs::write(dir.join("note.txt"), "alpha\n").unwrap();
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(claim (\"alpha\") (witness \"../note.txt\"))"),
+            &compiled("(claim \"alpha\" (witness \"../note.txt\"))"),
             &brief_dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
@@ -1423,7 +1423,7 @@ mod tests {
         fs::write(dir.join("src/search.rs"), "fn search() {}").unwrap();
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(claim (\"search finds the window\") (witness \"src/search.rs\"))"),
+            &compiled("(claim \"search finds the window\" (witness \"src/search.rs\"))"),
             &dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
@@ -1447,7 +1447,7 @@ mod tests {
         fs::write(dir.join("src/b.rs"), "bbb").unwrap();
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(claim (\"together\") (witness \"src/a.rs\" \"src/b.rs\"))"),
+            &compiled("(claim \"together\" (witness \"src/a.rs\" \"src/b.rs\"))"),
             &dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
@@ -1475,8 +1475,8 @@ mod tests {
             &compiled(
                 r#"
 (and
-  (claim ("one") (witness "a.rs"))
-  (claim ("two") (witness "a.rs")))
+  (claim "one" (witness "a.rs"))
+  (claim "two" (witness "a.rs")))
 "#,
             ),
             &dir,
@@ -1496,8 +1496,8 @@ mod tests {
         let report = check(
             &compiled(
                 r#"
-(claim ("holds")
-  (claim ("holds in the file") (witness "a.rs")))
+(claim "holds"
+  (claim "holds in the file" (witness "a.rs")))
 "#,
             ),
             &dir,
@@ -1538,8 +1538,8 @@ mod tests {
         let report = check(
             &compiled(
                 r#"
-(claim ("head")
-  (claim ("leaf") (witness "a.rs")))
+(claim "head"
+  (claim "leaf" (witness "a.rs")))
 "#,
             ),
             &dir,
@@ -1565,8 +1565,8 @@ mod tests {
         let report = check(
             &compiled(
                 r#"
-(not (claim ("head")
-  (claim ("nope") (witness "a.rs"))))
+(not (claim "head"
+  (claim "nope" (witness "a.rs"))))
 "#,
             ),
             &dir,
@@ -1586,7 +1586,7 @@ mod tests {
         fs::write(dir.join("a.rs"), "aaa").unwrap();
         let mut oracle = Rec::new(by_proposition);
         let report = check(
-            &compiled("(not (claim (\"nope\") (witness \"a.rs\")))"),
+            &compiled("(not (claim \"nope\" (witness \"a.rs\")))"),
             &dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
@@ -1604,9 +1604,9 @@ mod tests {
         check(
             &compiled(
                 r#"
-(claim ("outer")
-  (claim ("inner")
-    (claim ("holds in the file") (witness "a.rs"))))
+(claim "outer"
+  (claim "inner"
+    (claim "holds in the file" (witness "a.rs"))))
 "#,
             ),
             &dir,
@@ -1635,7 +1635,7 @@ mod tests {
             }
         });
         let report = check(
-            &compiled("(claim (\"in the second part\") (witness \"big.rs\"))"),
+            &compiled("(claim \"in the second part\" (witness \"big.rs\"))"),
             &dir,
             8,
             &mut oracle,
@@ -1654,7 +1654,7 @@ mod tests {
         fs::write(dir.join("small.rs"), "bb").unwrap();
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(claim (\"both\") (witness \"big.rs\" \"small.rs\"))"),
+            &compiled("(claim \"both\" (witness \"big.rs\" \"small.rs\"))"),
             &dir,
             8,
             &mut oracle,
@@ -1671,7 +1671,7 @@ mod tests {
         fs::write(dir.join("a.rs"), "aaa").unwrap();
         let mut oracle = Rec::new(|_| choice("entailed", 0.84));
         let report = check(
-            &compiled("(claim (\"leaf\") (witness \"a.rs\"))"),
+            &compiled("(claim \"leaf\" (witness \"a.rs\"))"),
             &dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
@@ -1694,7 +1694,7 @@ mod tests {
 (claim (theorem)
   (lemma-1))
 (claim (lemma-1)
-  (claim ("holds in the file") (witness "a.rs")))
+  (claim "holds in the file" (witness "a.rs")))
 "#,
             ),
             &dir,
@@ -1727,10 +1727,10 @@ mod tests {
         let report = check(
             &compiled(
                 r#"
-(claim ("theorem holds")
-  ("lemma"))
-(claim ("lemma")
-  (claim ("nope") (witness "a.rs")))
+(claim "theorem holds"
+  "lemma")
+(claim "lemma"
+  (claim "nope" (witness "a.rs")))
 "#,
             ),
             &dir,
@@ -1770,8 +1770,8 @@ mod tests {
         let report = check(
             &compiled(
                 r#"
-(assume ("the file is small"))
-(claim ("the brief may treat the file as small") ("the file is small"))
+(assume "the file is small")
+(claim "the brief may treat the file as small" "the file is small")
 "#,
             ),
             &dir,
@@ -1798,7 +1798,7 @@ mod tests {
         let mut oracle = Rec::new(by_proposition);
         let report = check(
             &compiled(
-                "(not (claim (\"nope\") (claim (\"holds in the file\") (witness \"a.rs\"))))",
+                "(not (claim \"nope\" (claim \"holds in the file\" (witness \"a.rs\"))))",
             ),
             &dir,
             DEFAULT_BODY_BYTES,
@@ -1818,7 +1818,7 @@ mod tests {
         fs::write(dir.join("a.rs"), "aaa").unwrap();
         let mut oracle = Rec::new(by_proposition);
         let report = check(
-            &compiled("(claim (\"nope\") (claim (\"nope too\") (witness \"a.rs\")))"),
+            &compiled("(claim \"nope\" (claim \"nope too\" (witness \"a.rs\")))"),
             &dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
@@ -1834,7 +1834,7 @@ mod tests {
         let dir = scratch(label);
         fs::write(dir.join(name), bytes).unwrap();
         let mut oracle = Rec::new(entailed);
-        let src = format!("(claim (\"shot\") (witness \"{name}\"))");
+        let src = format!("(claim \"shot\" (witness \"{name}\"))");
         let report = check(&compiled(&src), &dir, 32, &mut oracle).unwrap();
         assert!(oracle.seen.is_empty(), "{label}");
         assert_eq!(report.claims[0].failure, Some(failure), "{label}");
@@ -1850,7 +1850,7 @@ mod tests {
         fs::write(dir.join("shot.png"), &png).unwrap();
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(claim (\"the shot\") (witness \"shot.png\"))"),
+            &compiled("(claim \"the shot\" (witness \"shot.png\"))"),
             &dir,
             32,
             &mut oracle,
@@ -1879,7 +1879,7 @@ mod tests {
         fs::write(&path, &png).unwrap();
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(claim (\"the shot\") (witness \"shot.png\"))"),
+            &compiled("(claim \"the shot\" (witness \"shot.png\"))"),
             &dir,
             32,
             &mut oracle,
@@ -1901,7 +1901,7 @@ mod tests {
         fs::write(dir.join("shot.jpeg"), synthetic_jpeg(280, 280)).unwrap();
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(claim (\"the shot\") (witness \"shot.jpeg\"))"),
+            &compiled("(claim \"the shot\" (witness \"shot.jpeg\"))"),
             &dir,
             32,
             &mut oracle,
@@ -1923,7 +1923,7 @@ mod tests {
         fs::write(dir.join("shot.png"), synthetic_png(280, 280)).unwrap();
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(claim (\"together\") (witness \"note.txt\" \"shot.png\"))"),
+            &compiled("(claim \"together\" (witness \"note.txt\" \"shot.png\"))"),
             &dir,
             32,
             &mut oracle,
@@ -1952,7 +1952,7 @@ mod tests {
         fs::write(dir.join("b.png"), &png).unwrap();
         let mut oracle = Rec::new(entailed);
         check(
-            &compiled("(claim (\"same\") (witness \"a.png\" \"b.png\"))"),
+            &compiled("(claim \"same\" (witness \"a.png\" \"b.png\"))"),
             &dir,
             32,
             &mut oracle,
@@ -2011,7 +2011,7 @@ mod tests {
         file.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("(claim (\"shot\") (witness \"big.png\"))"),
+            &compiled("(claim \"shot\" (witness \"big.png\"))"),
             &dir,
             32,
             &mut oracle,
@@ -2033,7 +2033,7 @@ mod tests {
         };
         let mut oracle = Rec::new(entailed);
         let report = check_bound(
-            &compiled("(claim (\"alpha\") (witness $))"),
+            &compiled("(claim \"alpha\" (witness $))"),
             Path::new("/tmp"),
             DEFAULT_BODY_BYTES,
             Some(&bound),
@@ -2050,7 +2050,7 @@ mod tests {
     fn a_dollar_without_a_file_submits_nothing() {
         let mut oracle = Rec::new(entailed);
         let err = match submit(
-            &compiled("(claim (\"alpha\") (witness $))"),
+            &compiled("(claim \"alpha\" (witness $))"),
             Path::new("."),
             DEFAULT_BODY_BYTES,
             None,
@@ -2071,7 +2071,7 @@ mod tests {
         };
         let mut oracle = Rec::new(entailed);
         let err = match submit(
-            &compiled("(claim (\"alpha\") (witness \"note.txt\"))"),
+            &compiled("(claim \"alpha\" (witness \"note.txt\"))"),
             Path::new("."),
             DEFAULT_BODY_BYTES,
             Some(&bound),

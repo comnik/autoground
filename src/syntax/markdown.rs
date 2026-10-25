@@ -142,7 +142,7 @@ fn main() {}
 
 ```brief
 (name Frontend)
-(\"Frontend is a component\")
+\"Frontend is a component\"
 ```
 
 Prose with `brief` in it.
@@ -157,7 +157,7 @@ Prose with `brief` in it.
 ";
         assert_eq!(
             brief_source(md).unwrap(),
-            "(name Frontend)\n(\"Frontend is a component\")\n(name Backend)\n"
+            "(name Frontend)\n\"Frontend is a component\"\n(name Backend)\n"
         );
     }
 

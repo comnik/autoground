@@ -17,10 +17,10 @@ fn diagram_parses_and_compiles() {
 
 (or
   (calls Oracle TypeSafe)
-  (\"Oracle calls the TypeSafe API\"))
+  \"Oracle calls the TypeSafe API\")
 
 (and
-  (\"Frontend is a component of the system\")
+  \"Frontend is a component of the system\"
   (\"{Name} is a component of the system\" Backend)
   (\"{caller} calls {callee}\" Frontend Backend))";
     let program = parse(&src).expect("parse diagram.brief");

@@ -45,10 +45,10 @@ default, all commands are capped at a budget of 1 cent.
 <!--
 ```brief
 (ns readme)
-(claim ("check runs with the default budget cap by default")
+(claim "check runs with the default budget cap by default"
   (witness "src/main.rs"))
 
-(claim ("the default budget cap is 1 cent")
+(claim "the default budget cap is 1 cent"
   (witness "src/oracle/jev.rs"))
 ```
 -->
@@ -114,7 +114,7 @@ A brief consists of *names*, *senses*, *claims*, and *witnesses*:
 (claim (is_component Frontend)
   (witness "src/frontend/mod.rs"))
 
-(claim ("Check asks the oracle whether a witness supports the claim")
+(claim "Check asks the oracle whether a witness supports the claim"
   (witness "src/check/mod.rs"))
 
 ;; Claims can be supported by other claims, forming a chain of deductions.
@@ -132,7 +132,7 @@ A brief consists of *names*, *senses*, *claims*, and *witnesses*:
   (and
     (is_component Frontend)
     (is_data AST)
-    (claim ("Frontend parses the program and returns AST")
+    (claim "Frontend parses the program and returns AST"
       (witness "src/frontend/parser.rs"))))
 
 (claim (related Frontend Backend)
@@ -146,7 +146,7 @@ Note how applying names to a sense boils down to a fully formed sentence:
 ```clojure
    (returns Frontend AST)
 => ("{Name} returns {Name}" Frontend AST)
-=> ("Frontend returns AST")
+=> "Frontend returns AST"
 ```
 
 There are two additional language constructs: *assume* and *intent*.
