@@ -27,7 +27,6 @@ reading   ::= ident | string
 arg       ::= ident | string
 ident     ::= [qualifier "/"] ident-name
 path      ::= string | "$"
-prose     ::= a top-level line of symbols, or one top-level string
 ```
 
 `ident-name` is an unqualified identifier. A comma is whitespace. `;;` comments through the
@@ -47,7 +46,6 @@ senses declared outside gain the sentences validated inside.
 (name Frontend)
 (name Backend)
 (sense depends_on "{X} depends on {Y}")
-Frontend depends on Backend
 (and (depends_on Frontend Backend) (not (depends_on Backend Frontend)))
 ```
 
