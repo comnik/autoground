@@ -66,14 +66,6 @@ fn check_discharges_a_quoted_witness() {
     );
     let body = std::fs::read_to_string(trace).unwrap();
     assert!(body.contains("\"kind\":\"check\""), "{body}");
-    let context = std::fs::read_to_string(line(&stdout, "context available at ")).unwrap();
-    assert_eq!(
-        context,
-        "\
-alpha is the first letter.
-(see note.txt)
-"
-    );
     assert!(
         stdout
             .lines()
@@ -136,7 +128,6 @@ fn check_out_writes_the_session_there() {
         "stderr={stderr} stdout={stdout}"
     );
     let trace = PathBuf::from(line(&stdout, "trace available at "));
-    let context = PathBuf::from(line(&stdout, "context available at "));
     let session = trace.parent().expect("session directory");
     assert_eq!(
         session.parent(),
@@ -148,7 +139,6 @@ fn check_out_writes_the_session_there() {
         trace.file_name().and_then(|name| name.to_str()),
         Some("trace.jsonl")
     );
-    assert_eq!(context, session.join("context.md"));
     assert!(std::fs::read_to_string(&trace)
         .unwrap()
         .contains("\"kind\":\"check\""));

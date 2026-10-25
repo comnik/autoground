@@ -10,7 +10,6 @@ use autoground::log::{Log, DEFAULT_TRACE_DIR};
 use autoground::oracle::jev::DEFAULT_RUN_COST_CENTS;
 use autoground::oracle::{JevOracle, Oracle, UsageRecord};
 use autoground::prepare;
-use autoground::report::context::write_context;
 use autoground::report::summary::print_run_summary;
 use autoground::{brief_source, compile, display_path, parse, scan_namespaces, Proposition};
 use clap::{Parser, Subcommand};
@@ -38,8 +37,8 @@ enum Commands {
     /// `--budget` caps this run in cents and defaults to 1. On a terminal the
     /// spinner names the sentence in flight, and the finished view is the
     /// brief: each judged clause carries its own mark, and an undischarged
-    /// clause carries its failure comment. The trace and the context are
-    /// written in a new directory under `/tmp/autoground/`, or under `--out`.
+    /// clause carries its failure comment. The trace is written in a new
+    /// directory under `/tmp/autoground/`, or under `--out`.
     /// Exit status is 1 when a top-level claim is not discharged.
     ///
     /// Examples:
@@ -56,7 +55,7 @@ enum Commands {
         #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
         budget: u64,
         /// Parent directory for this check. A new subdirectory holds
-        /// `trace.jsonl` and `context.md`. Defaults to `/tmp/autoground`.
+        /// `trace.jsonl`. Defaults to `/tmp/autoground`.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
@@ -291,7 +290,6 @@ fn finish_check<O: Oracle>(
             "usage": UsageRecord::from_usage(&usage),
         }),
     )?;
-    write_context(log.path(), &report)?;
     if let Some(live) = live {
         live.finish(src, &program.clauses, &report)?;
     } else {
