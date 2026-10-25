@@ -191,7 +191,7 @@ mod tests {
 (ns com.acme.client
   (:require [com.acme.product :as product]))
 (name Backend)
-(product/part_of product/Frontend Backend)
+(assume (product/part_of product/Frontend Backend))
 ```
 
 ```
@@ -221,7 +221,7 @@ mod tests {
         assert!(files.iter().all(|file| file.path != "secret/hidden.brief"));
         assert_eq!(
             compiled.claims,
-            vec![crate::syntax::Proposition::Sentence(
+            vec![crate::syntax::Proposition::Assume(
                 "Frontend is part of Backend".into()
             )]
         );

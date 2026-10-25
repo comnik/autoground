@@ -64,7 +64,7 @@ enum Commands {
     /// Each argument is a `.brief` file, a Markdown file of `brief` blocks,
     /// a `.mmd` flowchart, or brief source. A flowchart's node labels are
     /// names. An edge labeled with a sense name is that sense applied to its
-    /// endpoints, and a leading `not ` negates it. Any other edge label is
+    /// endpoints. A leading `not ` is refused. Any other edge label is
     /// the wording between the two names. A `%%` line that starts with `(`
     /// is brief source, which is how a picture carries a sense template.
     /// Exit status is 1 when a name, a sense, or a statement is on only one

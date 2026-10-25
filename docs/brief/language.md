@@ -21,7 +21,7 @@ namespace ::= segments separated by ".", no empty segment, no "/"
 require   ::= "(" ":require" libspec+ ")"
 libspec   ::= "[" namespace [":as" alias] [":refer" refer] "]"
 refer     ::= ":all" | "[" ident-name* "]"
-form      ::= name | sense | intent | assume | detail | formula
+form      ::= name | sense | intent | assume | detail | claim
 name      ::= "(" "name" ident-name ")"
 sense     ::= "(" "sense" ident-name string ")"
 intent    ::= "(" "intent" string ")"
@@ -115,7 +115,8 @@ Senses instantiated with names can be used to make claims for autoground to judg
 (name Frontend)
 (name Backend)
 (sense depends_on "{X} depends on {Y}")
-(and (depends_on Frontend Backend) (not (depends_on Backend Frontend)))
+(claim (depends_on Frontend Backend)
+  (not (depends_on Backend Frontend)))
 ```
 
 ```brief

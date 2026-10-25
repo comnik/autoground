@@ -290,8 +290,8 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
     Ok(tokens)
 }
 
-/// Parse a model: an optional `ns`, then `name` and `sense` declarations
-/// and claims built with `and`, `or`, `not`, and relation application.
+/// Parse a model: an optional `ns`, then declarations, assumptions, and claims.
+/// `and`, `or`, `not`, and a sentence belong to a claim.
 pub fn parse(src: &str) -> Result<Program, ParseError> {
     let tokens = tokenize(src)?;
     if tokens.is_empty() {
@@ -525,8 +525,8 @@ fn validate_namespace(name: &str) -> Result<(), String> {
 }
 
 fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
-    if let Some((formula, span)) = inline_sentence(s)? {
-        return Ok((Form::Formula(formula), Some(span)));
+    if matches!(s.kind, SexpKind::String(_)) {
+        return Err(err_at(s, "a sentence belongs to a claim"));
     }
     let xs = list(s)?;
     match xs.first().map(|item| &item.kind) {
@@ -547,10 +547,26 @@ fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
             let (formula, span) = lower_detail(s, xs)?;
             Ok((formula, Some(span)))
         }
-        _ => {
+        Some(SexpKind::Symbol(head)) if head == "claim" => {
             let (formula, clause) = lower_formula(s)?;
             Ok((Form::Formula(formula), Some(clause)))
         }
+        Some(SexpKind::Symbol(head))
+            if matches!(head.as_str(), "and" | "or" | "not" | "witness") =>
+        {
+            Err(err_at(&xs[0], format!("`{head}` belongs to a claim")))
+        }
+        Some(SexpKind::String(_)) => Err(err_at(s, "a sentence belongs to a claim")),
+        _ => match lower_formula(s) {
+            Err(err) => Err(err),
+            Ok((formula, clause)) => {
+                if matches!(formula, Formula::Claim { .. }) {
+                    Ok((Form::Formula(formula), Some(clause)))
+                } else {
+                    Err(err_at(s, "a sentence belongs to a claim"))
+                }
+            }
+        },
     }
 }
 
@@ -980,12 +996,12 @@ mod tests {
 
     #[test]
     fn a_brief_keeps_unicode_text() {
-        let src = "(intent \"Nestlé\")\n\"Nestlé\"\n(name Café)\n";
+        let src = "(intent \"Nestlé\")\n(assume \"Nestlé\")\n(name Café)\n";
         let program = parse(src).unwrap();
         assert_eq!(&src[program.spans[0].clone()], "(intent \"Nestlé\")");
         assert!(matches!(&program.forms[0], Form::Intent(text) if text == "Nestlé"));
         match &program.forms[1] {
-            Form::Formula(Formula::Apply {
+            Form::Assume(Formula::Apply {
                 reading: Reading::Inline { template, .. },
                 args,
             }) => {
@@ -1006,11 +1022,11 @@ mod tests {
 (sense depends_on "{X} depends on {Y}")
 (sense borrowed_from "{borrower} borrows from {lender}")
 
-("{X} depends on {Y}" aaa bbb)
-("{X} is deprecated" aaa)
-"Oracle calls the TypeSafe API"
-(depends_on aaa bbb)
-(and (depends_on aaa bbb) (not (borrowed_from aaa bbb)))
+(claim "depends" ("{X} depends on {Y}" aaa bbb))
+(claim "deprecated" ("{X} is deprecated" aaa))
+(assume "Oracle calls the TypeSafe API")
+(claim "named" (depends_on aaa bbb))
+(claim "both" (and (depends_on aaa bbb) (not (borrowed_from aaa bbb))))
 "#;
         let program = parse(src).unwrap();
         assert_eq!(program.names().collect::<Vec<_>>(), vec!["aaa", "bbb"]);
@@ -1020,7 +1036,7 @@ mod tests {
             program.senses().nth(1).unwrap().holes,
             vec!["borrower", "lender"]
         );
-        assert_eq!(program.claims().count(), 5);
+        assert_eq!(program.claims().count(), 4);
     }
 
     #[test]
@@ -1094,14 +1110,17 @@ mod tests {
     #[test]
     fn rejects_a_witness_that_is_not_a_path() {
         for (src, needle) in [
-            ("(witness)", "takes a path"),
-            ("(witness (\"only the fact\"))", "path is a string"),
+            ("(claim \"c\" (witness))", "takes a path"),
             (
-                "(witness (and \"a\" \"b\") \"a.rs\")",
+                "(claim \"c\" (witness (\"only the fact\")))",
                 "path is a string",
             ),
-            ("(witness path)", "path is a string"),
-            ("(witness \"\")", "not empty"),
+            (
+                "(claim \"c\" (witness (and \"a\" \"b\") \"a.rs\"))",
+                "path is a string",
+            ),
+            ("(claim \"c\" (witness path))", "path is a string"),
+            ("(claim \"c\" (witness \"\"))", "not empty"),
             ("(claim)", "takes a sentence and a support"),
             ("(claim (and \"a\" \"b\") \"c\")", "heads a sentence"),
             ("(assume)", "takes a sentence"),
@@ -1132,13 +1151,13 @@ mod tests {
 
     #[test]
     fn rejects_a_declaration_inside_a_formula() {
-        let err = parse("(and (name aaa))").unwrap_err();
+        let err = parse("(claim \"c\" (and (name aaa)))").unwrap_err();
         assert!(err.message.contains("declaration"));
-        let err = parse("(and (ns com.acme.product))").unwrap_err();
+        let err = parse("(claim \"c\" (and (ns com.acme.product)))").unwrap_err();
         assert!(err.message.contains("declaration"), "{err}");
-        let err = parse("(and (assume \"a\"))").unwrap_err();
+        let err = parse("(claim \"c\" (and (assume \"a\")))").unwrap_err();
         assert!(err.message.contains("declaration"), "{err}");
-        let err = parse("(and (detail (claim \"a\" \"b\")))").unwrap_err();
+        let err = parse("(claim \"c\" (and (detail (claim \"a\" \"b\"))))").unwrap_err();
         assert!(err.message.contains("scope"), "{err}");
     }
 
@@ -1152,7 +1171,7 @@ mod tests {
             [com.acme.bare]
             [com.acme.other :refer [part_of] :as other]))
 (name Local)
-(product/part_of product/Frontend Local)
+(claim "part" (product/part_of product/Frontend Local))
 "#;
         let program = parse(src).unwrap();
         let ns = program.namespace.clone().unwrap();
@@ -1172,8 +1191,11 @@ mod tests {
         assert_eq!(ns.requires[4].alias.as_deref(), Some("other"));
         assert_eq!(ns.requires[4].refer, Refer::Only(vec!["part_of".into()]));
         assert_eq!(program.names().collect::<Vec<_>>(), vec!["Local"]);
-        let Formula::Apply { reading, args } = program.claims().next().unwrap() else {
+        let Formula::Claim { support, .. } = program.claims().next().unwrap() else {
             panic!("claim");
+        };
+        let Formula::Apply { reading, args } = support.as_ref() else {
+            panic!("apply");
         };
         let Reading::Sense(head) = reading else {
             panic!("sense");
@@ -1219,7 +1241,7 @@ mod tests {
                 "{src}: {err}"
             );
         }
-        let slash = parse("(name A)\n(sense s \"{X}\")\n(s a/b/c)").unwrap_err();
+        let slash = parse("(name A)\n(sense s \"{X}\")\n(claim \"c\" (s a/b/c))").unwrap_err();
         assert!(slash.message.contains("at most one"), "{slash}");
     }
 
@@ -1248,7 +1270,7 @@ mod tests {
                 "{src}: {err}"
             );
         }
-        let qualified = parse("(sense calls \"{X}\")\n(calls lemma/1)").unwrap_err();
+        let qualified = parse("(sense calls \"{X}\")\n(claim \"c\" (calls lemma/1))").unwrap_err();
         assert!(
             qualified.message.contains("Clojure identifier"),
             "{qualified}"
@@ -1257,16 +1279,16 @@ mod tests {
 
     #[test]
     fn skips_comments() {
-        let program = parse(";; hi\n\"Oracle calls the TypeSafe API\"\n").unwrap();
+        let program = parse(";; hi\n(assume \"Oracle calls the TypeSafe API\")\n").unwrap();
         assert_eq!(program.forms.len(), 1);
     }
 
     #[test]
     fn a_string_is_a_finished_sentence() {
-        let src = "\"the file is small\"\n";
+        let src = "(assume \"the file is small\")\n";
         let program = parse(src).unwrap();
         match &program.forms[0] {
-            Form::Formula(Formula::Apply {
+            Form::Assume(Formula::Apply {
                 reading: Reading::Inline { template, holes },
                 args,
             }) => {
@@ -1276,9 +1298,18 @@ mod tests {
             }
             other => panic!("sentence: {other:?}"),
         }
-        assert_eq!(&src[program.spans[0].clone()], "\"the file is small\"");
+        assert_eq!(
+            &src[program.spans[0].clone()],
+            "(assume \"the file is small\")"
+        );
 
-        let wrapped = parse("(\"the file is small\")").unwrap_err();
+        let bare = parse("\"the file is small\"").unwrap_err();
+        assert!(
+            bare.message.contains("a sentence belongs to a claim"),
+            "{bare}"
+        );
+
+        let wrapped = parse("(claim \"c\" (\"the file is small\"))").unwrap_err();
         assert!(
             wrapped
                 .message
@@ -1286,12 +1317,15 @@ mod tests {
             "{wrapped}"
         );
 
-        let applied = parse("(\"{Name} is a component\" Backend)").unwrap();
-        match &applied.forms[0] {
-            Form::Formula(Formula::Apply {
+        let applied = parse("(claim \"c\" (\"{Name} is a component\" Backend))").unwrap();
+        let Form::Formula(Formula::Claim { support, .. }) = &applied.forms[0] else {
+            panic!("claim");
+        };
+        match support.as_ref() {
+            Formula::Apply {
                 reading: Reading::Inline { template, .. },
                 args,
-            }) => {
+            } => {
                 assert_eq!(template, "{Name} is a component");
                 assert_eq!(args.len(), 1);
             }
@@ -1310,40 +1344,52 @@ mod tests {
 (sense depends_on \"{X} depends on {Y}\")
 (sense calls \"{caller} calls {callee}\")
 
-(depends_on Frontend Backend)
+(claim (depends_on Frontend Backend)
+  (not (depends_on Backend Frontend)))
 
-(not (depends_on Backend Frontend))
+(claim \"routes\"
+  (or
+    (calls Oracle TypeSafe)
+    \"Oracle calls the TypeSafe API\"))
 
-(or
-  (calls Oracle TypeSafe)
-  \"Oracle calls the TypeSafe API\")
-
-(and
-  \"Frontend is a component of the system\"
-  (\"{Name} is a component of the system\" Backend)
-  (\"{caller} calls {callee}\" Frontend Backend))";
+(claim \"pieces\"
+  (and
+    \"Frontend is a component of the system\"
+    (\"{Name} is a component of the system\" Backend)
+    (\"{caller} calls {callee}\" Frontend Backend)))";
         let program = parse(src).unwrap();
         let spans = program.claim_spans();
-        assert_eq!(spans.len(), 4);
-        assert_eq!(&src[spans[0].clone()], "(depends_on Frontend Backend)");
-        assert_eq!(
-            &src[spans[1].clone()],
-            "(not (depends_on Backend Frontend))"
-        );
-        assert!(src[spans[2].clone()].starts_with("(or\n"));
-        assert!(src[spans[2].clone()].contains("\"Oracle calls the TypeSafe API\""));
-        assert!(src[spans[3].clone()].starts_with("(and\n"));
-        assert!(src[spans[3].clone()].contains("\"{Name} is a component of the system\" Backend"));
+        assert_eq!(spans.len(), 3);
+        assert!(src[spans[0].clone()].starts_with("(claim (depends_on Frontend Backend)"));
+        assert!(src[spans[1].clone()].contains("\"Oracle calls the TypeSafe API\""));
+        assert!(src[spans[2].clone()].contains("\"{Name} is a component of the system\" Backend"));
         assert!(program.spans.len() == program.forms.len());
         assert_eq!(program.clauses.len(), spans.len());
-        assert_eq!(program.clauses[3].children.len(), 3);
+        let pieces = &program.clauses[2].children[0];
+        assert_eq!(pieces.children.len(), 3);
         assert_eq!(
-            &src[program.clauses[3].children[0].span.clone()],
+            &src[pieces.children[0].span.clone()],
             "\"Frontend is a component of the system\""
         );
         assert_eq!(
-            &src[program.clauses[3].children[2].span.clone()],
+            &src[pieces.children[2].span.clone()],
             "(\"{caller} calls {callee}\" Frontend Backend)"
         );
+    }
+
+    #[test]
+    fn a_formula_here_is_a_claim() {
+        for (src, needle) in [
+            ("(and \"a\" \"b\")", "`and` belongs to a claim"),
+            ("(or \"a\")", "`or` belongs to a claim"),
+            ("(not \"a\")", "`not` belongs to a claim"),
+            ("(witness \"a.rs\")", "`witness` belongs to a claim"),
+            ("\"a\"", "a sentence belongs to a claim"),
+            ("(depends_on A B)", "a sentence belongs to a claim"),
+            ("(detail (and \"a\" \"b\"))", "`and` belongs to a claim"),
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(err.message.contains(needle), "{src}: {err}");
+        }
     }
 }

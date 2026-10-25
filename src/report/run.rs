@@ -424,8 +424,10 @@ mod tests {
     fn finished_view_marks_the_brief() {
         let src = "\
 (claim \"search finds the window\" (witness \"src/search.rs\"))
-\"bare sentence\"
-(or \"kept\" \"dropped\")
+(claim \"open\"
+  \"bare sentence\")
+(claim \"either\"
+  (or \"kept\" \"dropped\"))
 ";
         let report = Report {
             claims: vec![
@@ -435,24 +437,32 @@ mod tests {
                     None,
                     &["src/search.rs"],
                 ),
-                leaf(
-                    "bare sentence",
+                connective(
+                    "open",
                     Value::Unknown,
-                    Some(Failure::Unpinned),
-                    &[],
+                    vec![leaf(
+                        "bare sentence",
+                        Value::Unknown,
+                        Some(Failure::Unpinned),
+                        &[],
+                    )],
                 ),
                 connective(
-                    "or",
+                    "either",
                     Value::True,
-                    vec![
-                        leaf("kept", Value::True, None, &[]),
-                        leaf(
-                            "dropped",
-                            Value::False,
-                            Some(Failure::Contradicted),
-                            &["gone.rs"],
-                        ),
-                    ],
+                    vec![connective(
+                        "or",
+                        Value::True,
+                        vec![
+                            leaf("kept", Value::True, None, &[]),
+                            leaf(
+                                "dropped",
+                                Value::False,
+                                Some(Failure::Contradicted),
+                                &["gone.rs"],
+                            ),
+                        ],
+                    )],
                 ),
             ],
         };
@@ -462,15 +472,17 @@ mod tests {
             text,
             vec![
                 "✓ (claim \"search finds the window\" (witness \"src/search.rs\"))".to_string(),
-                "  ;; unpinned".to_string(),
-                "? \"bare sentence\"".to_string(),
-                "✓ (or \"kept\" \"dropped\")".to_string(),
+                "? (claim \"open\"".to_string(),
+                "    ;; unpinned".to_string(),
+                "?   \"bare sentence\")".to_string(),
+                "✓ (claim \"either\"".to_string(),
+                "✓   (or \"kept\" \"dropped\"))".to_string(),
             ]
         );
-        assert!(rows[2]
+        assert!(rows.iter().any(|row| row
             .pieces
             .iter()
-            .any(|piece| piece.tone == Tone::UnknownText));
+            .any(|piece| piece.tone == Tone::UnknownText)));
         assert!(rows[0]
             .pieces
             .iter()
@@ -480,26 +492,22 @@ mod tests {
 
     #[test]
     fn a_contradicted_witness_is_the_red_clause() {
-        let src = "(and (claim \"nope\" (witness \"gone.rs\")) (claim \"search finds the window\" (witness \"src/search.rs\")))\n";
+        let src = "(claim \"nope\" (witness \"gone.rs\")) (claim \"search finds the window\" (witness \"src/search.rs\"))\n";
         let report = Report {
-            claims: vec![connective(
-                "and",
-                Value::False,
-                vec![
-                    leaf(
-                        "nope",
-                        Value::False,
-                        Some(Failure::Contradicted),
-                        &["gone.rs"],
-                    ),
-                    leaf(
-                        "search finds the window",
-                        Value::True,
-                        None,
-                        &["src/search.rs"],
-                    ),
-                ],
-            )],
+            claims: vec![
+                leaf(
+                    "nope",
+                    Value::False,
+                    Some(Failure::Contradicted),
+                    &["gone.rs"],
+                ),
+                leaf(
+                    "search finds the window",
+                    Value::True,
+                    None,
+                    &["src/search.rs"],
+                ),
+            ],
         };
         let rows = finished(src, &report);
         let text: Vec<_> = rows.iter().map(|row| row.plain()).collect();
@@ -587,8 +595,7 @@ mod tests {
             vec![
                 "? (claim \"the head\"".to_string(),
                 "?   (and".to_string(),
-                "✓     (claim \"search finds the window\" (witness \"src/search.rs\"))"
-                    .to_string(),
+                "✓     (claim \"search finds the window\" (witness \"src/search.rs\"))".to_string(),
                 "      ;; not entailed".to_string(),
                 "?     (claim \"nope\" (witness \"gone.rs\"))))".to_string(),
             ]

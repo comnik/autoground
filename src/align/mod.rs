@@ -184,8 +184,7 @@ mod tests {
 (name Frontend)
 (name Backend)
 (sense depends_on "{X} depends on {Y}")
-(depends_on Frontend Backend)
-(not (depends_on Backend Frontend))
+(assume (depends_on Frontend Backend))
 "#;
 
     #[test]
@@ -201,13 +200,13 @@ See the model.
 
 ```brief
 (name Frontend)
-\"Frontend serves pages\"
+(assume \"Frontend serves pages\")
 ```
 
 The rest is prose.
 ";
         let src = crate::brief_source(markdown).unwrap();
-        let left = model_from("(name Frontend)\n\"Frontend serves pages\"\n");
+        let left = model_from("(name Frontend)\n(assume \"Frontend serves pages\")\n");
         assert!(mismatch(&left, &model_from(&src)).is_none());
     }
 
@@ -257,16 +256,16 @@ statements
 
     #[test]
     fn and_and_or_contribute_the_same_sentences() {
-        let and = model_from("(and \"alpha\" \"beta\")\n");
-        let or = model_from("(or \"alpha\" \"beta\")\n");
+        let and = model_from("(claim \"h\" (and \"alpha\" \"beta\"))\n");
+        let or = model_from("(claim \"h\" (or \"alpha\" \"beta\"))\n");
         assert!(mismatch(&and, &or).is_none());
     }
 
     #[test]
     fn a_second_not_restores_the_sentence() {
-        let once = model_from("(not \"alpha\")\n");
-        let twice = model_from("(not (not \"alpha\"))\n");
-        let positive = model_from("\"alpha\"\n");
+        let once = model_from("(claim \"h\" (not \"alpha\"))\n");
+        let twice = model_from("(claim \"h\" (not (not \"alpha\")))\n");
+        let positive = model_from("(claim \"h\" \"alpha\")\n");
         assert!(mismatch(&twice, &positive).is_none());
         let diff = mismatch(&once, &positive).unwrap();
         assert!(diff.contains("only in left\n    not alpha\n"), "{diff}");
@@ -300,7 +299,7 @@ names
         let lib =
             crate::parse("(ns lib)\n(name Shared)\n(sense knows \"{X} knows {Y}\")\n").unwrap();
         let entry = crate::parse(
-            "(ns app (:require [lib :refer :all]))\n(name Local)\n(knows Local Shared)\n",
+            "(ns app (:require [lib :refer :all]))\n(name Local)\n(assume (knows Local Shared))\n",
         )
         .unwrap();
         let files = vec![crate::compiler::Loaded {

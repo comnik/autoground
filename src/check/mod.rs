@@ -1323,15 +1323,21 @@ mod tests {
         let dir = scratch("unpinned");
         let mut oracle = Rec::new(entailed);
         let report = check(
-            &compiled("\"Search calls Oracle\""),
+            &compiled("(claim \"head\" \"Search calls Oracle\")"),
             &dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
         )
         .unwrap();
-        assert!(oracle.seen.is_empty());
-        assert_eq!(report.claims[0].value, Value::Unknown);
-        assert_eq!(report.claims[0].failure, Some(Failure::Unpinned));
+        assert!(oracle
+            .seen
+            .iter()
+            .all(|req| req.state.get("path").is_none()));
+        assert_eq!(report.claims[0].children[0].value, Value::Unknown);
+        assert_eq!(
+            report.claims[0].children[0].failure,
+            Some(Failure::Unpinned)
+        );
         assert!(write_report(&report).contains(";; unpinned"));
     }
 
@@ -1474,9 +1480,8 @@ mod tests {
         check(
             &compiled(
                 r#"
-(and
-  (claim "one" (witness "a.rs"))
-  (claim "two" (witness "a.rs")))
+(claim "one" (witness "a.rs"))
+(claim "two" (witness "a.rs"))
 "#,
             ),
             &dir,
@@ -1565,8 +1570,9 @@ mod tests {
         let report = check(
             &compiled(
                 r#"
-(not (claim "head"
-  (claim "nope" (witness "a.rs"))))
+(claim "wrap"
+  (not (claim "head"
+    (claim "nope" (witness "a.rs")))))
 "#,
             ),
             &dir,
@@ -1574,7 +1580,7 @@ mod tests {
             &mut oracle,
         )
         .unwrap();
-        let not = &report.claims[0];
+        let not = &report.claims[0].children[0];
         assert_eq!(not.children[0].children[0].value, Value::False);
         assert_eq!(not.children[0].value, Value::Unknown);
         assert_eq!(not.value, Value::Unknown);
@@ -1586,14 +1592,15 @@ mod tests {
         fs::write(dir.join("a.rs"), "aaa").unwrap();
         let mut oracle = Rec::new(by_proposition);
         let report = check(
-            &compiled("(not (claim \"nope\" (witness \"a.rs\")))"),
+            &compiled("(claim \"outer\" (not (claim \"nope\" (witness \"a.rs\"))))"),
             &dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
         )
         .unwrap();
-        assert_eq!(report.claims[0].children[0].value, Value::False);
-        assert_eq!(report.claims[0].value, Value::True);
+        let not = &report.claims[0].children[0];
+        assert_eq!(not.children[0].value, Value::False);
+        assert_eq!(not.value, Value::True);
     }
 
     #[test]
@@ -1798,18 +1805,19 @@ mod tests {
         let mut oracle = Rec::new(by_proposition);
         let report = check(
             &compiled(
-                "(not (claim \"nope\" (claim \"holds in the file\" (witness \"a.rs\"))))",
+                "(claim \"outer\" (not (claim \"nope\" (claim \"holds in the file\" (witness \"a.rs\")))))",
             ),
             &dir,
             DEFAULT_BODY_BYTES,
             &mut oracle,
         )
         .unwrap();
-        let claim = &report.claims[0].children[0];
+        let not = &report.claims[0].children[0];
+        let claim = &not.children[0];
         assert_eq!(claim.children[0].value, Value::True);
         assert_eq!(claim.value, Value::False);
         assert_eq!(claim.failure, Some(Failure::Contradicted));
-        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(not.value, Value::True);
     }
 
     #[test]

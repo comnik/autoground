@@ -191,13 +191,14 @@ mod tests {
 (name bbb)
 (sense depends_on "{X} depends on {Y}")
 (sense borrowed_from "{borrower} borrows from {lender}")
-("{X} depends on {Y}" aaa bbb)
-("{X} is deprecated" aaa)
-"Oracle calls the TypeSafe API"
-(depends_on aaa bbb)
-(and
-  (depends_on aaa bbb)
-  (not (borrowed_from aaa bbb)))
+(claim "depends" ("{X} depends on {Y}" aaa bbb))
+(claim "deprecated" ("{X} is deprecated" aaa))
+(assume "Oracle calls the TypeSafe API")
+(claim "named" (depends_on aaa bbb))
+(claim "both"
+  (and
+    (depends_on aaa bbb)
+    (not (borrowed_from aaa bbb))))
 "#;
         let program = parse(src).unwrap();
         let printed = print_program(&program);
@@ -213,7 +214,7 @@ mod tests {
     [com.acme.names :refer [Frontend]]
     [com.acme.api :refer :all]))
 (name Backend)
-(product/part_of product/Frontend Backend)
+(assume (product/part_of product/Frontend Backend))
 "#;
         let program = parse(src).unwrap();
         let printed = print_program(&program);
@@ -227,9 +228,10 @@ mod tests {
   (intent "how a block is fed")
   (name Concept)
   (sense input "{X} is an input into {Y}")
-  (and
-    (input Concept LogicBlock)
-    "Concept is named"))
+  (claim "fed"
+    (and
+      (input Concept LogicBlock)
+      "Concept is named")))
 "#;
         let program = parse(src).unwrap();
         let again = parse(&print_program(&program)).unwrap();
@@ -248,7 +250,7 @@ mod tests {
 
     #[test]
     fn round_trip_keeps_a_string_argument() {
-        let src = "(source Universe \"src/universe\")\n";
+        let src = "(assume (source Universe \"src/universe\"))\n";
         let program = parse(src).unwrap();
         let again = parse(&print_program(&program)).unwrap();
         assert_eq!(program, again);

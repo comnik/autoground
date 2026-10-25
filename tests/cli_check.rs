@@ -76,7 +76,7 @@ fn check_discharges_a_quoted_witness() {
 }
 
 #[test]
-fn check_exits_nonzero_when_a_claim_is_undischarged() {
+fn check_rejects_a_bare_sentence() {
     let dir = scratch("open");
     let brief = dir.join("model.brief");
     std::fs::write(&brief, "\"nothing cites this\"\n").unwrap();
@@ -88,20 +88,12 @@ fn check_exits_nonzero_when_a_claim_is_undischarged() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         out.status.code(),
-        Some(1),
+        Some(3),
         "stderr={stderr} stdout={stdout}"
     );
-    assert!(stdout.contains(";; unpinned"), "{stdout}");
-    let trace = line(&stdout, "trace available at ");
     assert!(
-        trace.starts_with("/tmp/autoground/") && trace.ends_with("/trace.jsonl"),
-        "{trace}"
-    );
-    assert!(
-        stdout
-            .lines()
-            .any(|line| line.starts_with("0/1 claims validated in ")),
-        "{stdout}"
+        stderr.contains("a sentence belongs to a claim"),
+        "{stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -148,7 +140,7 @@ fn check_out_writes_the_session_there() {
 #[test]
 fn check_rejects_an_undeclared_name() {
     let out = bin()
-        .args(["check", "(component Frontend)"])
+        .args(["check", "(claim \"c\" (component Frontend))"])
         .output()
         .expect("run autoground");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -177,11 +169,13 @@ fn check_reads_brief_blocks_from_markdown() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(
         out.status.code(),
-        Some(1),
+        Some(3),
         "stderr={stderr} stdout={stdout}"
     );
-    assert!(stdout.contains("Frontend is a component"), "{stdout}");
-    assert!(stdout.contains(";; unpinned"), "{stdout}");
+    assert!(
+        stderr.contains("a sentence belongs to a claim"),
+        "{stderr}"
+    );
 }
 
 #[test]

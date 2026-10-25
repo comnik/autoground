@@ -1,9 +1,9 @@
 //! A flowchart lowered to brief source.
 //!
 //! Node labels that can be declared become names. An edge label that can be
-//! declared is that sense applied to the two endpoints, and a leading `not `
-//! negates it. Any other label is the wording between the two names. A `%%`
-//! line whose body starts with `(` is brief source.
+//! declared is that sense applied to the two endpoints and assumed. A leading
+//! `not ` is refused. Any other label is the wording between the two names.
+//! A `%%` line whose body starts with `(` is brief source.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -101,6 +101,9 @@ pub fn lower_mermaid(src: &str) -> Result<String, LowerError> {
             diagram.note(node);
         }
         for edge in chain.edges {
+            if split_not(&edge.label).0 {
+                return Err(fail(number, trimmed, "a negated edge cannot be assumed"));
+            }
             diagram.edges.push(edge);
         }
     }
@@ -166,7 +169,7 @@ impl Diagram {
             }
         }
         for edge in &self.edges {
-            let (negated, text) = split_not(&edge.label);
+            let text = edge.label.trim();
             let from = self.spelling(&edge.from);
             let to = self.spelling(&edge.to);
             let form = if is_declared_name(text) {
@@ -177,14 +180,9 @@ impl Diagram {
                 template.push_str(" {Y}");
                 format!("({} {} {})", quote_const(&template), arg(from), arg(to))
             };
-            if negated {
-                out.push_str("(not ");
-                out.push_str(&form);
-                out.push_str(")\n");
-            } else {
-                out.push_str(&form);
-                out.push('\n');
-            }
+            out.push_str("(assume ");
+            out.push_str(&form);
+            out.push_str(")\n");
         }
         out
     }
@@ -198,7 +196,7 @@ fn arg(spelling: &str) -> String {
     }
 }
 
-/// One leading `not ` is polarity. The rest is the sense name or the wording.
+/// Whether a label starts with `not `, which an edge cannot assume.
 fn split_not(label: &str) -> (bool, &str) {
     let label = label.trim();
     if let Some(rest) = label.strip_prefix("not ") {
@@ -529,8 +527,7 @@ mod tests {
 (name Frontend)
 (name Backend)
 (sense depends_on "{X} depends on {Y}")
-(depends_on Frontend Backend)
-(not (depends_on Backend Frontend))
+(assume (depends_on Frontend Backend))
 "#;
 
     const PICTURE: &str = r#"
@@ -541,7 +538,6 @@ flowchart LR
   subgraph group ["group"]
     n1["Frontend"]:::box -->|depends_on| n2["Backend"]
   end
-  n2 -- not depends_on --> n1
   linkStyle 0 stroke:#333
   class n1 box
 "#;
@@ -557,7 +553,6 @@ flowchart LR
         let picture = "\
 flowchart LR
   Frontend -->|depends on| Backend
-  Backend -->|not depends on| Frontend
 ";
         let diff = mismatch(
             &model_from(BRIEF),
@@ -588,7 +583,6 @@ senses
 %% (sense depends_on \"{X} depends on {Y}\")
 flowchart LR
   Frontend -->|depends_on| Backend
-  Backend -->|not depends_on| Frontend
   Cache
 ";
         let diff = mismatch(
@@ -616,5 +610,12 @@ names
     fn an_unlabeled_edge_is_refused() {
         let err = lower_mermaid("flowchart LR\n  Frontend --> Backend\n").unwrap_err();
         assert!(err.to_string().contains("no label"), "{err}");
+    }
+
+    #[test]
+    fn a_negated_edge_is_refused() {
+        let err =
+            lower_mermaid("flowchart LR\n  Backend -->|not depends_on| Frontend\n").unwrap_err();
+        assert!(err.to_string().contains("cannot be assumed"), "{err}");
     }
 }

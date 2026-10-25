@@ -733,15 +733,25 @@ mod tests {
 (name X)
 (name Y)
 (sense part_of "{Name} is a part of {Name}")
-(part_of X Y)
-("{Name} is a part of {Name}" X Y)
+(claim "named" (part_of X Y))
+(claim "inline" ("{Name} is a part of {Name}" X Y))
 "#,
         );
         assert_eq!(
             c.claims,
             vec![
-                Proposition::Sentence("X is a part of Y".into()),
-                Proposition::Sentence("X is a part of Y".into()),
+                Proposition::Claim {
+                    sentence: "named".into(),
+                    support: Support::Sentence(Box::new(Proposition::Sentence(
+                        "X is a part of Y".into()
+                    ))),
+                },
+                Proposition::Claim {
+                    sentence: "inline".into(),
+                    support: Support::Sentence(Box::new(Proposition::Sentence(
+                        "X is a part of Y".into()
+                    ))),
+                },
             ]
         );
     }
@@ -754,17 +764,20 @@ mod tests {
 (name Oracle)
 (name Universe)
 (sense calls "{caller} calls {callee}")
-(and (calls Search Oracle) (not (calls Universe Oracle)))
+(claim "both" (and (calls Search Oracle) (not (calls Universe Oracle))))
 "#,
         );
         assert_eq!(
             c.claims,
-            vec![Proposition::And(vec![
-                Proposition::Sentence("Search calls Oracle".into()),
-                Proposition::Not(Box::new(Proposition::Sentence(
-                    "Universe calls Oracle".into()
-                ))),
-            ])]
+            vec![Proposition::Claim {
+                sentence: "both".into(),
+                support: Support::Sentence(Box::new(Proposition::And(vec![
+                    Proposition::Sentence("Search calls Oracle".into()),
+                    Proposition::Not(Box::new(Proposition::Sentence(
+                        "Universe calls Oracle".into()
+                    ))),
+                ]))),
+            }]
         );
     }
 
@@ -772,7 +785,7 @@ mod tests {
     fn declarations_may_follow_uses() {
         let c = compiled(
             r#"
-(depends_on Frontend Backend)
+(claim "edge" (depends_on Frontend Backend))
 (name Frontend)
 (name Backend)
 (sense depends_on "{X} depends on {Y}")
@@ -780,7 +793,12 @@ mod tests {
         );
         assert_eq!(
             c.claims,
-            vec![Proposition::Sentence("Frontend depends on Backend".into())]
+            vec![Proposition::Claim {
+                sentence: "edge".into(),
+                support: Support::Sentence(Box::new(Proposition::Sentence(
+                    "Frontend depends on Backend".into()
+                ))),
+            }]
         );
     }
 
@@ -790,14 +808,17 @@ mod tests {
             r#"
 (name Universe)
 (sense source "{component} is implemented at {path}")
-(source Universe "src/universe")
+(claim "where" (source Universe "src/universe"))
 "#,
         );
         assert_eq!(
             c.claims,
-            vec![Proposition::Sentence(
-                "Universe is implemented at src/universe".into()
-            )]
+            vec![Proposition::Claim {
+                sentence: "where".into(),
+                support: Support::Sentence(Box::new(Proposition::Sentence(
+                    "Universe is implemented at src/universe".into()
+                ))),
+            }]
         );
     }
 
@@ -857,7 +878,7 @@ mod tests {
 (detail
   (name Local)
   (claim "Local holds" "given"))
-("{Name} holds" Local)
+(claim "c" ("{Name} holds" Local))
 "#,
             )
             .unwrap(),
@@ -993,7 +1014,7 @@ mod tests {
                 "witness cites `src/a.rs` twice",
             ),
             (
-                "(witness \"src/a.rs\")",
+                "(claim \"a\" (and (witness \"src/a.rs\")))",
                 "`witness` is only the support of a claim",
             ),
         ] {
@@ -1041,21 +1062,29 @@ mod tests {
     #[test]
     fn a_nullary_sense_is_its_reading() {
         let compiled = compile(
-            &parse("(sense lemma-1 \"The square root of two is irrational.\")\n(lemma-1)").unwrap(),
+            &parse(
+                "(sense lemma-1 \"The square root of two is irrational.\")\n(claim (lemma-1) (witness \"proof.txt\"))",
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(
             compiled.claims,
-            vec![Proposition::Sentence(
-                "The square root of two is irrational.".into()
-            )]
+            vec![Proposition::Claim {
+                sentence: "The square root of two is irrational.".into(),
+                support: Support::Witness {
+                    paths: vec!["proof.txt".into()],
+                },
+            }]
         );
     }
 
     #[test]
     fn rejects_an_undeclared_name() {
         let err = compile(
-            &parse("(sense component \"{Name} is a part of the system\") (component Frontend)")
+            &parse(
+                "(sense component \"{Name} is a part of the system\") (claim \"c\" (component Frontend))",
+            )
                 .unwrap(),
         )
         .unwrap_err();
@@ -1067,7 +1096,9 @@ mod tests {
 
     #[test]
     fn rejects_an_unknown_sense_and_an_arity_mismatch() {
-        let unknown = compile(&parse("(name Frontend) (component Frontend)").unwrap()).unwrap_err();
+        let unknown =
+            compile(&parse("(name Frontend) (claim \"c\" (component Frontend))").unwrap())
+                .unwrap_err();
         assert!(
             unknown.message.contains("not a declared sense"),
             "{unknown}"
@@ -1078,7 +1109,7 @@ mod tests {
                 r#"
 (name Ada)
 (sense borrowed_from "{borrower} borrows from {lender}")
-(borrowed_from Ada)
+(claim "c" (borrowed_from Ada))
 "#,
             )
             .unwrap(),

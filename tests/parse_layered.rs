@@ -11,18 +11,19 @@ fn diagram_parses_and_compiles() {
 (sense depends_on \"{X} depends on {Y}\")
 (sense calls \"{caller} calls {callee}\")
 
-(depends_on Frontend Backend)
+(claim (depends_on Frontend Backend)
+  (not (depends_on Backend Frontend)))
 
-(not (depends_on Backend Frontend))
+(claim \"routes\"
+  (or
+    (calls Oracle TypeSafe)
+    \"Oracle calls the TypeSafe API\"))
 
-(or
-  (calls Oracle TypeSafe)
-  \"Oracle calls the TypeSafe API\")
-
-(and
-  \"Frontend is a component of the system\"
-  (\"{Name} is a component of the system\" Backend)
-  (\"{caller} calls {callee}\" Frontend Backend))";
+(claim \"pieces\"
+  (and
+    \"Frontend is a component of the system\"
+    (\"{Name} is a component of the system\" Backend)
+    (\"{caller} calls {callee}\" Frontend Backend)))";
     let program = parse(&src).expect("parse diagram.brief");
     let printed = print_program(&program);
     let again = parse(&printed).expect("reparse");
@@ -30,10 +31,15 @@ fn diagram_parses_and_compiles() {
 
     let compiled = compile(&program).expect("compile");
     assert!(compiled.claims.iter().any(|claim| {
-        matches!(claim, Proposition::Sentence(text) if text == "Frontend depends on Backend")
+        matches!(claim, Proposition::Claim { sentence, .. } if sentence == "Frontend depends on Backend")
     }));
-    assert!(compiled
-        .claims
-        .iter()
-        .any(|claim| matches!(claim, Proposition::Not(_))));
+    assert!(compiled.claims.iter().any(|claim| {
+        matches!(
+            claim,
+            Proposition::Claim {
+                support: autoground::syntax::Support::Sentence(inner),
+                ..
+            } if matches!(inner.as_ref(), Proposition::Not(_))
+        )
+    }));
 }

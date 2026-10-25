@@ -24,8 +24,7 @@ fn align_accepts_a_brief_markdown_and_a_flowchart() {
 (name Frontend)
 (name Backend)
 (sense depends_on \"{X} depends on {Y}\")
-(depends_on Frontend Backend)
-(not (depends_on Backend Frontend))
+(assume (depends_on Frontend Backend))
 ";
     let brief_path = dir.join("model.brief");
     std::fs::write(&brief_path, brief).unwrap();
@@ -38,7 +37,6 @@ fn align_accepts_a_brief_markdown_and_a_flowchart() {
 %% (sense depends_on \"{X} depends on {Y}\")
 flowchart LR
   Frontend -->|depends_on| Backend
-  Backend -->|not depends_on| Frontend
 ",
     )
     .unwrap();
@@ -80,8 +78,8 @@ fn align_names_a_one_sided_statement() {
     let dir = scratch("differ");
     let left = dir.join("left.brief");
     let right = dir.join("right.brief");
-    std::fs::write(&left, "\"alpha\"\n").unwrap();
-    std::fs::write(&right, "\"beta\"\n").unwrap();
+    std::fs::write(&left, "(assume \"alpha\")\n").unwrap();
+    std::fs::write(&right, "(assume \"beta\")\n").unwrap();
     let out = bin()
         .args(["align", left.to_str().unwrap(), right.to_str().unwrap()])
         .output()

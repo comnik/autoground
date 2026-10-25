@@ -375,7 +375,7 @@ mod tests {
 (ns com.acme.product)
 (name Frontend)
 (sense part_of "{X} is part of {Y}")
-(part_of Frontend Frontend)
+(assume (part_of Frontend Frontend))
 "#;
 
     #[test]
@@ -387,14 +387,14 @@ mod tests {
   (:require [com.acme.product :as product]))
 (name product)
 (name Backend)
-(product/part_of product/Frontend Backend)
+(assume (product/part_of product/Frontend Backend))
 "#,
             &files,
         )
         .unwrap();
         assert_eq!(
             compiled.claims,
-            vec![crate::syntax::Proposition::Sentence(
+            vec![crate::syntax::Proposition::Assume(
                 "Frontend is part of Backend".into()
             )]
         );
@@ -403,7 +403,7 @@ mod tests {
 (ns com.acme.client
   (:require [com.acme.product :as product]))
 (name Backend)
-(part_of Frontend Backend)
+(assume (part_of Frontend Backend))
 "#,
             &files,
         )
@@ -423,7 +423,7 @@ mod tests {
 (ns com.acme.client
   (:require [com.acme.product :refer [Frontend part_of]]))
 (name Backend)
-(part_of Frontend Backend)
+(assume (part_of Frontend Backend))
 "#,
             &files,
         )
@@ -433,7 +433,7 @@ mod tests {
 (ns com.acme.client
   (:require [com.acme.product :refer :all]))
 (name Backend)
-(part_of Frontend Backend)
+(assume (part_of Frontend Backend))
 "#,
             &files,
         )
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(referred.claims, all.claims);
         assert_eq!(
             referred.claims,
-            vec![crate::syntax::Proposition::Sentence(
+            vec![crate::syntax::Proposition::Assume(
                 "Frontend is part of Backend".into()
             )]
         );
@@ -449,14 +449,14 @@ mod tests {
             r#"
 (ns com.acme.client
   (:require [com.acme.product]))
-(com.acme.product/part_of com.acme.product/Frontend com.acme.product/Frontend)
+(assume (com.acme.product/part_of com.acme.product/Frontend com.acme.product/Frontend))
 "#,
             &files,
         )
         .unwrap();
         assert_eq!(
             bare.claims,
-            vec![crate::syntax::Proposition::Sentence(
+            vec![crate::syntax::Proposition::Assume(
                 "Frontend is part of Frontend".into()
             )]
         );
@@ -566,7 +566,7 @@ mod tests {
 (ns com.acme.product)
 (name Frontend)
 (sense part_of "{X} is part of {Y}")
-(part_of Frontend Missing)
+(assume (part_of Frontend Missing))
 "#,
         );
         let err = linked(
@@ -574,7 +574,7 @@ mod tests {
 (ns com.acme.client
   (:require [com.acme.product :refer [Frontend part_of]]))
 (name Backend)
-(part_of Frontend Backend)
+(assume (part_of Frontend Backend))
 "#,
             &[broken],
         )
@@ -590,14 +590,14 @@ mod tests {
 (ns com.acme.client
   (:require [com.acme.product :refer [Frontend part_of]]))
 (name Backend)
-(part_of Frontend Backend)
+(assume (part_of Frontend Backend))
 "#,
             &[sound],
         )
         .unwrap();
         assert_eq!(
             compiled.claims,
-            vec![Proposition::Sentence("Frontend is part of Backend".into())]
+            vec![Proposition::Assume("Frontend is part of Backend".into())]
         );
     }
 
@@ -611,7 +611,7 @@ mod tests {
   (:require [com.acme.b :refer [Backend]]))
 (name Frontend)
 (sense part_of "{X} is part of {Y}")
-(part_of Frontend Backend)
+(assume (part_of Frontend Backend))
 "#,
             ),
             loaded(
@@ -620,14 +620,14 @@ mod tests {
 (ns com.acme.b
   (:require [com.acme.a :refer [Frontend part_of]]))
 (name Backend)
-(part_of Frontend Backend)
+(assume (part_of Frontend Backend))
 "#,
             ),
         ];
         let compiled = link(&files[0].program, Some("a.brief"), &files).unwrap();
         assert_eq!(
             compiled.claims,
-            vec![crate::syntax::Proposition::Sentence(
+            vec![crate::syntax::Proposition::Assume(
                 "Frontend is part of Backend".into()
             )]
         );
