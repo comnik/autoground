@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use super::ast::{
-    Arg, ClauseSpan, Form, Formula, Ident, Ns, Program, Reading, Refer, Require, Sense,
+    Arg, At, ClauseSpan, Form, Formula, Ident, Ns, Program, Reading, Refer, Require, Sense,
 };
 use super::template::hole_names;
 
@@ -647,6 +647,7 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
             Formula::Apply {
                 reading: Reading::Sense(use_symbol(&xs[0], head)?),
                 args: lower_args(&xs[1..])?,
+                at: at_of(s),
             },
             clause(Vec::new()),
         )),
@@ -662,6 +663,7 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
                         holes,
                     },
                     args: lower_args(&xs[1..])?,
+                    at: at_of(s),
                 },
                 clause(Vec::new()),
             ))
@@ -774,7 +776,29 @@ fn lower_arg(s: &Sexp) -> Result<Arg, ParseError> {
     match &s.kind {
         SexpKind::Symbol(spelling) => Ok(Arg::Name(use_symbol(s, spelling)?)),
         SexpKind::String(text) => Ok(Arg::Literal(text.clone())),
-        _ => Err(err_at(s, "an argument must be a name or a string")),
+        SexpKind::List(xs) if xs.len() == 1 => {
+            let SexpKind::Symbol(spelling) = &xs[0].kind else {
+                return Err(err_at(
+                    s,
+                    "an argument must be a name, a string, or a nullary sense",
+                ));
+            };
+            Ok(Arg::Term {
+                ident: use_symbol(&xs[0], spelling)?,
+                at: at_of(s),
+            })
+        }
+        _ => Err(err_at(
+            s,
+            "an argument must be a name, a string, or a nullary sense",
+        )),
+    }
+}
+
+fn at_of(s: &Sexp) -> At {
+    At {
+        line: s.line,
+        col: s.col,
     }
 }
 
@@ -894,6 +918,7 @@ fn inline_sentence(s: &Sexp) -> Result<Option<(Formula, ClauseSpan)>, ParseError
                 holes,
             },
             args: Vec::new(),
+            at: at_of(s),
         },
         ClauseSpan {
             span: s.span.clone(),
@@ -975,6 +1000,7 @@ mod tests {
             Form::Assume(Formula::Apply {
                 reading: Reading::Inline { template, .. },
                 args,
+                ..
             }) => {
                 assert!(args.is_empty());
                 assert_eq!(template, "Nestlé");
@@ -1160,7 +1186,7 @@ mod tests {
         let Formula::Claim { support, .. } = program.claims().next().unwrap() else {
             panic!("claim");
         };
-        let Formula::Apply { reading, args } = support.as_ref() else {
+        let Formula::Apply { reading, args, .. } = support.as_ref() else {
             panic!("apply");
         };
         let Reading::Sense(head) = reading else {
@@ -1257,6 +1283,7 @@ mod tests {
             Form::Assume(Formula::Apply {
                 reading: Reading::Inline { template, holes },
                 args,
+                ..
             }) => {
                 assert_eq!(template, "the file is small");
                 assert!(holes.is_empty());
@@ -1291,6 +1318,7 @@ mod tests {
             Formula::Apply {
                 reading: Reading::Inline { template, .. },
                 args,
+                ..
             } => {
                 assert_eq!(template, "{Name} is a component");
                 assert_eq!(args.len(), 1);
@@ -1356,6 +1384,47 @@ mod tests {
         ] {
             let err = parse(src).unwrap_err();
             assert!(err.message.contains(needle), "{src}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_nullary_sense_is_an_argument() {
+        let program = parse(
+            "(claim (creates R (T)) (witness \"a.py\"))\n(claim (creates R (ns/T)) (witness \"b.py\"))\n",
+        )
+        .unwrap();
+        let args = |index: usize| {
+            let Formula::Claim { sentence, .. } = program.claims().nth(index).unwrap() else {
+                panic!("claim");
+            };
+            let Formula::Apply { args, .. } = sentence.as_ref() else {
+                panic!("apply");
+            };
+            args.clone()
+        };
+        match &args(0)[1] {
+            Arg::Term { ident, .. } => {
+                assert_eq!(ident.name, "T");
+                assert!(ident.qualifier.is_none());
+            }
+            other => panic!("term: {other:?}"),
+        }
+        match &args(1)[1] {
+            Arg::Term { ident, .. } => assert_eq!(ident.display(), "ns/T"),
+            other => panic!("qualified term: {other:?}"),
+        }
+        for src in [
+            "(claim \"c\" (creates R (T U)))",
+            "(claim \"c\" (creates R ()))",
+            "(claim \"c\" (creates R (\"T\")))",
+            "(claim \"c\" (creates R (not T)))",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(
+                err.message
+                    .contains("an argument must be a name, a string, or a nullary sense"),
+                "{src}: {err}"
+            );
         }
     }
 }

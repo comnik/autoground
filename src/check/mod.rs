@@ -24,7 +24,7 @@ use serde_json::{json, Value as Json};
 use crate::confidence::SUPPORT;
 use crate::oracle::image::{image_asset, image_extension, Asset, ImageError, MAX_IMAGE_BYTES};
 use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, State, Ticket};
-use crate::syntax::{Proposition, Support};
+use crate::syntax::{Proposition, Sentence, Support};
 use crate::universe::{Filesystem, GivenFile, Universe, UniverseError};
 use crate::value::Value;
 
@@ -271,13 +271,13 @@ fn collect_heads(proposition: &Proposition, heads: &mut HashSet<String>) {
         Proposition::Not(inner) => collect_heads(inner, heads),
         Proposition::Sentence(_) => {}
         Proposition::Claim { sentence, support } => {
-            heads.insert(sentence.clone());
+            heads.insert(sentence.text.clone());
             if let Support::Sentence(inner) = support {
                 collect_heads(inner, heads);
             }
         }
         Proposition::Assume(sentence) => {
-            heads.insert(sentence.clone());
+            heads.insert(sentence.text.clone());
         }
         Proposition::Scope { body, .. } => {
             for proposition in body {
@@ -365,9 +365,9 @@ fn prepare<O: Oracle>(
 ) -> Result<Work, CheckError> {
     match proposition {
         Proposition::Sentence(sentence) => {
-            let defined = defs.contains(sentence);
+            let defined = defs.contains(&sentence.text);
             Ok(Work {
-                text: sentence.clone(),
+                text: sentence.text.clone(),
                 failure: if defined {
                     None
                 } else {
@@ -388,7 +388,7 @@ fn prepare<O: Oracle>(
                 let child = prepare(support, defs, sources, bound, budget, oracle)?;
                 let implication = Box::new(prepare_implication(sentence, support, oracle));
                 Ok(Work {
-                    text: sentence.clone(),
+                    text: sentence.text.clone(),
                     failure: None,
                     cites: Vec::new(),
                     children: vec![child],
@@ -399,7 +399,7 @@ fn prepare<O: Oracle>(
             }
         },
         Proposition::Assume(sentence) => Ok(Work {
-            text: sentence.clone(),
+            text: sentence.text.clone(),
             failure: None,
             cites: Vec::new(),
             children: Vec::new(),
@@ -469,7 +469,7 @@ fn prepare_bool<O: Oracle>(
 }
 
 fn prepare_witness<O: Oracle>(
-    sentence: &str,
+    sentence: &Sentence,
     paths: &[String],
     sources: &Sources<'_>,
     bound: Option<&BoundFile>,
@@ -478,7 +478,7 @@ fn prepare_witness<O: Oracle>(
 ) -> Result<Work, CheckError> {
     let cites: Vec<String> = paths.iter().map(|path| cite_path(path, bound)).collect();
     let mut work = Work {
-        text: sentence.to_string(),
+        text: sentence.text.clone(),
         failure: None,
         cites: cites.clone(),
         children: Vec::new(),
@@ -514,7 +514,7 @@ fn prepare_witness<O: Oracle>(
     let budget = budget.max(1);
     if files.len() == 1 {
         return submit_one(
-            sentence,
+            &sentence.grounded,
             files.pop().unwrap(),
             sources,
             budget,
@@ -522,7 +522,7 @@ fn prepare_witness<O: Oracle>(
             work,
         );
     }
-    submit_joint(sentence, files, sources, budget, oracle, work)
+    submit_joint(&sentence.grounded, files, sources, budget, oracle, work)
 }
 
 enum WitnessLoad {
@@ -687,7 +687,7 @@ fn is_brief_file(path: &str) -> bool {
             && name[name.len() - ".brief".len()..].eq_ignore_ascii_case(".brief"))
 }
 
-fn prepare_implication<O: Oracle>(head: &str, support: &Proposition, oracle: &mut O) -> Work {
+fn prepare_implication<O: Oracle>(head: &Sentence, support: &Proposition, oracle: &mut O) -> Work {
     let premises = premise_sentences(std::slice::from_ref(support));
     let mut work = Work {
         text: IMPLICATION_TEXT.to_string(),
@@ -701,7 +701,7 @@ fn prepare_implication<O: Oracle>(head: &str, support: &Proposition, oracle: &mu
     if premises.is_empty() {
         return work;
     }
-    let class = implication_question(head, &premises);
+    let class = implication_question(&head.grounded, &premises);
     work.failure = None;
     work.asked.push(Asked {
         ticket: oracle.submit(class),
@@ -808,9 +808,9 @@ fn premise_sentences(body: &[Proposition]) -> Vec<String> {
 fn push_premises(proposition: &Proposition, sentences: &mut Vec<String>) {
     match proposition {
         Proposition::Sentence(sentence) | Proposition::Assume(sentence) => {
-            sentences.push(sentence.clone());
+            sentences.push(sentence.grounded.clone());
         }
-        Proposition::Claim { sentence, .. } => sentences.push(sentence.clone()),
+        Proposition::Claim { sentence, .. } => sentences.push(sentence.grounded.clone()),
         Proposition::And(xs) => {
             for proposition in xs {
                 push_premises(proposition, sentences);
@@ -823,8 +823,10 @@ fn push_premises(proposition: &Proposition, sentences: &mut Vec<String>) {
 
 fn statement(proposition: &Proposition) -> String {
     match proposition {
-        Proposition::Sentence(sentence) | Proposition::Assume(sentence) => sentence.clone(),
-        Proposition::Claim { sentence, .. } => sentence.clone(),
+        Proposition::Sentence(sentence) | Proposition::Assume(sentence) => {
+            sentence.grounded.clone()
+        }
+        Proposition::Claim { sentence, .. } => sentence.grounded.clone(),
         Proposition::And(xs) => xs.iter().map(statement).collect::<Vec<_>>().join(" and "),
         Proposition::Or(xs) => xs.iter().map(statement).collect::<Vec<_>>().join(" or "),
         Proposition::Not(inner) => format!("not ({})", statement(inner)),
@@ -2093,5 +2095,50 @@ mod tests {
             "{err}"
         );
         assert!(oracle.seen.is_empty());
+    }
+
+    #[test]
+    fn a_term_is_shown_by_its_name_and_asked_by_its_text() {
+        let dir = scratch("term");
+        fs::write(dir.join("logic.py"), "output_table_names\n").unwrap();
+        let mut oracle = Rec::new(entailed);
+        let report = check(
+            &compiled(
+                r#"
+(name LogicReasoner)
+(sense LogicOutputTables "the tables named in a logic block's output_table_names")
+(sense creates "{reasoner} plans deploy units that create {object}")
+(claim (creates LogicReasoner (LogicOutputTables))
+  (witness "logic.py"))
+(claim "the plan names those tables"
+  (creates LogicReasoner (LogicOutputTables)))
+"#,
+            ),
+            &dir,
+            DEFAULT_BODY_BYTES,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(
+            report.claims[0].text,
+            "LogicReasoner plans deploy units that create LogicOutputTables"
+        );
+        assert_eq!(
+            oracle.seen[0].instructions["proposition"].as_str().unwrap(),
+            "LogicReasoner plans deploy units that create the tables named in a logic block's output_table_names"
+        );
+        let premises = oracle
+            .seen
+            .iter()
+            .find(|req| req.state.get("sentences").is_some())
+            .unwrap();
+        assert_eq!(
+            premises.state["sentences"][0].as_str().unwrap(),
+            "LogicReasoner plans deploy units that create the tables named in a logic block's output_table_names"
+        );
+        assert!(write_report(&report)
+            .contains("LogicReasoner plans deploy units that create LogicOutputTables"));
+        assert!(!write_report(&report).contains("output_table_names"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

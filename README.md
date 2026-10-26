@@ -45,6 +45,7 @@ default, all commands are capped at a budget of 1 cent.
 <!--
 ```brief
 (ns readme)
+
 (claim "check runs with the default budget cap by default"
   (witness "src/main.rs"))
 

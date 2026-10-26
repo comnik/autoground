@@ -618,4 +618,40 @@ names
             lower_mermaid("flowchart LR\n  Backend -->|not depends_on| Frontend\n").unwrap_err();
         assert!(err.to_string().contains("cannot be assumed"), "{err}");
     }
+
+    #[test]
+    fn a_node_label_resolves_to_a_term_sense() {
+        let brief = r#"
+(name LogicReasoner)
+(sense LogicOutputTables "the tables named in a logic block's output_table_names")
+(sense creates "{reasoner} plans deploy units that create {object}")
+(assume (creates LogicReasoner (LogicOutputTables)))
+"#;
+        let picture = r#"
+%% (sense creates "{reasoner} plans deploy units that create {object}")
+flowchart LR
+  LogicReasoner -->|creates| LogicOutputTables
+"#;
+        let diff = mismatch(
+            &model_from(brief),
+            &model_from(&lower_mermaid(picture).unwrap()),
+        );
+        assert!(diff.is_none(), "{diff:?}");
+    }
+
+    #[test]
+    fn a_sentence_sense_does_not_resolve_a_node_label() {
+        let brief = "(sense lemma \"The square root of two is irrational.\")\n(assume (lemma))\n";
+        let picture = "flowchart LR\n  lemma\n";
+        let diff = mismatch(
+            &model_from(brief),
+            &model_from(&lower_mermaid(picture).unwrap()),
+        )
+        .unwrap();
+        assert!(diff.contains("only in right\n    lemma\n"), "{diff}");
+        assert!(
+            diff.contains("lemma \"The square root of two is irrational.\""),
+            "{diff}"
+        );
+    }
 }

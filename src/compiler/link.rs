@@ -265,15 +265,20 @@ fn environment(
     for (alias, ns) in &aliases {
         qualifiers.insert(alias.clone(), ns.clone());
     }
+    let mut owners = HashMap::new();
     let senses = imported_senses
         .into_iter()
-        .map(|(spelling, (_, sense))| (spelling, sense))
+        .map(|(spelling, (owner, sense))| {
+            owners.insert(spelling.clone(), owner);
+            (spelling, sense)
+        })
         .collect();
     Ok(Imports {
         names: imported_names.into_keys().collect(),
         senses,
         qualifiers,
         opened,
+        owners,
     })
 }
 
@@ -630,6 +635,63 @@ mod tests {
             vec![crate::syntax::Proposition::Assume(
                 "Frontend is part of Backend".into()
             )]
+        );
+    }
+
+    #[test]
+    fn a_qualified_term_verbalizes_as_its_bare_name() {
+        let files = vec![loaded(
+            "lib.brief",
+            r#"
+(ns lib)
+(sense LogicOutputTables "the tables named in output_table_names")
+(sense creates "{a} creates {b}")
+"#,
+        )];
+        let compiled = linked(
+            r#"
+(ns app (:require [lib :as lib]))
+(name R)
+(assume (lib/creates R (lib/LogicOutputTables)))
+"#,
+            &files,
+        )
+        .unwrap();
+        let Proposition::Assume(sentence) = &compiled.claims[0] else {
+            panic!("assume");
+        };
+        assert_eq!(sentence.text, "R creates LogicOutputTables");
+        assert_eq!(
+            sentence.grounded,
+            "R creates the tables named in output_table_names"
+        );
+    }
+
+    #[test]
+    fn a_referred_term_and_its_qualified_use_are_one_sense() {
+        let files = vec![loaded(
+            "lib.brief",
+            r#"
+(ns lib)
+(sense LogicOutputTables "the tables")
+"#,
+        )];
+        let err = linked(
+            r#"
+(ns app (:require [lib :as lib :refer [LogicOutputTables]]))
+(name R)
+(sense creates "{a} creates {b}")
+(assume (creates R (LogicOutputTables)))
+(assume (lib/LogicOutputTables))
+"#,
+            &files,
+        )
+        .unwrap_err();
+        assert!(
+            err.message
+                .contains("`LogicOutputTables` is used as a term")
+                && err.message.contains("as a sentence"),
+            "{err}"
         );
     }
 }

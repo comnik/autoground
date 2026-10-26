@@ -116,7 +116,7 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
             }
             out.push(')');
         }
-        Formula::Apply { reading, args } => {
+        Formula::Apply { reading, args, .. } => {
             if args.is_empty() {
                 if let Reading::Inline { template, holes: _ } = reading {
                     out.push_str(&quote_const(template));
@@ -133,6 +133,11 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
                 match arg {
                     Arg::Name(ident) => push_ident(ident, out),
                     Arg::Literal(text) => out.push_str(&quote_const(text)),
+                    Arg::Term { ident, .. } => {
+                        out.push('(');
+                        push_ident(ident, out);
+                        out.push(')');
+                    }
                 }
             }
             out.push(')');
@@ -247,6 +252,16 @@ mod tests {
         let src = "(assume (source Universe \"src/universe\"))\n";
         let program = parse(src).unwrap();
         let again = parse(&print_program(&program)).unwrap();
+        assert_eq!(program, again);
+    }
+
+    #[test]
+    fn round_trip_keeps_a_term_argument() {
+        let src = "(assume (creates R (T)))\n";
+        let program = parse(src).unwrap();
+        let printed = print_program(&program);
+        assert!(printed.contains("(creates R (T))"), "{printed}");
+        let again = parse(&printed).unwrap();
         assert_eq!(program, again);
     }
 }

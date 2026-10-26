@@ -38,12 +38,58 @@ pub enum Reading {
     },
 }
 
+/// Where a use starts. Equality ignores it: a position locates an error and
+/// is not part of the model.
+#[derive(Debug, Clone, Copy)]
+pub struct At {
+    pub line: usize,
+    pub col: usize,
+}
+
+impl PartialEq for At {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for At {}
+
+/// A filled sentence.
+///
+/// `text` is what a report, a citation, and an alignment use. `grounded` is
+/// what the judge is asked. A term puts its name in `text` and its reading
+/// in `grounded`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sentence {
+    pub text: String,
+    pub grounded: String,
+}
+
+impl From<&str> for Sentence {
+    fn from(text: &str) -> Self {
+        Self {
+            grounded: text.to_string(),
+            text: text.to_string(),
+        }
+    }
+}
+
+impl From<String> for Sentence {
+    fn from(text: String) -> Self {
+        Self {
+            grounded: text.clone(),
+            text,
+        }
+    }
+}
+
 /// An argument. A name is a declared symbol. A literal is a spelling written
-/// where it is used: the text is the name.
+/// where it is used. A term is a nullary sense.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Arg {
     Name(Ident),
     Literal(String),
+    Term { ident: Ident, at: At },
 }
 
 /// A ground formula. A `claim` offers a sentence with support. A `witness` is
@@ -57,6 +103,7 @@ pub enum Formula {
     Apply {
         reading: Reading,
         args: Vec<Arg>,
+        at: At,
     },
     /// `sentence` established by `support`.
     Claim {
@@ -111,14 +158,14 @@ pub enum Proposition {
     And(Vec<Proposition>),
     Or(Vec<Proposition>),
     Not(Box<Proposition>),
-    Sentence(String),
+    Sentence(Sentence),
     /// `sentence` established by `support`.
     Claim {
-        sentence: String,
+        sentence: Sentence,
         support: Support,
     },
     /// A sentence taken as true, with no evidence.
-    Assume(String),
+    Assume(Sentence),
     /// A detail. Names declared in the body stay there. `body` is the claims,
     /// assumptions, and nested details, in order.
     Scope {

@@ -1,13 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::syntax::template::{apply, holes_word, names_word};
-use crate::syntax::{Arg, Form, Formula, Ident, Program, Proposition, Reading, Sense, Support};
+use crate::syntax::{
+    Arg, At, Form, Formula, Ident, Program, Proposition, Reading, Sense, Sentence, Support,
+};
 
 mod link;
 mod scan;
 
 pub use link::{link, link_parts};
-pub use scan::{display_path, scan_namespaces, LoadError, Loaded};
+pub use scan::{display_path, scan_briefs, scan_namespaces, BriefFile, LoadError, Loaded};
 
 /// Names and senses visible through `:as` and `:refer`.
 pub(crate) struct Opened {
@@ -21,6 +23,8 @@ pub(crate) struct Imports {
     /// Alias or required namespace name, mapped to that namespace.
     qualifiers: HashMap<String, String>,
     opened: HashMap<String, Opened>,
+    /// A referred sense spelling, mapped to the namespace that declares it.
+    owners: HashMap<String, String>,
 }
 
 impl Imports {
@@ -30,6 +34,7 @@ impl Imports {
             senses: HashMap::new(),
             qualifiers: HashMap::new(),
             opened: HashMap::new(),
+            owners: HashMap::new(),
         }
     }
 }
@@ -182,6 +187,9 @@ pub struct Compiled {
     pub claims: Vec<Proposition>,
     /// Assumption sentences, in source order, including ones inside a detail.
     pub assumptions: Vec<String>,
+    /// Nullary senses used as terms, including ones declared inside a detail.
+    /// Each entry is the sense's name and its template.
+    pub terms: BTreeSet<(String, String)>,
 }
 
 /// Resolve senses and check that every claim is a saturated ground sentence.
@@ -248,14 +256,22 @@ pub(crate) fn compile_with(program: &Program, imports: &Imports) -> Result<Compi
     let mut declared: HashSet<String> = names.iter().cloned().collect();
     declared.extend(imports.names.iter().cloned());
 
+    let mut ctx = Ctx {
+        imports,
+        expansions: HashMap::new(),
+        scopes: vec![file_scope(&program.forms, imports)],
+        terms: BTreeSet::new(),
+    };
     let mut assumptions = Vec::new();
     let claims = resolve_forms(
         &program.forms,
         &declared,
         &sense_by_name,
-        imports,
+        &mut ctx,
         &mut assumptions,
     )?;
+    let file = ctx.scopes.pop().expect("file scope");
+    ctx.terms.extend(finish_scope(file)?);
     check_definitions(&claims)?;
 
     Ok(Compiled {
@@ -263,6 +279,7 @@ pub(crate) fn compile_with(program: &Program, imports: &Imports) -> Result<Compi
         senses,
         claims,
         assumptions,
+        terms: ctx.terms,
     })
 }
 
@@ -323,13 +340,17 @@ fn collect_support(support: &Support, defs: &mut HashMap<String, Def>) -> Result
     }
 }
 
-fn define(sentence: &str, def: Def, defs: &mut HashMap<String, Def>) -> Result<(), CompileError> {
-    if defs.contains_key(sentence) {
+fn define(
+    sentence: &Sentence,
+    def: Def,
+    defs: &mut HashMap<String, Def>,
+) -> Result<(), CompileError> {
+    if defs.contains_key(&sentence.text) {
         return Err(CompileError {
-            message: format!("duplicate definition of `{sentence}`"),
+            message: format!("duplicate definition of `{}`", sentence.text),
         });
     }
-    defs.insert(sentence.to_string(), def);
+    defs.insert(sentence.text.clone(), def);
     Ok(())
 }
 
@@ -374,15 +395,15 @@ fn support_deps(support: &Support, defs: &HashMap<String, Def>) -> Vec<String> {
 fn prop_deps(proposition: &Proposition, defs: &HashMap<String, Def>) -> Vec<String> {
     match proposition {
         Proposition::Sentence(sentence) | Proposition::Assume(sentence) => {
-            if defs.contains_key(sentence) {
-                vec![sentence.clone()]
+            if defs.contains_key(&sentence.text) {
+                vec![sentence.text.clone()]
             } else {
                 Vec::new()
             }
         }
         Proposition::Claim { sentence, .. } => {
-            if defs.contains_key(sentence) {
-                vec![sentence.clone()]
+            if defs.contains_key(&sentence.text) {
+                vec![sentence.text.clone()]
             } else {
                 Vec::new()
             }
@@ -408,11 +429,176 @@ fn contains_claim_or_assume(forms: &[Form]) -> bool {
     })
 }
 
+/// Where one nullary sense was used. The earliest site of each kind is kept.
+struct DeclUse {
+    name: String,
+    template: String,
+    imported: bool,
+    term: Option<(usize, usize)>,
+    sentence: Option<(usize, usize)>,
+}
+
+enum Place {
+    Term,
+    Sentence,
+}
+
+struct Spelling {
+    shown: String,
+    grounded: String,
+}
+
+struct Ctx<'a> {
+    imports: &'a Imports,
+    /// Shown sentence, then the sentence the judge would be asked.
+    expansions: HashMap<String, String>,
+    /// Scopes from the outside in. The file is index 0.
+    scopes: Vec<HashMap<String, DeclUse>>,
+    terms: BTreeSet<(String, String)>,
+}
+
+fn file_scope(forms: &[Form], imports: &Imports) -> HashMap<String, DeclUse> {
+    let mut scope = scope_decls(forms);
+    for (namespace, opened) in &imports.opened {
+        for (name, sense) in &opened.senses {
+            if !sense.holes.is_empty() {
+                continue;
+            }
+            scope.insert(
+                format!("{namespace}/{name}"),
+                DeclUse {
+                    name: name.clone(),
+                    template: sense.template.clone(),
+                    imported: true,
+                    term: None,
+                    sentence: None,
+                },
+            );
+        }
+    }
+    scope
+}
+
+fn scope_decls(forms: &[Form]) -> HashMap<String, DeclUse> {
+    let mut scope = HashMap::new();
+    for form in forms {
+        if let Form::Sense(sense) = form {
+            if sense.holes.is_empty() {
+                scope.insert(
+                    sense.name.clone(),
+                    DeclUse {
+                        name: sense.name.clone(),
+                        template: sense.template.clone(),
+                        imported: false,
+                        term: None,
+                        sentence: None,
+                    },
+                );
+            }
+        }
+    }
+    scope
+}
+
+fn finish_scope(
+    scope: HashMap<String, DeclUse>,
+) -> Result<BTreeSet<(String, String)>, CompileError> {
+    let mut conflict: Option<(String, (usize, usize), (usize, usize))> = None;
+    for decl in scope.values() {
+        let (Some(term), Some(sentence)) = (decl.term, decl.sentence) else {
+            continue;
+        };
+        let earliest = term.min(sentence);
+        let replace = conflict
+            .as_ref()
+            .is_none_or(|(_, prev_term, prev_sentence)| {
+                earliest < (*prev_term).min(*prev_sentence)
+            });
+        if replace {
+            conflict = Some((decl.name.clone(), term, sentence));
+        }
+    }
+    if let Some((name, term, sentence)) = conflict {
+        return Err(CompileError {
+            message: format!(
+                "`{name}` is used as a term at {}:{} and as a sentence at {}:{}.\nA nullary sense reads either as a noun phrase or as a sentence, not both.",
+                term.0, term.1, sentence.0, sentence.1
+            ),
+        });
+    }
+    let mut terms = BTreeSet::new();
+    for decl in scope.values() {
+        if !decl.imported && decl.term.is_some() {
+            terms.insert((decl.name.clone(), decl.template.clone()));
+        }
+    }
+    Ok(terms)
+}
+
+fn find_decl(ctx: &Ctx, ident: &Ident) -> Option<(usize, String)> {
+    if let Some(qualifier) = &ident.qualifier {
+        let namespace = ctx.imports.qualifiers.get(qualifier)?;
+        let key = format!("{namespace}/{}", ident.name);
+        if ctx.scopes[0].contains_key(&key) {
+            return Some((0, key));
+        }
+        return None;
+    }
+    for (index, scope) in ctx.scopes.iter().enumerate().rev() {
+        if scope.get(&ident.name).is_some_and(|decl| !decl.imported) {
+            return Some((index, ident.name.clone()));
+        }
+    }
+    let namespace = ctx.imports.owners.get(&ident.name)?;
+    let key = format!("{namespace}/{}", ident.name);
+    if ctx.scopes[0].contains_key(&key) {
+        Some((0, key))
+    } else {
+        None
+    }
+}
+
+fn note(ctx: &mut Ctx, ident: &Ident, place: Place, at: At) {
+    let Some((index, key)) = find_decl(ctx, ident) else {
+        return;
+    };
+    let Some(decl) = ctx.scopes[index].get_mut(&key) else {
+        return;
+    };
+    let slot = match place {
+        Place::Term => &mut decl.term,
+        Place::Sentence => &mut decl.sentence,
+    };
+    let pos = (at.line, at.col);
+    if slot.is_none_or(|prev| pos < prev) {
+        *slot = Some(pos);
+    }
+}
+
+fn remember(
+    expansions: &mut HashMap<String, String>,
+    sentence: &Sentence,
+) -> Result<(), CompileError> {
+    match expansions.get(&sentence.text) {
+        Some(prev) if prev != &sentence.grounded => Err(CompileError {
+            message: format!(
+                "`{}` expands to `{prev}` and `{}`",
+                sentence.text, sentence.grounded
+            ),
+        }),
+        Some(_) => Ok(()),
+        None => {
+            expansions.insert(sentence.text.clone(), sentence.grounded.clone());
+            Ok(())
+        }
+    }
+}
+
 fn resolve_forms(
     forms: &[Form],
     names: &HashSet<String>,
     senses: &HashMap<String, Sense>,
-    imports: &Imports,
+    ctx: &mut Ctx<'_>,
     assumptions: &mut Vec<String>,
 ) -> Result<Vec<Proposition>, CompileError> {
     let mut claims = Vec::new();
@@ -420,21 +606,16 @@ fn resolve_forms(
         match form {
             Form::Name(_) | Form::Sense(_) => {}
             Form::Assume(sentence) => {
-                let text = require_sentence(
-                    sentence,
-                    names,
-                    senses,
-                    imports,
-                    "`assume` takes a sentence",
-                )?;
-                assumptions.push(text.clone());
+                let text =
+                    require_sentence(sentence, names, senses, ctx, "`assume` takes a sentence")?;
+                assumptions.push(text.text.clone());
                 claims.push(Proposition::Assume(text));
             }
             Form::Detail(body) => {
-                claims.push(resolve_detail(body, names, senses, imports, assumptions)?);
+                claims.push(resolve_detail(body, names, senses, ctx, assumptions)?);
             }
             Form::Formula(formula) => {
-                claims.push(resolve(formula, names, senses, imports)?);
+                claims.push(resolve(formula, names, senses, ctx)?);
             }
         }
     }
@@ -447,7 +628,7 @@ fn resolve_detail(
     body: &[Form],
     names: &HashSet<String>,
     senses: &HashMap<String, Sense>,
-    imports: &Imports,
+    ctx: &mut Ctx<'_>,
     assumptions: &mut Vec<String>,
 ) -> Result<Proposition, CompileError> {
     if !contains_claim_or_assume(body) {
@@ -456,7 +637,10 @@ fn resolve_detail(
         });
     }
     let (names, senses) = extend_scope(body, names, senses)?;
-    let body = resolve_forms(body, &names, &senses, imports, assumptions)?;
+    ctx.scopes.push(scope_decls(body));
+    let body = resolve_forms(body, &names, &senses, ctx, assumptions)?;
+    let scope = ctx.scopes.pop().expect("detail scope");
+    ctx.terms.extend(finish_scope(scope)?);
     Ok(Proposition::Scope { body })
 }
 
@@ -464,51 +648,64 @@ fn resolve(
     formula: &Formula,
     names: &HashSet<String>,
     senses: &HashMap<String, Sense>,
-    imports: &Imports,
+    ctx: &mut Ctx<'_>,
 ) -> Result<Proposition, CompileError> {
     match formula {
-        Formula::And(xs) => Ok(Proposition::And(resolve_all(xs, names, senses, imports)?)),
-        Formula::Or(xs) => Ok(Proposition::Or(resolve_all(xs, names, senses, imports)?)),
-        Formula::Not(x) => Ok(Proposition::Not(Box::new(resolve(
-            x, names, senses, imports,
-        )?))),
+        Formula::And(xs) => Ok(Proposition::And(resolve_all(xs, names, senses, ctx)?)),
+        Formula::Or(xs) => Ok(Proposition::Or(resolve_all(xs, names, senses, ctx)?)),
+        Formula::Not(x) => Ok(Proposition::Not(Box::new(resolve(x, names, senses, ctx)?))),
         Formula::Claim { sentence, support } => {
             let sentence =
-                require_sentence(sentence, names, senses, imports, "`claim` heads a sentence")?;
+                require_sentence(sentence, names, senses, ctx, "`claim` heads a sentence")?;
             let support = match support.as_ref() {
                 Formula::Witness { paths } => Support::Witness {
                     paths: witness_paths(paths)?,
                 },
-                other => Support::Sentence(Box::new(resolve(other, names, senses, imports)?)),
+                other => Support::Sentence(Box::new(resolve(other, names, senses, ctx)?)),
             };
             Ok(Proposition::Claim { sentence, support })
         }
         Formula::Witness { .. } => Err(CompileError {
             message: "`witness` is only the support of a claim".into(),
         }),
-        Formula::Apply { reading, args } => {
-            let mut spellings = Vec::with_capacity(args.len());
+        Formula::Apply { reading, args, at } => {
+            let mut shown_args = Vec::with_capacity(args.len());
+            let mut grounded_args = Vec::with_capacity(args.len());
             for arg in args {
-                spellings.push(resolve_arg(arg, names, imports)?);
+                let spelling = resolve_arg(arg, names, senses, ctx)?;
+                shown_args.push(spelling.shown);
+                grounded_args.push(spelling.grounded);
             }
-            let (what, template, holes) = match reading {
+            let (what, template, holes, head) = match reading {
                 Reading::Sense(ident) => {
-                    let sense = resolve_sense(ident, senses, imports)?;
+                    let sense = resolve_sense(ident, senses, ctx.imports)?;
                     (
                         format!("`{}`", ident.display()),
                         sense.template,
                         sense.holes,
+                        Some(ident),
                     )
                 }
-                Reading::Inline { template, holes } => {
-                    (format!("\"{template}\""), template.clone(), holes.clone())
-                }
+                Reading::Inline { template, holes } => (
+                    format!("\"{template}\""),
+                    template.clone(),
+                    holes.clone(),
+                    None,
+                ),
             };
-            if spellings.len() != holes.len() {
-                return Err(arity_error(&what, &holes, spellings.len()));
+            if shown_args.len() != holes.len() {
+                return Err(arity_error(&what, &holes, shown_args.len()));
             }
-            let sentence =
-                apply(&template, &spellings).map_err(|message| CompileError { message })?;
+            if holes.is_empty() {
+                if let Some(ident) = head {
+                    note(ctx, ident, Place::Sentence, *at);
+                }
+            }
+            let text = apply(&template, &shown_args).map_err(|message| CompileError { message })?;
+            let grounded =
+                apply(&template, &grounded_args).map_err(|message| CompileError { message })?;
+            let sentence = Sentence { text, grounded };
+            remember(&mut ctx.expansions, &sentence)?;
             Ok(Proposition::Sentence(sentence))
         }
     }
@@ -518,10 +715,10 @@ fn require_sentence(
     formula: &Formula,
     names: &HashSet<String>,
     senses: &HashMap<String, Sense>,
-    imports: &Imports,
+    ctx: &mut Ctx<'_>,
     message: &str,
-) -> Result<String, CompileError> {
-    match resolve(formula, names, senses, imports)? {
+) -> Result<Sentence, CompileError> {
+    match resolve(formula, names, senses, ctx)? {
         Proposition::Sentence(text) => Ok(text),
         _ => Err(CompileError {
             message: message.into(),
@@ -608,22 +805,48 @@ fn resolve_all(
     formulas: &[Formula],
     names: &HashSet<String>,
     senses: &HashMap<String, Sense>,
-    imports: &Imports,
+    ctx: &mut Ctx<'_>,
 ) -> Result<Vec<Proposition>, CompileError> {
-    formulas
-        .iter()
-        .map(|formula| resolve(formula, names, senses, imports))
-        .collect()
+    let mut out = Vec::with_capacity(formulas.len());
+    for formula in formulas {
+        out.push(resolve(formula, names, senses, ctx)?);
+    }
+    Ok(out)
 }
 
 fn resolve_arg(
     arg: &Arg,
     names: &HashSet<String>,
-    imports: &Imports,
-) -> Result<String, CompileError> {
+    senses: &HashMap<String, Sense>,
+    ctx: &mut Ctx<'_>,
+) -> Result<Spelling, CompileError> {
     match arg {
-        Arg::Literal(text) => Ok(text.clone()),
-        Arg::Name(ident) => resolve_name(ident, names, imports),
+        Arg::Literal(text) => Ok(Spelling {
+            shown: text.clone(),
+            grounded: text.clone(),
+        }),
+        Arg::Name(ident) => {
+            let name = resolve_name(ident, names, ctx.imports)?;
+            Ok(Spelling {
+                shown: name.clone(),
+                grounded: name,
+            })
+        }
+        Arg::Term { ident, at } => {
+            let sense = resolve_sense(ident, senses, ctx.imports)?;
+            if !sense.holes.is_empty() {
+                return Err(arity_error(
+                    &format!("`{}`", ident.display()),
+                    &sense.holes,
+                    0,
+                ));
+            }
+            note(ctx, ident, Place::Term, *at);
+            Ok(Spelling {
+                shown: ident.name.clone(),
+                grounded: sense.template,
+            })
+        }
     }
 }
 
@@ -1121,5 +1344,138 @@ mod tests {
         let both =
             compile(&parse("(name calls) (sense calls \"{X} calls {Y}\")").unwrap()).unwrap_err();
         assert!(both.message.contains("both a name and a sense"), "{both}");
+    }
+
+    #[test]
+    fn a_term_keeps_its_name_and_grounds_its_text() {
+        let c = compiled(
+            r#"
+(name LogicReasoner)
+(sense LogicOutputTables "the tables named in a logic block's output_table_names")
+(sense creates "{reasoner} plans deploy units that create {object}")
+(claim (creates LogicReasoner (LogicOutputTables)) (witness "logic.py"))
+"#,
+        );
+        let Proposition::Claim { sentence, .. } = &c.claims[0] else {
+            panic!("claim");
+        };
+        assert_eq!(
+            sentence.text,
+            "LogicReasoner plans deploy units that create LogicOutputTables"
+        );
+        assert_eq!(
+            sentence.grounded,
+            "LogicReasoner plans deploy units that create the tables named in a logic block's output_table_names"
+        );
+        assert!(c.terms.contains(&(
+            "LogicOutputTables".to_string(),
+            "the tables named in a logic block's output_table_names".to_string(),
+        )));
+    }
+
+    #[test]
+    fn a_nullary_sense_is_a_term_or_a_sentence() {
+        let err = compile(
+            &parse(
+                "\
+(sense LogicOutputTables \"the tables\")
+(sense creates \"{a} creates {b}\")
+(name R)
+(claim (creates R (LogicOutputTables)) (witness \"a.py\"))
+(claim (LogicOutputTables) (witness \"b.py\"))
+",
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message,
+            "\
+`LogicOutputTables` is used as a term at 4:19 and as a sentence at 5:8.
+A nullary sense reads either as a noun phrase or as a sentence, not both."
+        );
+
+        let across = compile(
+            &parse(
+                r#"
+(sense T "a noun phrase")
+(sense creates "{a} creates {b}")
+(name R)
+(detail
+  (claim (creates R (T)) (witness "a.py")))
+(detail
+  (claim (T) (witness "b.py")))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            across.message.contains("`T` is used as a term")
+                && across.message.contains("as a sentence"),
+            "{across}"
+        );
+
+        let siblings = compiled(
+            r#"
+(detail
+  (sense T "a noun phrase")
+  (sense creates "{a} creates {b}")
+  (name R)
+  (claim (creates R (T)) (witness "a.py")))
+(detail
+  (sense T "A statement holds.")
+  (claim (T) (witness "b.py")))
+"#,
+        );
+        assert!(siblings
+            .terms
+            .contains(&("T".to_string(), "a noun phrase".to_string(),)));
+        assert!(!siblings
+            .terms
+            .iter()
+            .any(|(name, template)| name == "T" && template == "A statement holds."));
+    }
+
+    #[test]
+    fn one_shown_sentence_has_one_grounding() {
+        let err = compile(
+            &parse(
+                r#"
+(name R)
+(sense T "the tables")
+(sense creates "{a} creates {b}")
+(claim (creates R (T)) (witness "a.py"))
+(claim "later" (creates R "T"))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            err.message
+                .contains("`R creates T` expands to `R creates the tables` and `R creates T`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_term_with_holes_is_an_arity_error() {
+        let err = compile(
+            &parse(
+                r#"
+(name R)
+(sense holds "{a} holds {b}")
+(sense borrowed_from "{borrower} borrows from {lender}")
+(claim "c" (holds R (borrowed_from)))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("`borrowed_from`") && err.message.contains("0 names"),
+            "{err}"
+        );
     }
 }

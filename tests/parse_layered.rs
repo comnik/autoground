@@ -31,7 +31,7 @@ fn diagram_parses_and_compiles() {
 
     let compiled = compile(&program).expect("compile");
     assert!(compiled.claims.iter().any(|claim| {
-        matches!(claim, Proposition::Claim { sentence, .. } if sentence == "Frontend depends on Backend")
+        matches!(claim, Proposition::Claim { sentence, .. } if sentence.text == "Frontend depends on Backend")
     }));
     assert!(compiled.claims.iter().any(|claim| {
         matches!(

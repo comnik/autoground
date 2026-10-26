@@ -19,6 +19,9 @@ pub use mermaid::{lower_mermaid, LowerError};
 pub struct Model {
     names: BTreeSet<String>,
     senses: BTreeSet<(String, String)>,
+    /// Nullary senses used as terms. A diagram node of the same spelling
+    /// resolves to one of these, so the picture keeps the bare label.
+    terms: BTreeSet<(String, String)>,
     statements: BTreeSet<Statement>,
 }
 
@@ -43,7 +46,14 @@ impl Statement {
 pub fn model_of(program: &Program, compiled: &Compiled) -> Model {
     let mut names = BTreeSet::new();
     let mut senses = BTreeSet::new();
-    declarations(&program.forms, &mut names, &mut senses);
+    let mut terms = BTreeSet::new();
+    declarations(
+        &program.forms,
+        &compiled.terms,
+        &mut names,
+        &mut senses,
+        &mut terms,
+    );
     let mut statements = BTreeSet::new();
     for claim in &compiled.claims {
         walk(claim, false, &mut statements);
@@ -51,14 +61,17 @@ pub fn model_of(program: &Program, compiled: &Compiled) -> Model {
     Model {
         names,
         senses,
+        terms,
         statements,
     }
 }
 
 fn declarations(
     forms: &[Form],
+    term_senses: &BTreeSet<(String, String)>,
     names: &mut BTreeSet<String>,
     senses: &mut BTreeSet<(String, String)>,
+    terms: &mut BTreeSet<(String, String)>,
 ) {
     for form in forms {
         match form {
@@ -66,9 +79,14 @@ fn declarations(
                 names.insert(name.clone());
             }
             Form::Sense(sense) => {
-                senses.insert((sense.name.clone(), sense.template.clone()));
+                let pair = (sense.name.clone(), sense.template.clone());
+                if term_senses.contains(&pair) {
+                    terms.insert(pair);
+                } else {
+                    senses.insert(pair);
+                }
             }
-            Form::Detail(body) => declarations(body, names, senses),
+            Form::Detail(body) => declarations(body, term_senses, names, senses, terms),
             Form::Assume(_) | Form::Formula(_) => {}
         }
     }
@@ -83,10 +101,10 @@ fn walk(prop: &Proposition, negated: bool, out: &mut BTreeSet<Statement>) {
         }
         Proposition::Not(inner) => walk(inner, !negated, out),
         Proposition::Sentence(sentence) | Proposition::Assume(sentence) => {
-            out.insert(stated(sentence, negated));
+            out.insert(stated(&sentence.text, negated));
         }
         Proposition::Claim { sentence, support } => {
-            out.insert(stated(sentence, negated));
+            out.insert(stated(&sentence.text, negated));
             if let Support::Sentence(prop) = support {
                 walk(prop, negated, out);
             }
@@ -111,16 +129,16 @@ pub fn mismatch(left: &Model, right: &Model) -> Option<String> {
     let mut sections = Vec::new();
     if let Some(text) = section(
         "names",
-        &only(&left.names, &right.names),
-        &only(&right.names, &left.names),
+        &names_only(left, right),
+        &names_only(right, left),
         String::clone,
     ) {
         sections.push(text);
     }
     if let Some(text) = section(
         "senses",
-        &only(&left.senses, &right.senses),
-        &only(&right.senses, &left.senses),
+        &senses_only(left, right),
+        &senses_only(right, left),
         |(name, template)| format!("{name} {}", quote_const(template)),
     ) {
         sections.push(text);
@@ -142,6 +160,36 @@ pub fn mismatch(left: &Model, right: &Model) -> Option<String> {
 
 fn only<T: Clone + Ord>(left: &BTreeSet<T>, right: &BTreeSet<T>) -> Vec<T> {
     left.difference(right).cloned().collect()
+}
+
+/// A name is covered when the other side declares it, or uses a term of that spelling.
+fn names_only(left: &Model, right: &Model) -> Vec<String> {
+    left.names
+        .iter()
+        .filter(|name| !right.names.contains(*name) && !has_term(right, name))
+        .cloned()
+        .collect()
+}
+
+/// A sense template differs, and a term differs unless the other side names that spelling.
+fn senses_only(left: &Model, right: &Model) -> Vec<(String, String)> {
+    let mut out = only(&left.senses, &right.senses);
+    out.extend(
+        left.terms
+            .iter()
+            .filter(|term| !term_covered(term, right))
+            .cloned(),
+    );
+    out.sort();
+    out
+}
+
+fn has_term(model: &Model, spelling: &str) -> bool {
+    model.terms.iter().any(|(name, _)| name == spelling)
+}
+
+fn term_covered(term: &(String, String), other: &Model) -> bool {
+    other.terms.contains(term) || other.names.contains(&term.0)
 }
 
 fn section<T>(title: &str, left: &[T], right: &[T], show: impl Fn(&T) -> String) -> Option<String> {
@@ -315,5 +363,32 @@ names
             .statements
             .iter()
             .any(|statement| statement.sentence == "Local knows Shared"));
+    }
+
+    #[test]
+    fn two_term_templates_do_not_align() {
+        let left = model_from(
+            r#"
+(name R)
+(sense T "the tables named in output_table_names")
+(sense creates "{a} creates {b}")
+(assume (creates R (T)))
+"#,
+        );
+        let right = model_from(
+            r#"
+(name R)
+(sense T "the destination tables")
+(sense creates "{a} creates {b}")
+(assume (creates R (T)))
+"#,
+        );
+        let diff = mismatch(&left, &right).unwrap();
+        assert!(
+            diff.contains("the tables named in output_table_names"),
+            "{diff}"
+        );
+        assert!(diff.contains("the destination tables"), "{diff}");
+        assert!(!diff.contains("names\n"), "{diff}");
     }
 }

@@ -34,7 +34,7 @@ and       ::= "(" "and" formula* ")"
 or        ::= "(" "or" formula* ")"
 not       ::= "(" "not" formula ")"
 sentence  ::= string | "(" ident arg* ")" | "(" string arg+ ")"
-arg       ::= ident | string
+arg       ::= ident | string | "(" ident ")"
 ident     ::= [qualifier "/"] ident-name
 path      ::= string | "$"
 ```
@@ -104,10 +104,37 @@ Applying names to a sense constructs a fully formed sentence:
 => "Frontend returns AST"
 ```
 
-### Claims
+Nullary senses are special, because they can be used to define terminology as well:
 
-Senses instantiated with names can be used to make claims for autoground to judge.
+```brief
+(sense FrontTarget "the AST produced by the compiler frontend")
 
+(claim (is_data (FrontTarget))
+  (is_data AST))
+```
+
+Note how `(FrontTarget)` is applied to a sense, effectively expanding the definition in
+place. The judge always sees the expanded form. Definitions are just abbreviations, they
+don't make any additional inferences.
+
+However, a nullary sense is _either_ used as a definition (like `(is_data (FrontTarget))`)
+_or_ as a sentence (like `(claim (invariant))`). Using the same sense in both ways is an
+error. A sense declared outside a detail is checked across the file. A sense declared inside
+a detail is checked inside that detail. It is still possible to validate the definition on
+its own:
+
+```brief
+(sense identifies "the code identifies {X}")
+
+(claim (identifies (FrontTarget))
+  (witness ...))
+```
+
+
+### Claims and Witnesses
+
+Claims make testable propositions, by combining a fully formed sentence with a *witness*
+that grounds the statement in the reality of the codebase.
 
 ```brief
 (name Frontend)
