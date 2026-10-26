@@ -290,8 +290,8 @@ fn tokenize(src: &str) -> Result<Vec<Token>, ParseError> {
     Ok(tokens)
 }
 
-/// Parse a model: an optional `ns`, then declarations, assumptions, and claims.
-/// `and`, `or`, `not`, and a sentence belong to a claim.
+/// Parse a model: an optional `ns`, then declarations, assumptions, claims,
+/// and formulas. A sentence and `witness` belong to a claim.
 pub fn parse(src: &str) -> Result<Program, ParseError> {
     let tokens = tokenize(src)?;
     if tokens.is_empty() {
@@ -544,14 +544,12 @@ fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
             let (formula, span) = lower_detail(s, xs)?;
             Ok((formula, Some(span)))
         }
-        Some(SexpKind::Symbol(head)) if head == "claim" => {
+        Some(SexpKind::Symbol(head)) if matches!(head.as_str(), "claim" | "and" | "or" | "not") => {
             let (formula, clause) = lower_formula(s)?;
             Ok((Form::Formula(formula), Some(clause)))
         }
-        Some(SexpKind::Symbol(head))
-            if matches!(head.as_str(), "and" | "or" | "not" | "witness") =>
-        {
-            Err(err_at(&xs[0], format!("`{head}` belongs to a claim")))
+        Some(SexpKind::Symbol(head)) if head == "witness" => {
+            Err(err_at(&xs[0], "`witness` belongs to a claim"))
         }
         Some(SexpKind::String(_)) => Err(err_at(s, "a sentence belongs to a claim")),
         _ => match lower_formula(s) {
@@ -1372,15 +1370,36 @@ mod tests {
     }
 
     #[test]
-    fn a_formula_here_is_a_claim() {
+    fn a_connective_is_a_form() {
+        let src = r#"
+(or
+  (claim "route A" (witness "a.rs"))
+  (claim "route B" (witness "b.rs")))
+(not (claim "X holds" (witness "a.rs")))
+(detail
+  (or
+    (claim "A" (witness "a.rs"))
+    (claim "B" (witness "b.rs"))))
+"#;
+        let program = parse(src).unwrap();
+        assert!(matches!(program.forms[0], Form::Formula(Formula::Or(_))));
+        assert!(matches!(program.forms[1], Form::Formula(Formula::Not(_))));
+        let Form::Detail(body) = &program.forms[2] else {
+            panic!("detail");
+        };
+        assert!(matches!(body[0], Form::Formula(Formula::Or(_))));
+    }
+
+    #[test]
+    fn a_sentence_or_witness_here_is_a_claim() {
         for (src, needle) in [
-            ("(and \"a\" \"b\")", "`and` belongs to a claim"),
-            ("(or \"a\")", "`or` belongs to a claim"),
-            ("(not \"a\")", "`not` belongs to a claim"),
             ("(witness \"a.rs\")", "`witness` belongs to a claim"),
             ("\"a\"", "a sentence belongs to a claim"),
             ("(depends_on A B)", "a sentence belongs to a claim"),
-            ("(detail (and \"a\" \"b\"))", "`and` belongs to a claim"),
+            (
+                "(detail (witness \"a.rs\"))",
+                "`witness` belongs to a claim",
+            ),
         ] {
             let err = parse(src).unwrap_err();
             assert!(err.message.contains(needle), "{src}: {err}");

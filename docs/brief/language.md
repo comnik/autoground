@@ -21,7 +21,7 @@ namespace ::= segments separated by ".", no empty segment, no "/"
 require   ::= "(" ":require" libspec+ ")"
 libspec   ::= "[" namespace [":as" alias] [":refer" refer] "]"
 refer     ::= ":all" | "[" ident-name* "]"
-form      ::= name | sense | assume | detail | claim
+form      ::= name | sense | assume | detail | claim | and | or | not
 name      ::= "(" "name" ident-name ")"
 sense     ::= "(" "sense" ident-name string ")"
 assume    ::= "(" "assume" sentence ")"
@@ -42,8 +42,10 @@ path      ::= string | "$"
 `ident-name` is an unqualified identifier. A comma is whitespace. `;;` comments through the
 end of the line.
 
-A scope is the file, or one `detail`. A `detail` contains a claim or an assumption,
-walking into nested details. `ns` stays at the top of the file.
+A scope is the file, or one `detail`. A `detail` contains a claim or an assumption, walking
+into nested details and into `and`, `or`, and `not`. `ns` stays at the top of the file. The
+file is accepted when every top-level form is true. An `or` form is true when any operand is
+true. A `not` form is true when its operand is false.
 
 `witness` is only the support of a `claim`. A path is relative to the brief. The symbol `$`
 is the file a check was given. One sentence is defined once in the file, by a `claim` or an

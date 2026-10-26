@@ -421,12 +421,25 @@ fn prop_deps(proposition: &Proposition, defs: &HashMap<String, Def>) -> Vec<Stri
 }
 
 fn contains_claim_or_assume(forms: &[Form]) -> bool {
-    forms.iter().any(|form| match form {
+    forms.iter().any(form_has_claim_or_assume)
+}
+
+fn form_has_claim_or_assume(form: &Form) -> bool {
+    match form {
         Form::Assume(_) => true,
-        Form::Formula(Formula::Claim { .. }) => true,
         Form::Detail(body) => contains_claim_or_assume(body),
-        Form::Name(_) | Form::Sense(_) | Form::Formula(_) => false,
-    })
+        Form::Formula(formula) => formula_has_claim(formula),
+        Form::Name(_) | Form::Sense(_) => false,
+    }
+}
+
+fn formula_has_claim(formula: &Formula) -> bool {
+    match formula {
+        Formula::Claim { .. } => true,
+        Formula::And(xs) | Formula::Or(xs) => xs.iter().any(formula_has_claim),
+        Formula::Not(inner) => formula_has_claim(inner),
+        Formula::Apply { .. } | Formula::Witness { .. } => false,
+    }
 }
 
 /// Where one nullary sense was used. The earliest site of each kind is kept.

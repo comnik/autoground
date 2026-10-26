@@ -1588,6 +1588,119 @@ mod tests {
         assert_eq!(not.value, Value::Unknown);
     }
 
+    fn route(req: &Classification) -> Answer {
+        match req.instructions["proposition"].as_str() {
+            Some("route A") | Some("A") => choice("entailed", 0.95),
+            Some("route B") | Some("B") => choice("contradicted", 0.95),
+            _ => choice("neutral", 0.95),
+        }
+    }
+
+    fn x_holds_false(req: &Classification) -> Answer {
+        if req.instructions["proposition"].as_str() == Some("X holds") {
+            choice("contradicted", 0.95)
+        } else {
+            choice("neutral", 0.95)
+        }
+    }
+
+    #[test]
+    fn an_or_of_witness_claims_passes_when_one_claim_is_true() {
+        let dir = scratch("or-form");
+        fs::write(dir.join("a.rs"), "aaa").unwrap();
+        fs::write(dir.join("b.rs"), "bbb").unwrap();
+        let mut oracle = Rec::new(route);
+        let report = check(
+            &compiled(
+                r#"
+(or
+  (claim "route A" (witness "a.rs"))
+  (claim "route B" (witness "b.rs")))
+"#,
+            ),
+            &dir,
+            DEFAULT_BODY_BYTES,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(oracle.seen.len(), 2);
+        assert!(oracle
+            .seen
+            .iter()
+            .all(|req| req.state.get("sentences").is_none()));
+        let or = &report.claims[0];
+        assert_eq!(or.value, Value::True);
+        assert_eq!(or.children[0].value, Value::True);
+        assert_eq!(or.children[1].value, Value::False);
+    }
+
+    #[test]
+    fn sibling_claims_are_both_required() {
+        let dir = scratch("siblings");
+        fs::write(dir.join("a.rs"), "aaa").unwrap();
+        fs::write(dir.join("b.rs"), "bbb").unwrap();
+        let mut oracle = Rec::new(route);
+        let report = check(
+            &compiled(
+                r#"
+(claim "route A" (witness "a.rs"))
+(claim "route B" (witness "b.rs"))
+"#,
+            ),
+            &dir,
+            DEFAULT_BODY_BYTES,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(report.claims[1].value, Value::False);
+        assert!(report.claims.iter().any(|claim| claim.value != Value::True));
+    }
+
+    #[test]
+    fn a_top_level_not_is_true_only_when_the_claim_is_false() {
+        let dir = scratch("not-form");
+        fs::write(dir.join("a.rs"), "aaa").unwrap();
+        let src = "(not (claim \"X holds\" (witness \"a.rs\")))";
+        let mut oracle = Rec::new(x_holds_false);
+        let report = check(&compiled(src), &dir, DEFAULT_BODY_BYTES, &mut oracle).unwrap();
+        assert_eq!(oracle.seen.len(), 1);
+        assert!(oracle.seen[0].state.get("sentences").is_none());
+        assert_eq!(report.claims[0].children[0].value, Value::False);
+        assert_eq!(report.claims[0].value, Value::True);
+
+        let mut oracle = Rec::new(neutral);
+        let report = check(&compiled(src), &dir, DEFAULT_BODY_BYTES, &mut oracle).unwrap();
+        assert_eq!(report.claims[0].children[0].value, Value::Unknown);
+        assert_eq!(report.claims[0].value, Value::Unknown);
+    }
+
+    #[test]
+    fn a_detail_of_an_or_discharges_when_the_or_does() {
+        let dir = scratch("detail-or");
+        fs::write(dir.join("a.rs"), "aaa").unwrap();
+        fs::write(dir.join("b.rs"), "bbb").unwrap();
+        let mut oracle = Rec::new(route);
+        let report = check(
+            &compiled(
+                r#"
+(detail
+  (or
+    (claim "A" (witness "a.rs"))
+    (claim "B" (witness "b.rs"))))
+"#,
+            ),
+            &dir,
+            DEFAULT_BODY_BYTES,
+            &mut oracle,
+        )
+        .unwrap();
+        let detail = &report.claims[0];
+        assert_eq!(detail.value, Value::True);
+        assert_eq!(detail.children[0].value, Value::True);
+        assert_eq!(detail.children[0].children[1].value, Value::False);
+    }
+
     #[test]
     fn negation_of_a_contradicted_witness_is_true() {
         let dir = scratch("absent");
