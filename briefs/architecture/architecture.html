@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autoground Architecture</title>
+<style>
+:root {
+  --bg:#fbfbf9; --fg:#1d1d1b; --muted:#6b6b68; --rule:#dddcd6; --code:#efeee9;
+  --component:#e3e9f7; --component-edge:#5b7bd5;
+  --data:#e2f0e0; --data-edge:#4f9447;
+  --trait:#f6ead8; --trait-edge:#c3842c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#161615; --fg:#e6e5e0; --muted:#97968f; --rule:#34332f; --code:#24231f;
+    --component:#1f2a44; --component-edge:#7d98e3;
+    --data:#1d3320; --data-edge:#74b56b;
+    --trait:#3a2c18; --trait-edge:#d9a050;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#161615; --fg:#e6e5e0; --muted:#97968f; --rule:#34332f; --code:#24231f;
+  --component:#1f2a44; --component-edge:#7d98e3;
+  --data:#1d3320; --data-edge:#74b56b;
+  --trait:#3a2c18; --trait-edge:#d9a050;
+}
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; }
+main { max-width:760px; margin:0 auto; padding:28px 16px 56px; }
+h1 { font-size:22px; margin:0 0 6px; }
+p.sub { color:var(--muted); margin:0 0 20px; }
+.legend { display:flex; flex-wrap:wrap; gap:8px 18px; margin:0 0 16px; font-size:13px; color:var(--muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { display:inline-block; width:22px; height:13px; border:1.5px solid; }
+.sw.component { background:var(--component); border-color:var(--component-edge); border-radius:2px; }
+.sw.data { background:var(--data); border-color:var(--data-edge); border-radius:7px; }
+.sw.trait { background:var(--trait); border-color:var(--trait-edge); clip-path:polygon(22% 0,78% 0,100% 50%,78% 100%,22% 100%,0 50%); border:none; }
+.sw.construct { background:var(--code); border-color:var(--muted); border-radius:4px; }
+#diagram {
+  border:1px solid var(--rule); border-radius:10px; padding:20px 12px;
+  --pele-bg:var(--bg); --pele-fg:var(--fg); --pele-muted:var(--muted); --pele-line:var(--muted);
+  --pele-surface:var(--code); --pele-surface-alt:var(--bg); --pele-border:var(--muted); --pele-radius:5px;
+}
+#diagram .pele-edge-label { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.pele-node[data-id="Filesystem"] :is(rect,path,polygon,ellipse),
+.pele-node[data-id="JevOracle"] :is(rect,path,polygon,ellipse) { fill:var(--component); stroke:var(--component-edge); stroke-width:1.5px; }
+.pele-node[data-id="brief"] :is(rect,path,polygon,ellipse),
+.pele-node[data-id="Claim"] :is(rect,path,polygon,ellipse),
+.pele-node[data-id="Support"] :is(rect,path,polygon,ellipse),
+.pele-node[data-id="Witness"] :is(rect,path,polygon,ellipse),
+.pele-node[data-id="Sentence"] :is(rect,path,polygon,ellipse) { fill:var(--data); stroke:var(--data-edge); stroke-width:1.5px; }
+.pele-node[data-id="Oracle"] :is(rect,path,polygon,ellipse),
+.pele-node[data-id="Universe"] :is(rect,path,polygon,ellipse) { fill:var(--trait); stroke:var(--trait-edge); stroke-width:1.5px; }
+h2 { font-size:16px; margin:32px 0 8px; }
+table { border-collapse:collapse; width:100%; }
+td { border-top:1px solid var(--rule); padding:6px 8px; vertical-align:top; }
+td:first-child { width:1%; }
+ul.support { margin:0; padding-left:20px; }
+ul.support li { margin:4px 0; }
+code { background:var(--code); padding:1px 4px; border-radius:3px; font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Autoground architecture</h1>
+<p class="sub">Drawn from <code>architecture.brief</code> (9/9 claims checked) and aligned with <code>autoground align</code>. Edge labels are senses; read each edge as the sense template with its source and target filled in. Arrows run top to bottom.</p>
+<div class="legend">
+  <span><i class="sw component"></i>component</span>
+  <span><i class="sw data"></i>data structure</span>
+  <span><i class="sw trait"></i>trait</span>
+  <span><i class="sw construct"></i>language construct</span>
+</div>
+<div id="diagram"></div>
+<h2>Supporting claims</h2>
+<p class="sub">Each compound edge is checked through these atomic claims. The first two support <code>judged_by</code> (and, with the two <code>comes_from</code> edges, <code>judges</code>); the last three support <code>combines</code>.</p>
+<ul class="support">
+<li>the `check` module asks an `Oracle` whether a witness entails a sentence</li>
+<li>the `check` module asks an `Oracle` whether supporting sentences establish a claim&#x27;s sentence</li>
+<li>`Support::Sentence` wraps a `Box&lt;Proposition&gt;`</li>
+<li>`Proposition` has `And`, `Or`, and `Not` variants, whose operands are other propositions</li>
+<li>`check` computes the value of `and`, `or`, and `not` from the values of their operands, without asking the oracle</li>
+</ul>
+<h2>Senses</h2>
+<table>
+<tr><td><code>compiles_to</code></td><td>the compiler turns {source} into a `Compiled` value whose `claims` field holds each {claim} of the brief, compiled to a `Proposition`</td></tr>
+<tr><td><code>judged_by</code></td><td>to judge a {claim}, the `check` module asks an `{oracle}`</td></tr>
+<tr><td><code>judges</code></td><td>the `check` module asks an `{oracle}` whether a claim&#x27;s `{support}` holds up: whether its witness entails a sentence, or whether its supporting sentences establish the claim&#x27;s sentence</td></tr>
+<tr><td><code>comes_from</code></td><td>a `{support}` value can be {variant}</td></tr>
+<tr><td><code>read_through</code></td><td>the files that {witness} cites are read through implementations of the `{source}` trait</td></tr>
+<tr><td><code>combines</code></td><td>the `Proposition` inside {sentence} can combine other propositions with {connectives}, and `check` computes the value of such a combination from the values of its operands without asking the oracle</td></tr>
+<tr><td><code>implemented_by</code></td><td>the `{interface}` trait is implemented by `{implementation}`</td></tr>
+</table>
+<h2>Terms</h2>
+<table>
+<tr><td><code>brief</code></td><td>a parsed brief, held in a `Program` value</td></tr>
+<tr><td><code>Claim</code></td><td>claim</td></tr>
+<tr><td><code>Witness</code></td><td>a witness (a `Support::Witness`)</td></tr>
+<tr><td><code>Sentence</code></td><td>a supporting sentence (a `Support::Sentence`)</td></tr>
+<tr><td><code>Connectives</code></td><td>`and`, `or`, and `not`</td></tr>
+</table>
+</main>
+<script type="module">
+import { mount } from "https://cdn.jsdelivr.net/npm/pele@1.3.0/dist/pele.js";
+const source = "%% (sense compiles_to \"the compiler turns {source} into a `Compiled` value whose `claims` field holds each {claim} of the brief, compiled to a `Proposition`\")\n%% (sense judged_by \"to judge a {claim}, the `check` module asks an `{oracle}`\")\n%% (sense judges \"the `check` module asks an `{oracle}` whether a claim's `{support}` holds up: whether its witness entails a sentence, or whether its supporting sentences establish the claim's sentence\")\n%% (sense comes_from \"a `{support}` value can be {variant}\")\n%% (sense read_through \"the files that {witness} cites are read through implementations of the `{source}` trait\")\n%% (sense combines \"the `Proposition` inside {sentence} can combine other propositions with {connectives}, and `check` computes the value of such a combination from the values of its operands without asking the oracle\")\n%% (sense implemented_by \"the `{interface}` trait is implemented by `{implementation}`\")\n%% (assume \"the `check` module asks an `Oracle` whether a witness entails a sentence\")\n%% (assume \"the `check` module asks an `Oracle` whether supporting sentences establish a claim's sentence\")\n%% (assume \"`Support::Sentence` wraps a `Box<Proposition>`\")\n%% (assume \"`Proposition` has `And`, `Or`, and `Not` variants, whose operands are other propositions\")\n%% (assume \"`check` computes the value of `and`, `or`, and `not` from the values of their operands, without asking the oracle\")\nflowchart TB\n  brief([brief]) -->|compiles_to| Claim([Claim])\n  subgraph oracle [\" \"]\n    direction LR\n    Oracle{{Oracle}} -->|implemented_by| JevOracle[JevOracle]\n  end\n  Claim -->|judged_by| Oracle\n  Oracle -->|judges| Support([Support])\n  Support -->|comes_from| Witness([Witness])\n  Support -->|comes_from| Sentence([Sentence])\n  Witness -->|read_through| Universe{{Universe}}\n  Sentence -->|combines| Connectives(Connectives)\n  Universe -->|implemented_by| Filesystem[Filesystem]\n";
+mount(document.getElementById("diagram"), source, { autoDirection: false, zoom: false });
+</script>
+</body>
+</html>

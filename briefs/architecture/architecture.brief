@@ -1,0 +1,62 @@
+(ns autoground.architecture)
+
+(name Support)
+(name Universe)
+(name Filesystem)
+(name Oracle)
+(name JevOracle)
+
+(sense brief "a parsed brief, held in a `Program` value")
+(sense Claim "claim")
+(sense Witness "a witness (a `Support::Witness`)")
+(sense Sentence "a supporting sentence (a `Support::Sentence`)")
+(sense Connectives "`and`, `or`, and `not`")
+
+(sense compiles_to "the compiler turns {source} into a `Compiled` value whose `claims` field holds each {claim} of the brief, compiled to a `Proposition`")
+(sense judged_by "to judge a {claim}, the `check` module asks an `{oracle}`")
+(sense judges "the `check` module asks an `{oracle}` whether a claim's `{support}` holds up: whether its witness entails a sentence, or whether its supporting sentences establish the claim's sentence")
+(sense comes_from "a `{support}` value can be {variant}")
+(sense read_through "the files that {witness} cites are read through implementations of the `{source}` trait")
+(sense combines "the `Proposition` inside {sentence} can combine other propositions with {connectives}, and `check` computes the value of such a combination from the values of its operands without asking the oracle")
+(sense implemented_by "the `{interface}` trait is implemented by `{implementation}`")
+
+(claim (compiles_to (brief) (Claim))
+  (witness "../../src/compiler/mod.rs"))
+
+(claim (judged_by (Claim) Oracle)
+  (and
+    (claim "the `check` module asks an `Oracle` whether a witness entails a sentence"
+      (witness "../../src/check/mod.rs" "../../src/oracle/mod.rs"))
+    (claim "the `check` module asks an `Oracle` whether supporting sentences establish a claim's sentence"
+      (witness "../../src/check/mod.rs" "../../src/oracle/mod.rs"))))
+
+(claim (implemented_by Oracle JevOracle)
+  (witness "../../src/oracle/jev.rs"))
+
+(claim (judges Oracle Support)
+  (and
+    (comes_from Support (Witness))
+    (comes_from Support (Sentence))
+    "the `check` module asks an `Oracle` whether a witness entails a sentence"
+    "the `check` module asks an `Oracle` whether supporting sentences establish a claim's sentence"))
+
+(claim (comes_from Support (Witness))
+  (witness "../../src/syntax/ast.rs"))
+
+(claim (comes_from Support (Sentence))
+  (witness "../../src/syntax/ast.rs"))
+
+(claim (read_through (Witness) Universe)
+  (witness "../../src/check/mod.rs" "../../src/universe/fs.rs"))
+
+(claim (implemented_by Universe Filesystem)
+  (witness "../../src/universe/fs.rs"))
+
+(claim (combines (Sentence) (Connectives))
+  (and
+    (claim "`Support::Sentence` wraps a `Box<Proposition>`"
+      (witness "../../src/syntax/ast.rs"))
+    (claim "`Proposition` has `And`, `Or`, and `Not` variants, whose operands are other propositions"
+      (witness "../../src/syntax/ast.rs"))
+    (claim "`check` computes the value of `and`, `or`, and `not` from the values of their operands, without asking the oracle"
+      (witness "../../src/check/mod.rs" "../../src/value.rs"))))

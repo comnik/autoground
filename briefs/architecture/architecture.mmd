@@ -1,0 +1,25 @@
+%% (sense compiles_to "the compiler turns {source} into a `Compiled` value whose `claims` field holds each {claim} of the brief, compiled to a `Proposition`")
+%% (sense judged_by "to judge a {claim}, the `check` module asks an `{oracle}`")
+%% (sense judges "the `check` module asks an `{oracle}` whether a claim's `{support}` holds up: whether its witness entails a sentence, or whether its supporting sentences establish the claim's sentence")
+%% (sense comes_from "a `{support}` value can be {variant}")
+%% (sense read_through "the files that {witness} cites are read through implementations of the `{source}` trait")
+%% (sense combines "the `Proposition` inside {sentence} can combine other propositions with {connectives}, and `check` computes the value of such a combination from the values of its operands without asking the oracle")
+%% (sense implemented_by "the `{interface}` trait is implemented by `{implementation}`")
+%% (assume "the `check` module asks an `Oracle` whether a witness entails a sentence")
+%% (assume "the `check` module asks an `Oracle` whether supporting sentences establish a claim's sentence")
+%% (assume "`Support::Sentence` wraps a `Box<Proposition>`")
+%% (assume "`Proposition` has `And`, `Or`, and `Not` variants, whose operands are other propositions")
+%% (assume "`check` computes the value of `and`, `or`, and `not` from the values of their operands, without asking the oracle")
+flowchart TB
+  brief([brief]) -->|compiles_to| Claim([Claim])
+  subgraph oracle [" "]
+    direction LR
+    Oracle{{Oracle}} -->|implemented_by| JevOracle[JevOracle]
+  end
+  Claim -->|judged_by| Oracle
+  Oracle -->|judges| Support([Support])
+  Support -->|comes_from| Witness([Witness])
+  Support -->|comes_from| Sentence([Sentence])
+  Witness -->|read_through| Universe{{Universe}}
+  Sentence -->|combines| Connectives(Connectives)
+  Universe -->|implemented_by| Filesystem[Filesystem]
