@@ -1,150 +1,33 @@
 ---
 name: brief
-description: Create a brief from the user's instructions, fill in the details from the codebase, and loop until `autoground check` passes. Use when the user runs /brief.
+description: Document, validate, and visualize conceptual models of any aspect of a codebase the user is interested in. Use when the user runs /brief.
 argument-hint: "[instructions]"
 disable-model-invocation: true
 compatibility: Requires the autoground CLI on PATH.
 license: MIT
 ---
 
-At the speed agents are moving, any dormant misunderstandings between collaborators get 
-amplified much more quickly than before. Different terminology for the same concept
-leaks into the codebase at every level of granularity. As a result, everyone's mental
-model of the system ends up drifting from the conceptual model that is actually 
-implemented.
+At the speed agents are moving, any dormant misunderstandings between collaborators get amplified much more quickly than before. Different terminology for the same concept leaks into the codebase at every level of granularity. As a result, everyone's mental model of the system ends up drifting from the conceptual model that is actually  implemented.
 
-Help the user realign their mental model with the current state of the codebase, by
-creating a `brief` (explained below) according to their instructions.
-
-Users will instruct about the concepts and relationships they want captured in the 
-brief. Unless explicitly asked, don't include information about other concepts or 
-relationships that exist in the codebase.
-
-Capture the user's intent for the brief with an `intent` declaration. Do the same for any `detail` scopes you might be adding to your brief. These should capture what a consumer of the brief is meant to take away from it.
+Help the user realign their mental model with the current state of the codebase, by creating a `brief` (explained below) according to their instructions. Users will instruct about the concepts and relationships they want captured in the brief. Unless explicitly asked, don't include information about other concepts or relationships that exist in the codebase.
 
 Use the `autoground check` utility to validate your brief. Iterate until all claims are verified. A detail is verified when its body is. If you notice that a claim made by the user is incorrect, report this misalignment back to them. Remember, the goal is not to get your brief to pass, but to accurately capture the state of the codebase. If you are struggling to get a brief accepted, recheck your own assumptions.
 
-Once you have a valid brief, illustrate it with a mermaid diagram. Use `autoground align` to validate that the diagram accurately reflects the brief. Iterate on the diagram until it is accepted. Again, the goal is not to trick the judge, its to build an understanding of reality.
+Once you have a valid brief, follow the users instructions as to how best to present it. Default to presenting a mermaid diagram embedded in a self-contained HTML file. Use `autoground align` to validate that the diagram accurately reflects the brief. Iterate on the diagram until it is accepted. Again, the goal is not to trick the judge, its to build an understanding of reality.
 
 
-## Creating a `brief`
+## Guidelines for writing an effective brief
 
-Aligning mental models requires using the same name for things that relate in the same way, so consistent naming is the biggest lever for preserving understanding. `brief` is a language for establishing shared terminology.
+Refer to the `references/` directory for documentation of the brief language.
 
-A brief consists of *names*, *senses*, *claims*, and *witnesses*:
+The whole point of a brief is to iteratively align on a shared mental model. Aligning mental models requires using the same name for things that relate in the same way. Consistent terminology throughout is essential. Always default to using actual names from the codebase. Always use the same name to refer to the same concept. If you notice the user using a different name for a concept, point it out and ask for clarification.
 
-```brief
-;; A namespace globally disambiguates this brief.
-(ns autoground)
+The human brain pays a tax for every name it has to hold in working memory. If a brief grows past ten names, see if you can collapse some of the details into `(detail)` scopes. Identify separate themes in the brief and check with the user if they'd like to focus on a particular one. 
 
-;; Names identify concrete or abstract concepts. Components and data structures in the
-;; codebase, mathematical objects, or things in the real world.
-(name Frontend)
-(name Backend)
-(name Program)
-(name AST)
-(name Sweep)
-(name Oracle)
+Sometimes it is unavoidable to introduce a new name, to refer to a concept that does not have a clear existing name in the codebase, or to talk about a real concept at a higher level, such as referring to specific data structures as "messages" or "state". Refer to the documentation, which explains how to use nullary senses to capture such definitions.
 
-;; Senses define templates for attaching meaning to names and for establishing
-;; relationships between them. An application fills every hole, left to right.
-(sense is_data "{Name} is a data structure")        ;; single free variable
-(sense is_component "{X} is a component")           ;; single free variable
-(sense returns "{Name} returns {Name}")             ;; two free variables
-(sense calls "{caller} calls {callee}")
+If `autoground check` doesn't accept your brief, break down your claims into smaller, more atomic propositions combined via `and`, `or`, or `not`. Use the opportunity to double check your own understanding. If you notice that you have to do unreasonable things to "trick" the judge, just surface that back to the user. The goal is building real understanding, not passing the check at all cost.
 
-;; Role names on the holes disambiguate the arguments.
-(sense property "{object} has a {property}")
-(sense borrowed_from "{borrower} borrowed from {lender}")
-(sense related "{X} is related to {Y}")
-(sense depends_on "{X} depends on {Y}")
+Never use `assume` when making claims about the codebase, always use `claim` with a witness. `assume` is appropriate for user-provided principles. If you have to introduce an assumption to get a brief to validate, flag it with the user explicitly, as it may point out a gap in their understanding.
 
-;; A statement on its own is unsupported. A claim defines the sentence.
-(claim (is_component Frontend)
-  (witness "src/frontend/mod.rs"))
-
-(claim "Sweep asks the oracle whether a path matches the filter"
-  (witness "src/sweep/mod.rs"))
-
-;; A claim can be supported by another claim. Cite a sentence already claimed.
-(sense lemma-1 "If a whole number is odd, then its square is not even.")
-(sense lemma-2 "If the square of a whole number is even, then that whole number is not odd.")
-(claim (lemma-1)
-  (witness "src/lemma.rs"))
-(claim (lemma-2)
-  (lemma-1))
-
-(claim (calls Sweep Oracle)
-  (and
-    "Sweep asks the oracle whether a path matches the filter"
-    (claim "Sweep's oracle posts are the Jev HTTP call"
-      (witness "src/sweep/mod.rs" "src/oracle/jev.rs"))))
-
-;; A claim that cannot be validated from one witness takes `not`, `and`, or `or` as its support.
-(claim (is_component Backend)
-  (not (is_data Backend)))
-
-(claim (returns Frontend AST)
-  (and
-    (is_component Frontend)
-    (is_data AST)
-    (claim "Frontend parses the program and returns AST"
-      (witness "src/frontend/parser.rs"))))
-
-(claim (related Frontend Backend)
-  (or
-    (depends_on Frontend Backend)
-    (depends_on Backend Frontend)))
-```
-
-Applying a sense to names fills the template:
-
-```
-   (returns Frontend AST)
-=> ("{Name} returns {Name}" Frontend AST)
-=> "Frontend returns AST"
-=> Frontend returns AST
-```
-
-`assume` takes a sentence as true, with no witness. `intent` says what understanding the brief is meant to convey.
-
-```brief
-(sense axiom "The square of an even whole number is even.")
-(assume (axiom))
-
-(intent "This brief is intended to convey the compilation pipeline.")
-```
-
-Never use `assume` when making claims about the codebase. Only use `assume` when helping the user make an internally consistent argument that is independent of the codebase. If you do end up making ungrounded assumptions, call them out to the user explicitly.
-
-The ordering of the top-level declarations is irrelevant.
-
-Briefs are written to `*.brief` files. Wherever a `*.brief` file is accepted, a `.md` file is too: every fenced `brief` block is taken, in order, and the rest of the document is left out.
-
-Briefs are not accepted as witnesses for other briefs, to make sure unvalidated claims are never treated as evidence.
-
-A `detail` hides part of an argument. Names and senses declared inside it stay there. A claim inside it about a name from outside becomes visible outside. The claim still needs its own support.
-
-```brief
-(intent "Convey the relationship between front- and backend.")
-
-(name Frontend)
-(name Backend)
-
-(sense feeds_into "{Producer} feeds into {Consumer}")
-
-(detail
-  (intent "Explain in more detail the interaction between front- and backend.")
-
-  (name AST)
-  (sense produces "{Component} produces {Representation}")
-  (sense consumes "{Component} accepts {Representation} as input")
-
-  (claim (produces Frontend AST) (witness "src/frontend/mod.rs"))
-  (claim (consumes Backend AST) (witness "src/backend/mod.rs"))
-
-  (claim (feeds_into Frontend Backend)
-    (and
-      (produces Frontend AST)
-      (consumes Backend AST))))
-```
+Lastly, `autoground check` is not perfectly deterministic. A robust brief with the occasional near miss is expected and acceptable.

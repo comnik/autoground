@@ -53,7 +53,6 @@ is the file a check was given. One sentence is defined once in the file, by a `c
 declared inside a `detail` stay there. Names and senses declared outside gain the sentences
 validated inside.
 
-
 ## Constructs
 
 ### Namespaces
@@ -132,11 +131,49 @@ its own:
   (witness ...))
 ```
 
-
 ### Claims and Witnesses
 
 Claims make testable propositions, by combining a fully formed sentence with a *witness*
 that grounds the statement in the reality of the codebase.
+
+```brief
+;; A statement on its own is unsupported. A claim defines the sentence.
+(claim (is_component Frontend)
+  (witness "src/frontend/mod.rs"))
+
+(claim "Sweep asks the oracle whether a path matches the filter"
+  (witness "src/sweep/mod.rs"))
+
+;; A claim can be supported by another claim. Cite a sentence already claimed.
+(sense lemma-1 "If a whole number is odd, then its square is not even.")
+(sense lemma-2 "If the square of a whole number is even, then that whole number is not odd.")
+(claim (lemma-1)
+  (witness "src/lemma.rs"))
+(claim (lemma-2)
+  (lemma-1))
+
+(claim (calls Sweep Oracle)
+  (and
+    "Sweep asks the oracle whether a path matches the filter"
+    (claim "Sweep's oracle posts are the Jev HTTP call"
+      (witness "src/sweep/mod.rs" "src/oracle/jev.rs"))))
+
+;; A claim that cannot be validated from one witness takes `not`, `and`, or `or` as its support.
+(claim (is_component Backend)
+  (not (is_data Backend)))
+
+(claim (returns Frontend AST)
+  (and
+    (is_component Frontend)
+    (is_data AST)
+    (claim "Frontend parses the program and returns AST"
+      (witness "src/frontend/parser.rs"))))
+
+(claim (related Frontend Backend)
+  (or
+    (depends_on Frontend Backend)
+    (depends_on Backend Frontend)))
+```
 
 ```brief
 (name Frontend)
@@ -165,3 +202,49 @@ that grounds the statement in the reality of the codebase.
   (claim (input Concept LogicBlock)
     "Concept is closed over"))
 ```
+
+Briefs are not accepted as witnesses for other briefs, to make sure unvalidated claims are
+never treated as evidence.
+
+### Assumptions
+
+`assume` takes a sentence as true, with no witness.
+
+```brief
+(sense axiom "The square of an even whole number is even.")
+(assume (axiom))
+```
+
+### Details
+
+A `detail` hides part of an argument. Names and senses declared inside it stay there. A
+claim inside it about a name from outside becomes visible outside. The claim still needs its
+own support.
+
+```brief
+(name Frontend)
+(name Backend)
+
+(sense feeds_into "{Producer} feeds into {Consumer}")
+
+(detail
+  (name AST)
+  (sense produces "{Component} produces {Representation}")
+  (sense consumes "{Component} accepts {Representation} as input")
+
+  (claim (produces Frontend AST) (witness "src/frontend/mod.rs"))
+  (claim (consumes Backend AST) (witness "src/backend/mod.rs"))
+
+  (claim (feeds_into Frontend Backend)
+    (and
+      (produces Frontend AST)
+      (consumes Backend AST))))
+```
+
+## File Formats
+
+Briefs are written to `*.brief` files. Wherever a `*.brief` file is accepted, a `.md` file
+is too: every fenced `brief` block is taken, in order, and the rest of the document is left
+out.
+
+The ordering of the top-level declarations is irrelevant.
