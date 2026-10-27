@@ -6,3 +6,6 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 cargo test
+
+cargo run check README.md
+cargo run check briefs/architecture/architecture.brief
