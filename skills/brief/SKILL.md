@@ -13,7 +13,7 @@ Help the user realign their mental model with the current state of the codebase,
 
 Use the `autoground check` utility to validate your brief. Iterate until all claims are verified. A detail is verified when its body is. If you notice that a claim made by the user is incorrect, report this misalignment back to them. Remember, the goal is not to get your brief to pass, but to accurately capture the state of the codebase. If you are struggling to get a brief accepted, recheck your own assumptions.
 
-Once you have a valid brief, follow the users instructions as to how best to present it. Default to presenting a mermaid diagram embedded in a self-contained HTML file. Use `autoground align` to validate that the diagram accurately reflects the brief. Iterate on the diagram until it is accepted. Again, the goal is not to trick the judge, its to build an understanding of reality.
+Once you have a valid brief, follow the users instructions as to how best to present it. Default to presenting a mermaid diagram embedded in a self-contained HTML file and rendered with https://pele.run/. Use `autoground align` to validate that the diagram accurately reflects the brief. Iterate on the diagram until it is accepted. Again, the goal is not to trick the judge, its to build an understanding of reality.
 
 
 ## Guidelines for writing an effective brief
