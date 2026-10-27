@@ -90,6 +90,9 @@ pub fn lower_mermaid(src: &str) -> Result<String, LowerError> {
             depth -= 1;
             continue;
         }
+        if depth > 0 && words.len() == 2 && words[0] == "direction" && is_direction(words[1]) {
+            continue;
+        }
         if matches!(
             words.first().copied(),
             Some("classDef" | "style" | "linkStyle" | "class")
@@ -536,6 +539,7 @@ mod tests {
 flowchart LR
   classDef box fill:#fff
   subgraph group ["group"]
+    direction TB
     n1["Frontend"]:::box -->|depends_on| n2["Backend"]
   end
   linkStyle 0 stroke:#333
