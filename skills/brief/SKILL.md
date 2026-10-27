@@ -26,6 +26,8 @@ The human brain pays a tax for every name it has to hold in working memory. If a
 
 Sometimes it is unavoidable to introduce a new name, to refer to a concept that does not have a clear existing name in the codebase, or to talk about a real concept at a higher level, such as referring to specific data structures as "messages" or "state". Refer to the documentation, which explains how to use nullary senses to capture such definitions.
 
+Strongly prefer using source files as witnesses. Derived documentation in e.g. markdown files should only be used cautiously, as it may not accurately reflect the current state of the codebase. Best to call it out to the user if a non-source witness is needed.
+
 If `autoground check` doesn't accept your brief, break down your claims into smaller, more atomic propositions combined via `and`, `or`, or `not`. Use the opportunity to double check your own understanding. If you notice that you have to do unreasonable things to "trick" the judge, just surface that back to the user. The goal is building real understanding, not passing the check at all cost.
 
 Never use `assume` when making claims about the codebase, always use `claim` with a witness. `assume` is appropriate for user-provided principles. If you have to introduce an assumption to get a brief to validate, flag it with the user explicitly, as it may point out a gap in their understanding.

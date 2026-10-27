@@ -10,9 +10,14 @@ complicated argument into increasingly atomic claims.
 > *"a formal written presentation of an argument that sets forth the main points with
 > supporting precedents and evidence"*
 
+Briefs are written to `*.brief` files. Wherever a `*.brief` file is accepted, a `.md` file
+is too: every fenced `brief` block is taken, in order, and the rest of the document is left
+out.
+
 ## Grammar
 
-A brief is a sequence of forms. `ns`, when present, is the first form and the only one.
+A brief is a sequence of forms. `ns`, when present, is the first form and the only one. The
+ordering of all other top-level forms is irrelevant.
 
 ```
 program   ::= [ns] form*
@@ -137,31 +142,24 @@ Claims make testable propositions, by combining a fully formed sentence with a *
 that grounds the statement in the reality of the codebase.
 
 ```brief
-;; A statement on its own is unsupported. A claim defines the sentence.
 (claim (is_component Frontend)
   (witness "src/frontend/mod.rs"))
 
-(claim "Sweep asks the oracle whether a path matches the filter"
-  (witness "src/sweep/mod.rs"))
+(claim "The server accepts compressed payloads"
+  (witness "src/server/request.rs"))
 
-;; A claim can be supported by another claim. Cite a sentence already claimed.
-(sense lemma-1 "If a whole number is odd, then its square is not even.")
-(sense lemma-2 "If the square of a whole number is even, then that whole number is not odd.")
-(claim (lemma-1)
-  (witness "src/lemma.rs"))
-(claim (lemma-2)
-  (lemma-1))
+(claim "The buy button is rendered"
+  (witness "/tmp/eval/screenshots/main.png"))
+```
 
-(claim (calls Sweep Oracle)
-  (and
-    "Sweep asks the oracle whether a path matches the filter"
-    (claim "Sweep's oracle posts are the Jev HTTP call"
-      (witness "src/sweep/mod.rs" "src/oracle/jev.rs"))))
+Witness paths are relative to the brief location. Typically source files should be used as
+witnesses. It is possible to use PNG or JPEG images as witnesses, for example when tying a
+claim to a screenshot of the live application. Briefs are not accepted as witnesses for
+other briefs, to make sure unvalidated claims are never treated as evidence.
 
-;; A claim that cannot be validated from one witness takes `not`, `and`, or `or` as its support.
-(claim (is_component Backend)
-  (not (is_data Backend)))
+Claims can be supported by other claims as well, connected via `and`, `or`, or `not`.
 
+```brief
 (claim (returns Frontend AST)
   (and
     (is_component Frontend)
@@ -169,42 +167,28 @@ that grounds the statement in the reality of the codebase.
     (claim "Frontend parses the program and returns AST"
       (witness "src/frontend/parser.rs"))))
 
+(claim (is_component Backend)
+  (not (is_data Backend)))
+
 (claim (related Frontend Backend)
   (or
     (depends_on Frontend Backend)
     (depends_on Backend Frontend)))
 ```
 
-```brief
-(name Frontend)
-(name Backend)
-(sense depends_on "{X} depends on {Y}")
-(claim (depends_on Frontend Backend)
-  (not (depends_on Backend Frontend)))
-```
+By default, a brief is accepted by `autoground check` if all of its claims validate. `and`,
+`or`, and `not` may also appear at the top-level, which allows expressing a brief that is
+accepted if _any_ or _none_ of its claims validate.
 
 ```brief
-(claim "alpha is the first letter."
-  (witness "note.txt"))
-```
+(not (claim (depends_on Backend Frontend) (witness "src/backend/mod.rs")))
 
-```brief
-(assume "the file is small")
-(claim "the brief may treat the file as small"
-  "the file is small")
+(or
+  (claim "An incoming request enters the queue"
+   (witness "src/server/mod.rs"))
+  (claim "An incoming request is rejected if the queue is at capacity"
+   (witness "src/server/queue.rs")))
 ```
-
-```brief
-(name Concept)
-(sense input "{X} is an input into {Y}")
-(detail
-  (name LogicBlock)
-  (claim (input Concept LogicBlock)
-    "Concept is closed over"))
-```
-
-Briefs are not accepted as witnesses for other briefs, to make sure unvalidated claims are
-never treated as evidence.
 
 ### Assumptions
 
@@ -240,11 +224,3 @@ own support.
       (produces Frontend AST)
       (consumes Backend AST))))
 ```
-
-## File Formats
-
-Briefs are written to `*.brief` files. Wherever a `*.brief` file is accepted, a `.md` file
-is too: every fenced `brief` block is taken, in order, and the rest of the document is left
-out.
-
-The ordering of the top-level declarations is irrelevant.
