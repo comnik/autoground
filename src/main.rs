@@ -8,10 +8,12 @@ use autoground::check::{self, write_report, DEFAULT_BODY_BYTES};
 use autoground::compiler::{link_parts, Vocabulary};
 use autoground::log::{Log, DEFAULT_TRACE_DIR};
 use autoground::oracle::jev::DEFAULT_RUN_COST_CENTS;
-use autoground::oracle::{JevOracle, Oracle, UsageRecord};
+use autoground::oracle::{JevOracle, Oracle, Usage, UsageRecord};
 use autoground::prepare;
-use autoground::report::summary::print_run_summary;
-use autoground::{brief_source, compile, display_path, parse, scan_namespaces, Proposition};
+use autoground::report::summary::{print_assumptions, print_file_line, print_run_summary};
+use autoground::{
+    brief_source, compile, display_path, parse, scan_briefs, scan_namespaces, Proposition,
+};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
@@ -40,12 +42,16 @@ enum Commands {
     /// written in a new
     /// directory under `/tmp/autoground/`, or under `--out`.
     /// Exit status is 1 when a top-level claim is not discharged.
+    /// A directory is every `.brief` file and every Markdown file with a
+    /// `brief` block under it, gitignored paths aside, and each file is
+    /// checked on its own.
     ///
     /// Examples:
+    ///   autoground check .
     ///   autoground check examples/search-calls-oracle.brief
     ///   autoground check examples/sqrt2.brief
     Check {
-        /// Brief source, a `.brief` file, or a Markdown file of `brief` blocks.
+        /// Brief source, a `.brief` file, a Markdown file of `brief` blocks, or a directory of those files.
         input: String,
         /// File every `(witness $)` reads. Other witness paths stay relative to the brief.
         /// `-` reads that file from stdin.
@@ -157,6 +163,12 @@ fn check_cmd(
     budget_cents: u64,
     out: Option<&Path>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
+    if Path::new(input).is_dir() {
+        if file.is_some() {
+            return Err("a directory check takes no file".into());
+        }
+        return check_dir(input, budget_cents, out);
+    }
     let started = std::time::Instant::now();
     let base = brief_dir(input);
     let (src, program, compiled) = load_compiled(input, &base)?;
@@ -269,28 +281,7 @@ fn finish_check<O: Oracle>(
     let usage = oracle.usage();
     let flights = oracle.flights().to_vec();
     let flight_limit = oracle.flight_limit();
-    let recorded: Vec<_> = report
-        .claims
-        .iter()
-        .zip(program.clauses.iter())
-        .map(|(node, clause)| {
-            let claim = src
-                .get(clause.span.clone())
-                .map(str::trim)
-                .unwrap_or(node.text.as_str());
-            json!({
-                "claim": claim,
-                "value": node.value,
-            })
-        })
-        .collect();
-    log.append_event(
-        "check",
-        &json!({
-            "claims": recorded,
-            "usage": UsageRecord::from_usage(&usage),
-        }),
-    )?;
+    record_check(log, src, program, &report, &usage, None)?;
     print_report(src, program, &report)?;
     let true_count = report
         .claims
@@ -312,6 +303,197 @@ fn finish_check<O: Oracle>(
         .iter()
         .all(|claim| claim.value == autoground::Value::True);
     Ok(if discharged { 0 } else { 1 })
+}
+
+struct ReadyBrief {
+    path: String,
+    base: PathBuf,
+    src: String,
+    program: autoground::Program,
+    compiled: autoground::Compiled,
+}
+
+enum PreparedBrief {
+    Ready(ReadyBrief),
+    Failed { path: String, message: String },
+}
+
+fn check_dir(
+    input: &str,
+    budget_cents: u64,
+    out: Option<&Path>,
+) -> Result<u8, Box<dyn std::error::Error>> {
+    let started = std::time::Instant::now();
+    let files = scan_briefs(Path::new(input))?;
+    if files.is_empty() {
+        println!("no briefs");
+        return Ok(0);
+    }
+    let prepared: Vec<PreparedBrief> = files
+        .iter()
+        .map(|file| match prepare_brief(file) {
+            Ok(ready) => PreparedBrief::Ready(ready),
+            Err(message) => PreparedBrief::Failed {
+                path: file.path.clone(),
+                message,
+            },
+        })
+        .collect();
+    if prepared
+        .iter()
+        .all(|item| matches!(item, PreparedBrief::Failed { .. }))
+    {
+        print_prepare_errors(&prepared)?;
+        return Ok(3);
+    }
+
+    let log = Log::create_under(out.unwrap_or_else(|| Path::new(DEFAULT_TRACE_DIR)))?;
+    let mut oracle = match JevOracle::from_env(log.clone()) {
+        Ok(oracle) => oracle,
+        Err(err) => {
+            print_prepare_errors(&prepared)?;
+            return Err(err.into());
+        }
+    };
+    oracle.set_run_cost_limit_usd(budget_cents as f64 / 100.0);
+
+    let mut compile_failed = false;
+    let mut all_true = true;
+    let mut true_count = 0usize;
+    let mut total = 0usize;
+    for item in prepared {
+        match item {
+            PreparedBrief::Failed { path, message } => {
+                compile_failed = true;
+                print_brief_failure(&path, &message)?;
+            }
+            PreparedBrief::Ready(ready) => {
+                let report = check::check_bound(
+                    &ready.compiled.claims,
+                    &ready.base,
+                    DEFAULT_BODY_BYTES,
+                    None,
+                    &mut oracle,
+                )?;
+                let validated = report
+                    .claims
+                    .iter()
+                    .filter(|claim| claim.value == autoground::Value::True)
+                    .count();
+                let claim_count = report.claims.len();
+                let passed = validated == claim_count;
+                print_file_line(passed, &ready.path, Some((validated, claim_count)))?;
+                if !passed {
+                    print_report(&ready.src, &ready.program, &report)?;
+                    print_assumptions(&ready.compiled.assumptions)?;
+                    println!();
+                    all_true = false;
+                }
+                let usage = oracle.usage();
+                record_check(
+                    &log,
+                    &ready.src,
+                    &ready.program,
+                    &report,
+                    &usage,
+                    Some(&ready.path),
+                )?;
+                true_count += validated;
+                total += claim_count;
+            }
+        }
+    }
+
+    let usage = oracle.usage();
+    let flights = oracle.flights().to_vec();
+    let flight_limit = oracle.flight_limit();
+    print_run_summary(
+        &usage,
+        &flights,
+        flight_limit,
+        true_count,
+        total,
+        started.elapsed(),
+        log.path(),
+        &[],
+    )?;
+    if compile_failed {
+        Ok(3)
+    } else if all_true {
+        Ok(0)
+    } else {
+        Ok(1)
+    }
+}
+
+fn prepare_brief(file: &autoground::BriefFile) -> Result<ReadyBrief, String> {
+    let input = file.absolute.to_string_lossy().into_owned();
+    let base = brief_dir(&input);
+    match load_compiled(&input, &base) {
+        Ok((src, program, compiled)) => {
+            if check::cites_dollar(&compiled.claims) {
+                Err("`$` needs a file".to_string())
+            } else {
+                Ok(ReadyBrief {
+                    path: file.path.clone(),
+                    base,
+                    src,
+                    program,
+                    compiled,
+                })
+            }
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn print_prepare_errors(items: &[PreparedBrief]) -> io::Result<()> {
+    for item in items {
+        if let PreparedBrief::Failed { path, message } = item {
+            print_brief_failure(path, message)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_brief_failure(path: &str, message: &str) -> io::Result<()> {
+    print_file_line(false, path, None)?;
+    println!("{message}");
+    Ok(())
+}
+
+fn record_check(
+    log: &Log,
+    src: &str,
+    program: &autoground::Program,
+    report: &check::Report,
+    usage: &Usage,
+    file: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let recorded: Vec<_> = report
+        .claims
+        .iter()
+        .zip(program.clauses.iter())
+        .map(|(node, clause)| {
+            let claim = src
+                .get(clause.span.clone())
+                .map(str::trim)
+                .unwrap_or(node.text.as_str());
+            json!({
+                "claim": claim,
+                "value": node.value,
+            })
+        })
+        .collect();
+    let mut body = json!({
+        "claims": recorded,
+        "usage": UsageRecord::from_usage(usage),
+    });
+    if let Some(file) = file {
+        body["file"] = json!(file);
+    }
+    log.append_event("check", &body)?;
+    Ok(())
 }
 
 /// Directory witness paths are relative to. A brief file uses its own directory.

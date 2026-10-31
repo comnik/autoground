@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::WalkBuilder;
 
-use crate::syntax::{brief_source, mentions_namespace, parse, Program};
+use crate::syntax::{brief_source, extract_briefs, mentions_namespace, parse, Program};
 
 /// A model file that declares a namespace. `path` is relative to the repo
 /// when the file lives inside it.
@@ -46,38 +46,7 @@ fn canonicalize(path: &Path) -> PathBuf {
 /// A file that declares `ns` and does not parse is an error. The directory
 /// layout is not the namespace.
 pub fn scan_namespaces(root: &Path) -> Result<Vec<Loaded>, LoadError> {
-    if !root.is_dir() {
-        return Err(LoadError {
-            message: format!("repository not found: {}", root.display()),
-        });
-    }
-    let root = canonicalize(root);
-    let gitignore = load_gitignore(&root);
-    let walker = {
-        let root = root.clone();
-        let mut builder = WalkBuilder::new(&root);
-        builder
-            .standard_filters(false)
-            .follow_links(false)
-            .filter_entry(move |entry| {
-                if is_git_meta(entry.file_name()) {
-                    return false;
-                }
-                let rel = match entry.path().strip_prefix(&root) {
-                    Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
-                    Err(_) => return true,
-                };
-                if rel.is_empty() {
-                    return true;
-                }
-                let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-                match &gitignore {
-                    Some(gitignore) => !gitignore.matched(&rel, is_dir).is_ignore(),
-                    None => true,
-                }
-            });
-        builder.build()
-    };
+    let (root, walker) = walk(root)?;
     let mut files = Vec::new();
     for entry in walker {
         let entry = entry.map_err(|err| LoadError {
@@ -128,6 +97,94 @@ pub fn scan_namespaces(root: &Path) -> Result<Vec<Loaded>, LoadError> {
         }
     }
     Ok(files)
+}
+
+/// A `.brief` file, or a Markdown file that contains a `brief` fence.
+///
+/// `path` is relative to the directory that was scanned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefFile {
+    pub path: String,
+    pub absolute: PathBuf,
+}
+
+/// `.brief` files and Markdown files with a `brief` fence under `root`.
+///
+/// Gitignored paths and `.git` are skipped. A `.brief` file is listed even
+/// when it does not parse. Paths are relative to `root` and sorted.
+pub fn scan_briefs(root: &Path) -> Result<Vec<BriefFile>, LoadError> {
+    let (root, walker) = walk(root)?;
+    let mut files = Vec::new();
+    for entry in walker {
+        let entry = entry.map_err(|err| LoadError {
+            message: err.to_string(),
+        })?;
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if has_ext(path, "brief") {
+            if let Err(err) = std::fs::read_to_string(path) {
+                return Err(LoadError {
+                    message: format!("{}: {err}", display_path(&root, path)),
+                });
+            }
+        } else if has_ext(path, "md") {
+            let text = std::fs::read_to_string(path).map_err(|err| LoadError {
+                message: format!("{}: {err}", display_path(&root, path)),
+            })?;
+            if extract_briefs(&text).is_empty() {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        files.push(BriefFile {
+            path: display_path(&root, path),
+            absolute: canonicalize(path),
+        });
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+fn walk(root: &Path) -> Result<(PathBuf, ignore::Walk), LoadError> {
+    if !root.is_dir() {
+        return Err(LoadError {
+            message: format!("repository not found: {}", root.display()),
+        });
+    }
+    let root = canonicalize(root);
+    let gitignore = load_gitignore(&root);
+    let walker = {
+        let root = root.clone();
+        let mut builder = WalkBuilder::new(&root);
+        builder
+            .standard_filters(false)
+            .follow_links(false)
+            .filter_entry(move |entry| {
+                if is_git_meta(entry.file_name()) {
+                    return false;
+                }
+                let rel = match entry.path().strip_prefix(&root) {
+                    Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+                    Err(_) => return true,
+                };
+                if rel.is_empty() {
+                    return true;
+                }
+                let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+                match &gitignore {
+                    Some(gitignore) => !gitignore.matched(&rel, is_dir).is_ignore(),
+                    None => true,
+                }
+            });
+        builder.build()
+    };
+    Ok((root, walker))
 }
 
 fn load_gitignore(root: &Path) -> Option<Gitignore> {
@@ -250,6 +307,38 @@ mod tests {
                 && err.message.contains("weird/place/notes.brief")
                 && err.message.contains("com.acme.product"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn scan_briefs_lists_every_model() {
+        let root = scratch("briefs");
+        std::fs::create_dir_all(root.join("weird/place")).unwrap();
+        std::fs::create_dir_all(root.join("docs/nested")).unwrap();
+        std::fs::create_dir_all(root.join("secret")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "secret/\n").unwrap();
+        std::fs::write(root.join("weird/place/notes.brief"), "(name Frontend)\n").unwrap();
+        std::fs::write(
+            root.join("docs/nested/guide.md"),
+            "# Guide\n\n```brief\n\"a note\"\n```\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("broken.brief"), "(claim\n").unwrap();
+        std::fs::write(root.join("plain.md"), "no fences\n").unwrap();
+        std::fs::write(root.join("secret/hidden.brief"), "(name Hidden)\n").unwrap();
+        std::fs::write(root.join(".git/hidden.brief"), "(name Git)\n").unwrap();
+
+        let files = scan_briefs(&root).unwrap();
+        let paths: Vec<_> = files.iter().map(|file| file.path.as_str()).collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            paths,
+            vec![
+                "broken.brief",
+                "docs/nested/guide.md",
+                "weird/place/notes.brief",
+            ]
         );
     }
 }

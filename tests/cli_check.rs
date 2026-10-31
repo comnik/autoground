@@ -91,10 +91,7 @@ fn check_rejects_a_bare_sentence() {
         Some(3),
         "stderr={stderr} stdout={stdout}"
     );
-    assert!(
-        stderr.contains("a sentence belongs to a claim"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("a sentence belongs to a claim"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -172,10 +169,7 @@ fn check_reads_brief_blocks_from_markdown() {
         Some(3),
         "stderr={stderr} stdout={stdout}"
     );
-    assert!(
-        stderr.contains("a sentence belongs to a claim"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("a sentence belongs to a claim"), "{stderr}");
 }
 
 #[test]
@@ -268,4 +262,138 @@ fn check_rejects_a_file_without_a_dollar() {
     assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(stderr.contains("a file needs `(witness $)`"), "{stderr}");
     assert!(!stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
+}
+
+#[test]
+fn check_directory_rejects_a_file_argument() {
+    let dir = scratch("dir-file");
+    let out = bin()
+        .args(["check", dir.to_str().unwrap(), "note.txt"])
+        .env_remove("TYPESAFE_API_KEY")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.contains("a directory check takes no file"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
+}
+
+#[test]
+fn check_directory_with_no_briefs() {
+    let dir = scratch("dir-empty");
+    std::fs::write(dir.join("plain.md"), "no fences\n").unwrap();
+    let out = bin()
+        .args(["check", dir.to_str().unwrap()])
+        .env_remove("TYPESAFE_API_KEY")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(0), "{stderr} {stdout}");
+    assert_eq!(stdout, "no briefs\n");
+    assert!(!stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
+}
+
+#[test]
+fn check_directory_reports_a_broken_brief() {
+    let dir = scratch("dir-broken");
+    std::fs::create_dir_all(dir.join("secret")).unwrap();
+    std::fs::write(dir.join(".gitignore"), "secret/\n").unwrap();
+    std::fs::write(dir.join("broken.brief"), "(claim\n").unwrap();
+    std::fs::write(dir.join("plain.md"), "no fences\n").unwrap();
+    std::fs::write(dir.join("secret/hidden.brief"), "(name Hidden)\n").unwrap();
+    let out = bin()
+        .args(["check", dir.to_str().unwrap()])
+        .env_remove("TYPESAFE_API_KEY")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr={stderr} stdout={stdout}"
+    );
+    assert!(stdout.contains("✗  broken.brief"), "{stdout}");
+    assert!(!stdout.contains("hidden.brief"), "{stdout}");
+    assert!(!stdout.contains("plain.md"), "{stdout}");
+    assert!(!stderr.contains("hidden.brief"), "{stderr}");
+    assert!(!stderr.contains("plain.md"), "{stderr}");
+    assert!(!stdout.contains("trace available at "), "{stdout}");
+    assert!(!stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
+}
+
+#[test]
+fn check_directory_rejects_a_dollar_without_a_file() {
+    let dir = scratch("dir-dollar");
+    std::fs::write(dir.join("model.brief"), "(claim \"alpha\" (witness $))\n").unwrap();
+    let out = bin()
+        .args(["check", dir.to_str().unwrap()])
+        .env_remove("TYPESAFE_API_KEY")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(3), "{stderr} {stdout}");
+    assert!(stdout.contains("✗  model.brief"), "{stdout}");
+    assert!(stdout.contains("`$` needs a file"), "{stdout}");
+    assert!(!stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
+}
+
+#[test]
+fn check_directory_checks_every_brief() {
+    let dir = scratch("dir-suite");
+    std::fs::write(dir.join("note.txt"), "alpha is the first letter.\n").unwrap();
+    std::fs::write(
+        dir.join("ok.brief"),
+        "(claim \"alpha is the first letter.\" (witness \"note.txt\"))\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("open.brief"),
+        "(claim \"nothing cites this\" (witness \"gone.txt\"))\n",
+    )
+    .unwrap();
+    let out = bin()
+        .args(["check", dir.to_str().unwrap()])
+        .output()
+        .expect("run autoground");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr={stderr} stdout={stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "✓  ok.brief  1/1"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "✗  open.brief  0/1"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("alpha is the first letter."), "{stdout}");
+    assert!(stdout.contains(";; missing file gone.txt"), "{stdout}");
+    let verdicts: Vec<_> = stdout
+        .lines()
+        .filter(|line| line.contains("claims validated in "))
+        .collect();
+    assert_eq!(verdicts.len(), 1, "{stdout}");
+    assert!(
+        verdicts[0].starts_with("1/2 claims validated in "),
+        "{stdout}"
+    );
+    let trace = line(&stdout, "trace available at ");
+    let body = std::fs::read_to_string(trace).unwrap();
+    assert!(body.contains("\"file\":\"ok.brief\""), "{body}");
+    assert!(body.contains("\"file\":\"open.brief\""), "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

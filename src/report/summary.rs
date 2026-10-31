@@ -68,6 +68,46 @@ pub fn print_run_summary(
     out.flush()
 }
 
+/// One directory-check row: a mark, the brief path, and validated/total claims.
+///
+/// `claims` is omitted when the brief was not judged.
+pub fn print_file_line(passed: bool, path: &str, claims: Option<(usize, usize)>) -> io::Result<()> {
+    let mark = if passed { "✓" } else { "✗" };
+    let text = match claims {
+        Some((validated, total)) => format!("{mark}  {path}  {validated}/{total}"),
+        None => format!("{mark}  {path}"),
+    };
+    let color = stdout().is_terminal();
+    let mut out = stdout();
+    write_line(
+        &mut out,
+        &Painted {
+            text,
+            paint: if passed { Paint::Green } else { Paint::Red },
+            bold: true,
+        },
+        color,
+    )?;
+    out.flush()
+}
+
+/// The assumption box for one brief. Nothing is written when `assumptions` is empty.
+pub fn print_assumptions(assumptions: &[String]) -> io::Result<()> {
+    if assumptions.is_empty() {
+        return Ok(());
+    }
+    let color = stdout().is_terminal();
+    let width = terminal::size()
+        .map(|(columns, _)| columns as usize)
+        .unwrap_or(80)
+        .max(80);
+    let mut out = stdout();
+    for line in assumption_box(assumptions, width) {
+        write_line(&mut out, &line, color)?;
+    }
+    out.flush()
+}
+
 fn painted(
     usage: &Usage,
     flights: &[Flight],

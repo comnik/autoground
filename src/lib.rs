@@ -11,7 +11,8 @@ pub mod universe;
 pub mod value;
 
 pub use compiler::{
-    compile, display_path, link, scan_namespaces, CompileError, Compiled, LoadError, Loaded,
+    compile, display_path, link, scan_briefs, scan_namespaces, BriefFile, CompileError, Compiled,
+    LoadError, Loaded,
 };
 pub use log::Log;
 pub use syntax::{
