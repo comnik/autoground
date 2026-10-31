@@ -116,8 +116,6 @@ fn render_body(lines: &[&str], indent: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::compile;
-    use crate::syntax::parse;
 
     #[test]
     fn collects_brief_fences_and_skips_other_blocks() {
