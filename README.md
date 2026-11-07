@@ -25,6 +25,9 @@ We think that once the [uneasy feeling
 passes](https://en.wikipedia.org/wiki/Proofs_and_Refutations), this opens up some
 interesting possibilities to explore over time.
 
+> [!WARNING]
+> autoground is little more than an experiment at this point.
+
 
 ## Install
 
@@ -146,7 +149,7 @@ from the referenced witnesses.
 At every step in the proof the oracle is provided with the collected support (witnesses or
 other claims) and is asked to judge the proposed conclusion as "supported", "contradicted",
 or "neutral". Every `claim` is a deductive step. Only logical operators are resolved
-determinisitically, without involving the oracle. Each unique claim is only proved once, no
+deterministically, without involving the oracle. Each unique claim is only proved once, no
 matter how often it is referred to.
 
 Exit status is 0 when every top-level claim is discharged, 1 otherwise, and 3 on a compile,

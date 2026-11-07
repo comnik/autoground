@@ -1,5 +1,8 @@
 # Reclaim your codebase with `/brief`
 
+> [!NOTE]
+> Work in progress.
+
 At the speed agents are moving, any dormant misunderstandings you have with your human or
 machine collaborators get amplified much more quickly than before. Agents also aren't bound
 by [Miller's law](https://en.wikipedia.org/wiki/The_Magical_Number_Seven,_Plus_or_Minus_Two)

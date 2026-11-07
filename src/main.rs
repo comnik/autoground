@@ -20,7 +20,7 @@ use serde_json::json;
 #[derive(Parser, Debug)]
 #[command(
     name = "autoground",
-    about = "Check a brief against the files it cites."
+    about = "An informal proof assistant that helps your agents ground explanations in the reality of your codebase."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -31,66 +31,68 @@ struct Cli {
 enum Commands {
     /// Re-check a brief against the files its claims cite.
     ///
-    /// A witness path is relative to the brief file. A file longer than the
-    /// body budget is sent in parts, and the sentence is discharged when one
-    /// part entails it. A claim is discharged when its support holds and,
-    /// where that support is a sentence, those sentences entail the claim. An
-    /// assumption is taken as true. A detail is discharged when its body is.
-    /// `--budget` caps this run in cents and defaults to 1. On a terminal the
-    /// finished view is the brief: each judged clause carries its own mark,
-    /// and an undischarged clause carries its failure comment. The trace is
-    /// written in a new
-    /// directory under `/tmp/autoground/`, or under `--out`.
-    /// Exit status is 1 when a top-level claim is not discharged.
-    /// A directory is every `.brief` file and every Markdown file with a
-    /// `brief` block under it, gitignored paths aside, and each file is
-    /// checked on its own.
+    /// Briefs compile to a set of inter-dependent claims, which check then validates
+    /// starting from the referenced witnesses.
+    ///
+    /// At every step in the proof the oracle is provided with the collected support
+    /// (witnesses or other claims) and is asked to judge the proposed conclusion as
+    /// "supported", "contradicted", or "neutral". Every claim is a deductive step. Only
+    /// logical operators are resolved deterministically, without involving the oracle. Each
+    /// unique claim is only proved once, no matter how often it is referred to.
+    ///
+    /// Exit status is 0 when every top-level claim is discharged, 1 otherwise, and 3 on a
+    /// compile, IO, or oracle failure. Each check writes a detailed trace of all proof
+    /// steps along with the requests sent to the oracle.
     ///
     /// Examples:
-    ///   autoground check .
-    ///   autoground check examples/search-calls-oracle.brief
-    ///   autoground check examples/sqrt2.brief
+    ///
+    /// autoground check .
+    ///
+    /// autoground check README.md
+    ///
+    /// autoground check briefs/architecture/architecture.brief
     Check {
         /// Brief source, a `.brief` file, a Markdown file of `brief` blocks, or a directory of those files.
         input: String,
-        /// File every `(witness $)` reads. Other witness paths stay relative to the brief.
-        /// `-` reads that file from stdin.
+        /// File to bind to templated witnesses `(witness $)`. Other witness paths stay
+        /// relative to the brief. `-` reads that file from stdin.
         file: Option<PathBuf>,
-        /// Cost cap for this check, in cents. The request that crosses the
-        /// cap still finishes. Later requests are refused.
+        /// Cost cap for this check, in cents. In-flight requests that cross the cap still
+        /// finish. Later requests are refused.
         #[arg(long, value_name = "CENTS", default_value_t = DEFAULT_RUN_COST_CENTS)]
         budget: u64,
-        /// Parent directory for this check. A new subdirectory holds
-        /// `trace.jsonl`. Defaults to `/tmp/autoground`.
+        /// Output directory for this check, will contain `trace.jsonl` and other artefacts.
+        /// Defaults to `/tmp/autoground`.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
-    /// Compare the names, senses, and statements of two models.
+    /// Compare the names, senses, and statements of two briefs for consistency.
     ///
-    /// Each argument is a `.brief` file, a Markdown file of `brief` blocks,
-    /// a `.mmd` flowchart, or brief source. A flowchart's node labels are
-    /// names. A label resolves to a nullary sense used as a term, so the
-    /// picture keeps the bare label. An edge labeled with a sense name is
-    /// that sense applied to its endpoints. A leading `not ` is refused.
-    /// Any other edge label is the wording between the two names. A `%%`
-    /// line that starts with `(` is brief source, which is how a picture
-    /// carries a sense template.
-    /// Exit status is 1 when a name, a sense, or a statement is on only one
-    /// side. The oracle is not asked.
+    /// Each argument is a `.brief` file, a Markdown file of `brief` blocks, a `.mmd`
+    /// flowchart, or brief source. A flowchart's node labels are names. A label resolves to
+    /// a nullary sense used as a term, so the picture keeps the bare label. An edge labeled
+    /// with a sense name is that sense applied to its endpoints. A leading `not ` is
+    /// refused. Any other edge label is the wording between the two names. A `%%` line that
+    /// starts with `(` is brief source, which is how a picture carries a sense template.
+    ///
+    /// Exit status is 1 when a name, a sense, or a statement is on only one side. The
+    /// oracle is not asked.
     ///
     /// Examples:
-    ///   autoground align model.brief picture.mmd
-    ///   autoground align model.brief notes.md
+    ///
+    /// autoground align model.brief picture.mmd
+    ///
+    /// autoground align model.brief notes.md
     Align {
         /// A `.brief` file, Markdown `brief` blocks, a `.mmd` flowchart, or brief source.
         left: String,
         /// A `.brief` file, Markdown `brief` blocks, a `.mmd` flowchart, or brief source.
         right: String,
     },
-    /// Write a directory of files and print its path.
+    /// Map other autoground targets to a directory.
     ///
-    /// `transcript` writes one file per tool call. `diff` writes one file per
-    /// `git diff` change. The directory stays.
+    /// `transcript` writes one file per tool call. `diff` writes one file per `git diff`
+    /// change.
     Prepare {
         #[command(subcommand)]
         kind: PrepareKind,

@@ -1,5 +1,8 @@
 # Construct a rigorous argument with `/verify`
 
+> [!NOTE]
+> Work in progress.
+
 Proofs, formal or informal, are tools of discovery and alignment. In an attempt to prove our
 conclusions to a pedantic judge, humans and agents uncover hidden assumptions and are forced
 to clarify ambiguous concepts. This builds trust.
