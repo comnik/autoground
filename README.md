@@ -94,14 +94,23 @@ that is useful to you is an iterative process:
 agents to change the code to match it.
 5. Shift or refine focus, then rinse and repeat.
 
-[![Watch the video](https://img.youtube.com/vi/lJeqCtzWWmo/hqdefault.jpg)](https://www.youtube.com/watch?v=lJeqCtzWWmo)
+Here is what that process could look like
+([YouTube](https://www.youtube.com/watch?v=lJeqCtzWWmo)):
+
+[![Watch the video](/docs/assets/architecture-brief-evolution.gif)](https://www.youtube.com/watch?v=lJeqCtzWWmo)
 
 As boring as it may sound, getting to an accurate mental model requires consistent names and
 precise relationships. Just think of your last whiteboarding session with a human colleague:
 first you agree on how to label the boxes, then you debate every arrow.
 
-*[the process takes time and many tokens, so we don't want to have to redo it after every change]*
-*[although autoground helped the agend fix an incorrect claim, the takeaway here is not that the agents explanations can't be trusted, its the ability to maintain that explanation over time]*
+Although autoground helped the agend fix an incorrect claim, the
+takeaway here is not that the agents explanations can't be trusted, its the ability to
+maintain that explanation over time]*
+
+This human-in-the-loop process takes time and burns tokens. autoground is meant to increase
+trust in the outcome, by enforcing precise and verifiable claims. Once created, a brief can
+be re-verified cheaply by running `autoground check`, so you won't have to redo the entire
+exercise anytime someone lands a change to the repository.
 
 
 ## The `brief` language
