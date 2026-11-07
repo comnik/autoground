@@ -1,22 +1,29 @@
 # ⏚ autoground
 
-autoground is an <ins>informal</ins> proof assistant.
+autoground is an <ins>informal</ins> proof assistant that helps your agents ground
+explanations in the reality of your codebase.
 
-Together with your favourite coding agent, autoground helps you to (re-)establish and
-maintain an accurate mental model of a codebase that has drifted out from under you.
+At the speed agents are moving, any dormant misunderstandings you have with your human or
+machine collaborators get amplified much more quickly than before. LLMs also happily juggle
+different names for the same concept, even if one is given in the codebase. Before you know
+it, your mental model is drifting further and further from what is actually implemented, and
+the explanations your agents are supplying no longer seem to *click*.
+
+autoground gives you a language to (re-)establish shared terminology and an informal proof
+checker that helps build and maintain trust in any statement you or your agents make about
+the codebase.
 
 Unlike formal proof assistants like Lean or Rocq, autoground uses a [system one
 model](https://typesafe.ai/blog/introducing-system-one-models-and-jev) as its proof kernel,
-which has all kinds of wacky implications. The kernel effectively accepts any deductive step
-that a capable LLM can follow *intuitively*, meaning without the use of reasoning. The trust
+which has all kinds of wacky implications. The kernel accepts any deductive step that a
+capable LLM can follow *intuitively*, meaning without the use of reasoning tokens. The trust
 boundary shifts: it becomes easier for you to verify assumptions and claims made throghout
 the proof, but the informal and non-deterministic nature of the approach admits both false
 positives and negatives.
 
-Once the [uneasy feeling passes](https://en.wikipedia.org/wiki/Proofs_and_Refutations), this
-can be quite fun! autoground proofs can be written in (mostly) natural language and with
-witnesses drawn from different input modalities, which means you could prove that a given
-piece of code produces the screenshot of a website you just took.
+We think that once the [uneasy feeling
+passes](https://en.wikipedia.org/wiki/Proofs_and_Refutations), this opens up some
+interesting possibilities to explore over time.
 
 
 ## Install
@@ -27,7 +34,8 @@ cd autoground
 make install
 ```
 
-This will install the `/brief` and `/proof` skills, along with the autoground binary itself.
+This will install the autoground binary itself, along with the `/brief` skill to get you
+started.
 
 > [!NOTE]
 > Using autoground requires a [TypeSafe API key](https://docs.typesafe.ai/introduction) to
@@ -59,16 +67,41 @@ Confirm that everything is working, by validating this README:
 
 ## Get started
 
-With the autoground CLI and skills installed, follow one of our guided use cases.
+With the autoground CLI and skills installed, you're all set to build up a grounded mental
+model for any codebase, using the `/brief` skill. Chances are that you are entirely
+unfamiliar with the autoground codebase, so we'll use that as an example.
 
-**use [`/brief`](docs/use-cases/codebase-mental-model.md) to validate your mental model of a
-codebase**
+Start a session in the autoground repository you just cloned and tell your agent what aspect
+of autoground you are trying to build an understanding of:
 
-**use [`/proof`](docs/use-cases/rigorous-reasoning.md) to construct a rigorously reasoned
-argument**
+```
+/brief me on the autoground architecture
+```
 
-Use the provided skills as examples for writing your own! There are many other use cases to
-discover.
+What your agent will produce in response to this, most likely doesn't help you much. The
+resulting brief and accompanying diagram will put key concepts next to random function
+names, or include elaborate networks of relationships that describe a secondary mechanism
+like pretty printing of results.
+
+This is expected! You didn't have the vocabulary to ask a precise question yet, and so the
+agent is working on behalf of a superposition of possible audiences. Creating a `/brief`
+that is useful to you is an iterative process:
+
+1. Establish shared terminology: what concepts are we talking about?
+2. Validate relationships: how do these concepts relate in the codebase?
+3. Detect mis-alignment: where do nominally identical concepts relate in different ways?
+4. Take corrective action, either by updating your mental model or by instructing your
+agents to change the code to match it.
+5. Shift or refine focus, then rinse and repeat.
+
+[![Watch the video](https://img.youtube.com/vi/lJeqCtzWWmo/hqdefault.jpg)](https://www.youtube.com/watch?v=lJeqCtzWWmo)
+
+As boring as it may sound, getting to an accurate mental model requires consistent names and
+precise relationships. Just think of your last whiteboarding session with a human colleague:
+first you agree on how to label the boxes, then you debate every arrow.
+
+*[the process takes time and many tokens, so we don't want to have to redo it after every change]*
+*[although autoground helped the agend fix an incorrect claim, the takeaway here is not that the agents explanations can't be trusted, its the ability to maintain that explanation over time]*
 
 
 ## The `brief` language

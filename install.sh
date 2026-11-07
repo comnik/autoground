@@ -7,9 +7,9 @@
 #   ./install.sh --copy     copy each skill directory instead of symlinking
 #   ./install.sh --dry-run  print the actions without writing
 #
-# skills/brief/references and skills/proof/references point at docs/brief, so
-# both installed skills read one copy of the language docs. --copy snapshots
-# those files into each skill, because the relative link only resolves here.
+# skills/*/references point at docs/brief, so all installed skills read one copy of the
+# language docs. --copy snapshots those files into each skill, because the relative link
+# only resolves here.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,8 +29,7 @@ Link each skills/<name>/ directory that contains a SKILL.md into the skills
 directory of every detected agent. Edits in this repo apply immediately.
 Re-run after moving the repo. --copy writes a snapshot instead of a link.
 
-references/ in the brief and proof skills is docs/brief. --copy snapshots
-those files into each skill.
+references/ maps to docs/brief. --copy snapshots those files into each skill.
 EOF
 }
 
@@ -92,7 +91,7 @@ for name in "${skills[@]}"; do
   fi
 done
 
-for name in brief proof; do
+for name in brief verify ground; do
   if [ ! -f "$SKILLS_DIR/$name/SKILL.md" ]; then
     echo "Warning: skills/$name/SKILL.md is missing." >&2
   fi
@@ -106,10 +105,10 @@ references_are_shared() { # $1 skill directory
   return 1
 }
 
-# brief and proof share docs/brief unless references/ is already something else.
+# skills share docs/brief unless references/ is already something else.
 shares_brief_docs() { # $1 skill name, $2 skill directory
   case "$1" in
-    brief|proof) ;;
+    brief|verify|ground) ;;
     *)
       if references_are_shared "$2"; then
         return 0
@@ -150,7 +149,7 @@ ensure_shared_brief() { # $1 skill name
   ln -s "$BRIEF_LINK" "$dir/references"
 }
 
-for name in brief proof; do
+for name in brief verify ground; do
   ensure_shared_brief "$name"
 done
 
@@ -258,8 +257,8 @@ if [ "$DRY" = 1 ]; then
   echo "Dry run. Nothing written."
 elif [ "$COPY" = 1 ]; then
   echo "Copied. Re-run ./install.sh --copy after editing a skill or docs/brief."
-  echo "references/ in brief and proof is a copy of docs/brief."
+  echo "references/ is a copy of docs/brief."
 else
   echo "Linked to $SKILLS_DIR. Edits apply immediately. Re-run ./install.sh after moving this repo."
-  echo "references/ in brief and proof is docs/brief."
+  echo "references/ symlinks to docs/brief."
 fi

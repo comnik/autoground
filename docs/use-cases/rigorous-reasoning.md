@@ -1,4 +1,4 @@
-# Construct a rigorous argument with `/proof`
+# Construct a rigorous argument with `/verify`
 
 Proofs, formal or informal, are tools of discovery and alignment. In an attempt to prove our
 conclusions to a pedantic judge, humans and agents uncover hidden assumptions and are forced
@@ -9,7 +9,7 @@ compiler](https://lean-lang.org), reviewer #2 in an academic journal, or a child
 "why?" can all play the role in a useful way. autoground currently uses the [jev system one
 model](https://docs.typesafe.ai/concepts/system-one) as its judge.
 
-The [`/proof` skill](../../skills/proof/SKILL.md) instructs an agent to record reasoning
+The [`/verify` skill](../../skills/verify/SKILL.md) instructs an agent to record reasoning
 steps (yours or theirs!) in a `*.brief` (or `*.md` with `brief` fences), and then iterate
 until `autoground check` is satisfied. Typically each iteration involves the following
 steps:
