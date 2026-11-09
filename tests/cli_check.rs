@@ -5,6 +5,23 @@ fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autoground"))
 }
 
+#[test]
+fn version_prints_the_package_version() {
+    let out = bin().arg("--version").output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={stderr} stdout={stdout}"
+    );
+    assert_eq!(
+        stdout,
+        format!("autoground {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
 fn scratch(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "autoground-cli-check-{label}-{}",
@@ -225,7 +242,7 @@ fn check_dash_reads_stdin_before_the_oracle() {
     assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(stderr.contains("TYPESAFE_API_KEY is not set"), "{stderr}");
     assert!(
-        stderr.contains("https://docs.typesafe.ai/introduction"),
+        stderr.contains("https://console.typesafe.ai/keys"),
         "{stderr}"
     );
     assert!(!stderr.contains("`$` needs a file"), "{stderr}");

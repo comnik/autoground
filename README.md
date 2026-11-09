@@ -34,7 +34,7 @@ interesting possibilities to explore over time.
 ```
 Please clone https://github.com/comnik/autoground.git and run `make install` from the repo root. This will install the autoground binary itself, along with the `/brief` and `/verify` skills.
 
-If a [TypeSafe API key](https://docs.typesafe.ai/introduction) is not available as `TYPESAFE_API_KEY` in the environment, then prompt the user to set one up. Explain to the user that autoground incurs API usage. By default, all commands are capped at a budget of 1 cent.
+If a [TypeSafe API key](https://console.typesafe.ai/keys) is not available as `TYPESAFE_API_KEY` in the environment, then prompt the user to create one there and export it as `TYPESAFE_API_KEY`. Explain to the user that autoground incurs API usage. By default, all commands are capped at a budget of 1 cent.
 
 Confirm that everything is working, by validating this README via `autoground check README.md` from the repo root.
 
@@ -42,9 +42,11 @@ Conclude by listing the installed skills and offering to the user to try running
 ```
 
 > [!NOTE]
-> Using autoground requires a [TypeSafe API key](https://docs.typesafe.ai/introduction) to
+> Using autoground requires a [TypeSafe API key](https://console.typesafe.ai/keys) to
 > be available as `TYPESAFE_API_KEY` in your environment. Every use of autoground incurs API
 > usage. By default, all commands are capped at a budget of 1 cent.
+>
+> `make install` needs Rust 1.88 or newer (`rustup update`).
 
 <!--
 ```brief

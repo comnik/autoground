@@ -77,9 +77,7 @@ impl Transport for UreqTransport {
 }
 
 fn missing_api_key() -> OracleError {
-    OracleError::Config(
-        "TYPESAFE_API_KEY is not set. See https://docs.typesafe.ai/introduction".into(),
-    )
+    OracleError::Config("TYPESAFE_API_KEY is not set. See https://console.typesafe.ai/keys".into())
 }
 
 fn post_json_with_retries(url: &str, body: &Value) -> Result<Value, OracleError> {

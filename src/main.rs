@@ -20,6 +20,7 @@ use serde_json::json;
 #[derive(Parser, Debug)]
 #[command(
     name = "autoground",
+    version,
     about = "An informal proof assistant that helps your agents ground explanations in the reality of your codebase."
 )]
 struct Cli {
