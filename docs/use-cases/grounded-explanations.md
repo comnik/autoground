@@ -10,7 +10,7 @@ probably several reasons for this, but one is that agents don't mind juggling di
 terminology for the same concept, making it harder for you to place the provided information
 in your existing mental model.
 
-## An example
+### An example
 
 On a real codebase that implements a caching system called *Arroyo*, we ask Opus 5.5
 (medium) a simple question:
@@ -33,7 +33,7 @@ start to get fuzzy:
    a dependency was deleted". Deletions propagate transitively through the dependency chain
    in both cases.
 
-## Using autoground and the `/brief` skill
+### Using autoground and the `/brief` skill
 
 Now the same thing with autoground and the `/brief` skill:
 
@@ -134,9 +134,7 @@ game of tricking the judge.
 
 > The checker never confirmed the two transitions back to valid (invalid → valid and deleted
 > → valid).
-
 > I believe they’re correct, for this reason:
-
 >   - set! places a value in the newest node that holds the key or one of its dependencies
  (node_for_last_dependency_change).
 >   - That node is at or after the node holding the invalid or deleted StoreValue, so the
@@ -145,7 +143,10 @@ new valid one is what get_storevalue returns.
 the key itself, not just its dependencies. The brief says this in a comment instead of
 rewording the claims until the checker gives in.
 
-## Takeaways
+Checking a brief is cheap enough to run in CI or like a linter, quickly alerting us when our
+newly restored mental model no longer matches the code.
+
+### Takeaways
 
 Using `/brief` is not some magic bullet for agents to oneshot an accurate explanation
 guaranteed to give you an aha moment. autoground is effectively just a way to get agents to
