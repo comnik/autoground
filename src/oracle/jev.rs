@@ -76,9 +76,14 @@ impl Transport for UreqTransport {
     }
 }
 
+fn missing_api_key() -> OracleError {
+    OracleError::Config(
+        "TYPESAFE_API_KEY is not set. See https://docs.typesafe.ai/introduction".into(),
+    )
+}
+
 fn post_json_with_retries(url: &str, body: &Value) -> Result<Value, OracleError> {
-    let key = std::env::var("TYPESAFE_API_KEY")
-        .map_err(|_| OracleError::Config("TYPESAFE_API_KEY is not set".into()))?;
+    let key = std::env::var("TYPESAFE_API_KEY").map_err(|_| missing_api_key())?;
     let mut delay_ms = 200u64;
     let mut last = String::new();
     for attempt in 0..MAX_RETRIES {
@@ -194,7 +199,7 @@ impl JevOracle<UreqTransport> {
     /// The live client needs `TYPESAFE_API_KEY`. A missing key fails before any POST.
     pub fn require_api_key() -> Result<(), OracleError> {
         if std::env::var("TYPESAFE_API_KEY").is_err() {
-            return Err(OracleError::Config("TYPESAFE_API_KEY is not set".into()));
+            return Err(missing_api_key());
         }
         Ok(())
     }

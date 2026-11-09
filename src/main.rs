@@ -128,26 +128,24 @@ fn main() -> ExitCode {
             out,
         } => match check_cmd(&input, file.as_deref(), budget, out.as_deref()) {
             Ok(code) => ExitCode::from(code),
-            Err(err) => {
-                eprintln!("{err}");
-                ExitCode::from(3)
-            }
+            Err(err) => fail(err),
         },
         Commands::Align { left, right } => match align_cmd(&left, &right) {
             Ok(code) => ExitCode::from(code),
-            Err(err) => {
-                eprintln!("{err}");
-                ExitCode::from(3)
-            }
+            Err(err) => fail(err),
         },
         Commands::Prepare { kind } => match prepare_cmd(kind) {
             Ok(code) => ExitCode::from(code),
-            Err(err) => {
-                eprintln!("{err}");
-                ExitCode::from(3)
-            }
+            Err(err) => fail(err),
         },
     }
+}
+
+fn fail(err: impl std::fmt::Display) -> ExitCode {
+    let mut stderr = io::stderr();
+    let _ = writeln!(stderr, "{err}");
+    let _ = stderr.flush();
+    ExitCode::from(3)
 }
 
 fn prepare_cmd(kind: PrepareKind) -> Result<u8, Box<dyn std::error::Error>> {
