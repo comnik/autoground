@@ -223,7 +223,11 @@ fn check_dash_reads_stdin_before_the_oracle() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(out.status.code(), Some(3), "{stderr}");
-    assert!(stderr.contains("TYPESAFE_API_KEY"), "{stderr}");
+    assert!(stderr.contains("TYPESAFE_API_KEY is not set"), "{stderr}");
+    assert!(
+        stderr.contains("https://docs.typesafe.ai/introduction"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("`$` needs a file"), "{stderr}");
 }
 

@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# Link skills/*/ into each detected coding agent's skills directory.
+# Install skills/*/ into each detected coding agent's skills directory.
 #
 # Usage:
-#   ./install.sh            symlink into detected agents
+#   ./install.sh            copy each skill; references/ is a copy of docs/brief
 #   ./install.sh --all      also install for agents that are not detected
-#   ./install.sh --copy     copy each skill directory instead of symlinking
 #   ./install.sh --dry-run  print the actions without writing
 #
-# skills/*/references point at docs/brief, so all installed skills read one copy of the
-# language docs. --copy snapshots those files into each skill, because the relative link
-# only resolves here.
+# In this repo, skills/*/references is a link to docs/brief. The installed skill gets
+# its own copy of those files, so it keeps working after this checkout moves.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,25 +16,21 @@ BRIEF_DOCS="$ROOT/docs/brief"
 BRIEF_LINK="../../docs/brief"
 
 ALL=0
-COPY=0
 DRY=0
 
 usage() {
   cat <<'EOF'
-Usage: ./install.sh [--all] [--copy] [--dry-run]
+Usage: ./install.sh [--all] [--dry-run]
 
-Link each skills/<name>/ directory that contains a SKILL.md into the skills
-directory of every detected agent. Edits in this repo apply immediately.
-Re-run after moving the repo. --copy writes a snapshot instead of a link.
-
-references/ maps to docs/brief. --copy snapshots those files into each skill.
+Copy each skills/<name>/ directory that contains a SKILL.md into the skills
+directory of every detected agent. references/ is a copy of docs/brief.
+Re-run after editing a skill or docs/brief.
 EOF
 }
 
 for arg in "$@"; do
   case "$arg" in
     --all) ALL=1 ;;
-    --copy) COPY=1 ;;
     --dry-run) DRY=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
@@ -91,7 +85,7 @@ for name in "${skills[@]}"; do
   fi
 done
 
-for name in brief verify ground; do
+for name in brief verify; do
   if [ ! -f "$SKILLS_DIR/$name/SKILL.md" ]; then
     echo "Warning: skills/$name/SKILL.md is missing." >&2
   fi
@@ -161,23 +155,10 @@ place() { # $1 dest root, $2 skill name
     share=0
   fi
 
-  if [ -L "$dest" ]; then
-    :
-  elif [ -e "$dest" ]; then
-    if [ "$COPY" != 1 ]; then
-      echo "Warning: $dest exists and is not a symlink; left it in place." >&2
-      return
-    fi
-  fi
-
   if [ "$DRY" = 1 ]; then
-    if [ "$COPY" = 1 ]; then
-      echo "copy $src -> $dest"
-      if [ "$share" = 1 ]; then
-        echo "copy $BRIEF_DOCS -> $dest/references"
-      fi
-    else
-      echo "link $dest -> $src"
+    echo "copy $src -> $dest"
+    if [ "$share" = 1 ]; then
+      echo "copy $BRIEF_DOCS -> $dest/references"
     fi
     return
   fi
@@ -186,20 +167,16 @@ place() { # $1 dest root, $2 skill name
   if [ -L "$dest" ]; then
     rm "$dest"
   fi
-  if [ "$COPY" = 1 ]; then
-    # A real references/ directory would make cp keep the source symlink out.
-    if [ "$share" = 1 ]; then
-      rm -rf "$dest/references"
-    fi
-    mkdir -p "$dest"
-    cp -R "$src/." "$dest/"
-    if [ "$share" = 1 ]; then
-      rm -rf "$dest/references"
-      mkdir -p "$dest/references"
-      cp -R "$BRIEF_DOCS/." "$dest/references/"
-    fi
-  else
-    ln -s "$src" "$dest"
+  # A real references/ directory would make cp keep the source symlink out.
+  if [ "$share" = 1 ]; then
+    rm -rf "$dest/references"
+  fi
+  mkdir -p "$dest"
+  cp -R "$src/." "$dest/"
+  if [ "$share" = 1 ]; then
+    rm -rf "$dest/references"
+    mkdir -p "$dest/references"
+    cp -R "$BRIEF_DOCS/." "$dest/references/"
   fi
 }
 
@@ -255,10 +232,7 @@ printf '  %s\n' "${INSTALLED[@]}"
 echo
 if [ "$DRY" = 1 ]; then
   echo "Dry run. Nothing written."
-elif [ "$COPY" = 1 ]; then
-  echo "Copied. Re-run ./install.sh --copy after editing a skill or docs/brief."
-  echo "references/ is a copy of docs/brief."
 else
-  echo "Linked to $SKILLS_DIR. Edits apply immediately. Re-run ./install.sh after moving this repo."
-  echo "references/ symlinks to docs/brief."
+  echo "Copied. Re-run ./install.sh after editing a skill or docs/brief."
+  echo "references/ is a copy of docs/brief."
 fi

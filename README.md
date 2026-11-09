@@ -29,23 +29,22 @@ interesting possibilities to explore over time.
 > *autoground is little more than an experiment at this point.*
 
 
-## Install
+## Installation prompt
 
-```shell
-git clone git@github.com:comnik/autoground.git
-cd autoground
-make install
 ```
+Please clone https://github.com/comnik/autoground.git and run `make install` from the repo root. This will install the autoground binary itself, along with the `/brief` and `/verify` skills.
 
-This will install the autoground binary itself, along with the `/brief` skill to get you
-started.
+If a [TypeSafe API key](https://docs.typesafe.ai/introduction) is not available as `TYPESAFE_API_KEY` in the environment, then prompt the user to set one up. Explain to the user that autoground incurs API usage. By default, all commands are capped at a budget of 1 cent.
+
+Confirm that everything is working, by validating this README via `autoground check README.md` from the repo root.
+
+Conclude by listing the installed skills and offering to the user to try running `autoground check README.md` on their own, just to see it in action once.
+```
 
 > [!NOTE]
 > Using autoground requires a [TypeSafe API key](https://docs.typesafe.ai/introduction) to
-> be available as `TYPESAFE_API_KEY` in your environment.
-
-Set your TypeSafe key in the environment. Every use of autoground incurs API usage. By
-default, all commands are capped at a budget of 1 cent.
+> be available as `TYPESAFE_API_KEY` in your environment. Every use of autoground incurs API
+> usage. By default, all commands are capped at a budget of 1 cent.
 
 <!--
 ```brief
@@ -59,11 +58,8 @@ default, all commands are capped at a budget of 1 cent.
 ```
 -->
 
-```shell
-export TYPESAFE_API_KEY=apikey_...
-```
-
-Confirm that everything is working, by validating this README:
+After the installation, run `autoground check README.md` if you want to see autoground in
+action for yourself.
 
 ![README Demo](docs/assets/vhs/readme.gif)
 
