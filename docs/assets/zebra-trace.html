@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zebra proof replay</title>
+<style>
+  :root {
+    --bg: #fbfaf7;
+    --fg: #1d1d1f;
+    --muted: #707075;
+    --faint: #e4e2dc;
+    --line: #b9b6ae;
+    --surface: #ffffff;
+    --ok: #1f8a4c;
+    --ok-soft: #9fd4b4;
+    --live: #2f5fd0;
+    --hl: #c2410c;
+    --red: #d9533f;
+    --green: #3f9a57;
+    --ivory: #f1e9cf;
+    --yellow: #f2c94c;
+    --blue: #3f6fd8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17171a;
+      --fg: #ececef;
+      --muted: #9a9aa2;
+      --faint: #2c2c31;
+      --line: #55555c;
+      --surface: #222227;
+      --ok: #5fd08f;
+      --ok-soft: #2f6b47;
+      --live: #8fb0ff;
+      --hl: #fb923c;
+      --red: #c8503f;
+      --green: #3f8f55;
+      --ivory: #d9d0b4;
+      --yellow: #d9b23f;
+      --blue: #4a72cc;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17171a;
+    --fg: #ececef;
+    --muted: #9a9aa2;
+    --faint: #2c2c31;
+    --line: #55555c;
+    --surface: #222227;
+    --ok: #5fd08f;
+    --ok-soft: #2f6b47;
+    --live: #8fb0ff;
+    --hl: #fb923c;
+    --red: #c8503f;
+    --green: #3f8f55;
+    --ivory: #d9d0b4;
+    --yellow: #d9b23f;
+    --blue: #4a72cc;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .frame { max-width: 860px; margin: 0 auto; padding: 16px; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+  .head {
+    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline;
+    gap: 4px 16px; font-size: 13px; color: var(--muted);
+  }
+  .head b { color: var(--fg); font-weight: 600; }
+  .stats { font-variant-numeric: tabular-nums; }
+
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  svg text { fill: var(--fg); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  svg .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .axis text, .label { fill: var(--muted); font-size: 11px; }
+  .axis line { stroke: var(--faint); }
+
+  .asm { fill: var(--line); transition: fill 300ms; }
+  .asm.hl { fill: var(--hl); }
+  .bar { fill: var(--live); opacity: .55; }
+  .bar.done { fill: var(--ok-soft); opacity: 1; transition: fill 400ms; }
+  .bar.fact { fill: var(--ok); }
+  .bar.hl { fill: var(--hl); }
+  .playhead { stroke: var(--fg); stroke-width: 1; opacity: .35; }
+  .link { fill: none; stroke: var(--hl); stroke-width: 1.2; opacity: .8; }
+
+  .roof { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; transition: fill 600ms; }
+  .body { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; transition: fill 600ms; }
+  .num { font-size: 15px; font-weight: 600; }
+  .cell rect { fill: var(--surface); stroke: var(--faint); stroke-width: 1; transition: fill 500ms, stroke 500ms; }
+  .cell text { font-size: 13.5px; opacity: 0; transition: opacity 400ms; }
+  .cell.known text { opacity: 1; }
+  .cell.given text { fill: var(--muted); }
+  .cell.fresh rect { fill: var(--ok-soft); stroke: var(--ok); }
+  .cell.unknown text { opacity: 1; fill: var(--line); }
+  .cell.answer rect { stroke: var(--hl); stroke-width: 2.5; }
+
+  .ticker { min-height: 7.2em; margin-top: 8px; }
+  .claim { margin: 0; font-weight: 600; transition: opacity 200ms; }
+  .claim .tick { color: var(--ok); margin-right: 6px; }
+  .claim .conf { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
+  .from { margin: 4px 0 0; padding: 0; list-style: none; font-size: 13px; color: var(--muted); }
+  .from li::before { content: "← "; color: var(--hl); }
+  .from .mono { font-size: 12px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="head">
+    <span><b class="mono">zebra.brief</b> · replayed from the trace, slowed down <span id="slow"></span></span>
+    <span class="stats mono" id="stats"></span>
+  </div>
+
+  <svg viewBox="0 0 900 500" role="img" aria-labelledby="svg-title">
+    <title id="svg-title">Replay of autoground checking the zebra puzzle: oracle requests run in waves as premises are discharged, and the five houses fill in until the Japanese is shown to own the zebra.</title>
+    <g id="gantt"></g>
+    <g id="links"></g>
+    <g id="houses"></g>
+  </svg>
+
+  <div class="ticker" aria-live="polite">
+    <p class="claim" id="claim"></p>
+    <ul class="from" id="from"></ul>
+  </div>
+</div>
+
+<script type="application/json" id="data">{"claims": 73, "assumptions": [{"n": "frame-houses", "t": "The five houses stand in a row and are numbered 1 to 5 from left to right; 'immediately to the right of' house k means house k+1, and 'next to' house k means house k-1 or house k+1."}, {"n": "u-colour", "t": "The colours are exactly red, green, ivory, yellow and blue, five different colours. Each of them belongs to exactly one of the five houses, and each house has exactly one of them: whenever a house has one colour, it has none of the other colours, and a colour that one house has is had by no other house."}, {"n": "u-nat", "t": "The Englishman, the Spaniard, the Ukrainian, the Norwegian and the Japanese are five different men. Each of them lives in exactly one of the five houses, and each house is home to exactly one of them: no two of them share a house, and every house is the home of one of them."}, {"n": "u-drink", "t": "The drinks are exactly coffee, tea, milk, orange juice and water, five different drinks. Each of them is drunk in exactly one of the five houses, and each house has exactly one of them: whenever a drink is drunk in a house, none of the other drinks is drunk in that house, and a drink that is drunk in one house is not drunk in any other house."}, {"n": "u-smoke", "t": "The cigarette brands are exactly Old Gold, Kools, Chesterfields, Lucky Strike and Parliaments, five different brands. Each of them is smoked in exactly one of the five houses, and each house has exactly one of them: whenever a brand is smoked in a house, none of the other brands is smoked in that house, and a brand that is smoked in one house is not smoked in any other house."}, {"n": "u-pet", "t": "The pets are exactly dog, snails, fox, horse and zebra, five different animals. Each of them is kept in exactly one of the five houses, and each house keeps exactly one of them: whenever a pet is kept in a house, none of the other pets is kept in that house, and a pet that is kept in one house is not kept in any other house."}, {"n": "frame-same-house", "t": "The five men are the Englishman, the Spaniard, the Ukrainian, the Norwegian and the Japanese. Whatever a man drinks is drunk in the house where he lives, whatever he smokes is smoked in the house where he lives, and whatever pet he owns is kept in the house where he lives; so the drink, brand and pet of one man all belong to the same house."}, {"n": "c-english-red", "t": "The Englishman lives in the red house."}, {"n": "c-spaniard-dog", "t": "The Spaniard owns the dog."}, {"n": "c-green-coffee", "t": "Coffee is drunk in the green house."}, {"n": "c-ukrainian-tea", "t": "The Ukrainian drinks tea."}, {"n": "c-green-right-ivory", "t": "The green house is immediately to the right of the ivory house."}, {"n": "c-oldgold-snails", "t": "The Old Gold smoker owns snails."}, {"n": "c-kools-yellow", "t": "Kools are smoked in the yellow house."}, {"n": "c-milk-middle", "t": "Milk is drunk in house 3."}, {"n": "c-norwegian-first", "t": "The Norwegian lives in house 1."}, {"n": "c-chesterfield-fox", "t": "The Chesterfield smoker lives next to the house with the fox."}, {"n": "c-kools-horse", "t": "The Kools house is next to the house where the horse is kept."}, {"n": "c-lucky-oj", "t": "The Lucky Strike smoker drinks orange juice."}, {"n": "c-japanese-parliament", "t": "The Japanese smokes Parliaments."}, {"n": "c-norwegian-blue", "t": "The Norwegian lives next to the blue house."}], "steps": [{"s": 0, "e": 246, "p": "Only Parliaments are smoked in the house where the Japanese lives, and no other brand.", "c": 0.89, "d": [6], "a": [4]}, {"s": 0, "e": 252, "p": "Tea is drunk in the house where the Ukrainian lives.", "c": 1.0, "d": [], "a": [10, 6]}, {"s": 0, "e": 274, "p": "The house where Old Gold is smoked keeps snails.", "c": 0.98, "d": [], "a": [12, 6]}, {"s": 0, "e": 281, "p": "The house where the Spaniard lives keeps the dog.", "c": 1.0, "d": [], "a": [8, 6]}, {"s": 0, "e": 289, "p": "Tea is drunk in the house where the Ukrainian lives and in no other house.", "c": 0.97, "d": [1], "a": [3]}, {"s": 1, "e": 224, "p": "The green house is house 3, 4 or 5.", "c": 1.0, "d": [13, 16], "a": []}, {"s": 1, "e": 233, "p": "Parliaments are smoked in the house where the Japanese lives.", "c": 1.0, "d": [], "a": [19, 6]}, {"s": 1, "e": 244, "p": "Orange juice is drunk in the house where Lucky Strike is smoked.", "c": 0.98, "d": [], "a": [18, 6]}, {"s": 1, "e": 244, "p": "House 2 is blue.", "c": 0.97, "d": [], "a": [15, 20, 0]}, {"s": 1, "e": 244, "p": "The ivory house is the house immediately to the left of the green house, so its number is one less than the green house's number.", "c": 1.0, "d": [], "a": [11, 0]}, {"s": 1, "e": 254, "p": "The ivory house is house 2, 3 or 4.", "c": 0.98, "d": [5, 9], "a": []}, {"s": 1, "e": 263, "p": "House 1 is not green.", "c": 0.98, "d": [5], "a": []}, {"s": 1, "e": 263, "p": "The ivory house is house 3 or house 4.", "c": 1.0, "d": [10, 17], "a": []}, {"s": 1, "e": 265, "p": "The green house is house 2, 3, 4 or 5.", "c": 1.0, "d": [18], "a": [11]}, {"s": 1, "e": 274, "p": "Blue is had by no house other than house 2.", "c": 0.97, "d": [8], "a": [1]}, {"s": 1, "e": 274, "p": "The red house is not house 2.", "c": 1.0, "d": [8], "a": [1]}, {"s": 1, "e": 274, "p": "House 2 is not green.", "c": 1.0, "d": [8], "a": [1]}, {"s": 1, "e": 274, "p": "House 2 is not ivory.", "c": 1.0, "d": [8], "a": [1]}, {"s": 1, "e": 282, "p": "Every house that is immediately to the right of some house is house 2, 3, 4 or 5.", "c": 1.0, "d": [], "a": [0]}, {"s": 1, "e": 282, "p": "The houses next to house 2 are house 1 and house 3.", "c": 1.0, "d": [], "a": [0]}, {"s": 1, "e": 282, "p": "The only house next to house 1 is house 2.", "c": 0.97, "d": [], "a": [0]}, {"s": 225, "e": 499, "p": "The Englishman does not live in house 1.", "c": 0.98, "d": [], "a": [15, 2]}, {"s": 225, "e": 499, "p": "The house where the Ukrainian lives is not house 1.", "c": 0.97, "d": [], "a": [15, 2]}, {"s": 225, "e": 499, "p": "The Norwegian does not live in house 2.", "c": 1.0, "d": [], "a": [15, 2]}, {"s": 234, "e": 470, "p": "House 1 is not red, because the red house is the Englishman's and he does not live in house 1.", "c": 1.0, "d": [21], "a": [7, 1]}, {"s": 245, "e": 452, "p": "House 1 is not ivory.", "c": 0.98, "d": [12], "a": []}, {"s": 245, "e": 481, "p": "House 1 is yellow.", "c": 0.97, "d": [24, 11, 25, 27], "a": [1]}, {"s": 245, "e": 486, "p": "House 1 is not blue.", "c": 1.0, "d": [8, 14], "a": [1]}, {"s": 248, "e": 511, "p": "Kools are smoked in house 1, which is the yellow house.", "c": 0.94, "d": [26], "a": [13]}, {"s": 252, "e": 497, "p": "Kools are smoked in house 1.", "c": 1.0, "d": [28], "a": []}, {"s": 256, "e": 488, "p": "House 1 is the Kools house.", "c": 0.97, "d": [29], "a": []}, {"s": 266, "e": 484, "p": "The horse is kept in a house next to house 1.", "c": 0.97, "d": [30], "a": [17]}, {"s": 266, "e": 497, "p": "The horse is kept in house 2, the only house next to house 1.", "c": 0.98, "d": [31, 20], "a": []}, {"s": 266, "e": 523, "p": "The horse is kept in house 2.", "c": 1.0, "d": [32], "a": []}, {"s": 274, "e": 508, "p": "The Norwegian smokes Kools, not Lucky Strike, so he does not drink orange juice.", "c": 0.95, "d": [29], "a": [15, 18, 4, 6]}, {"s": 274, "e": 515, "p": "Milk is not drunk in house 1.", "c": 1.0, "d": [], "a": [14, 3]}, {"s": 274, "e": 515, "p": "Milk is drunk only in house 3.", "c": 0.98, "d": [], "a": [14, 3]}, {"s": 282, "e": 547, "p": "Coffee is not drunk in house 1.", "c": 0.94, "d": [11], "a": [9, 3]}, {"s": 283, "e": 524, "p": "Tea is not drunk in house 1.", "c": 0.94, "d": [1, 22], "a": [3]}, {"s": 290, "e": 515, "p": "Orange juice is not drunk in house 1.", "c": 1.0, "d": [34], "a": [15, 6]}, {"s": 453, "e": 668, "p": "Water is drunk in house 1.", "c": 1.0, "d": [35, 37, 38, 39], "a": [3]}, {"s": 471, "e": 743, "p": "The Englishman does not live in house 2.", "c": 0.98, "d": [15], "a": [7]}, {"s": 481, "e": 735, "p": "The dog is not kept in house 2.", "c": 0.94, "d": [33], "a": [5]}, {"s": 481, "e": 735, "p": "Snails are not kept in house 2.", "c": 0.97, "d": [33], "a": [5]}, {"s": 485, "e": 728, "p": "The Spaniard does not live in house 2.", "c": 0.91, "d": [3, 42], "a": []}, {"s": 487, "e": 778, "p": "The man who lives in house 2 is the Ukrainian or the Japanese.", "c": 0.95, "d": [23, 41, 44], "a": [2]}, {"s": 497, "e": 750, "p": "Neither water nor milk is drunk in house 2.", "c": 0.97, "d": [40], "a": [14, 3]}, {"s": 499, "e": 713, "p": "The drink of house 2 is tea or orange juice.", "c": 0.97, "d": [46, 48], "a": [3]}, {"s": 499, "e": 728, "p": "House 2 is not the house where coffee is drunk.", "c": 0.95, "d": [16], "a": [9]}, {"s": 500, "e": 728, "p": "The Japanese smokes Parliaments, not Lucky Strike.", "c": 1.0, "d": [], "a": [19, 4]}, {"s": 510, "e": 753, "p": "The Japanese does not drink orange juice, because the orange juice drinker is the Lucky Strike smoker and the Japanese smokes Parliaments.", "c": 1.0, "d": [49], "a": [18, 3, 6]}, {"s": 517, "e": 911, "p": "The house where the Japanese lives is not the house where the Ukrainian lives.", "c": 1.0, "d": [], "a": [2]}, {"s": 517, "e": 911, "p": "The house where the Englishman lives is not the house where the Ukrainian lives.", "c": 1.0, "d": [], "a": [2]}, {"s": 517, "e": 911, "p": "The house where the Englishman lives is not the house where the Spaniard lives.", "c": 1.0, "d": [], "a": [2]}, {"s": 518, "e": 753, "p": "The house where the Japanese lives is not the house where tea is drunk.", "c": 1.0, "d": [4, 51], "a": []}, {"s": 518, "e": 761, "p": "The Japanese does not drink tea.", "c": 0.95, "d": [54], "a": [6]}, {"s": 529, "e": 742, "p": "The Japanese does not live in house 2.", "c": 0.98, "d": [57, 47], "a": [6]}, {"s": 529, "e": 748, "p": "The Japanese does not drink tea, and the Japanese does not drink orange juice.", "c": 1.0, "d": [55, 50], "a": []}, {"s": 547, "e": 766, "p": "The Ukrainian lives in house 2.", "c": 0.98, "d": [45, 56], "a": []}, {"s": 670, "e": 908, "p": "Tea is drunk in house 2.", "c": 1.0, "d": [58, 1], "a": []}, {"s": 715, "e": 947, "p": "Old Gold is not smoked in house 1.", "c": 0.98, "d": [29], "a": [4]}, {"s": 729, "e": 938, "p": "House 2 is not the house where Old Gold is smoked.", "c": 0.98, "d": [2, 43], "a": []}, {"s": 729, "e": 965, "p": "Old Gold is smoked in neither house 1 nor house 2.", "c": 0.98, "d": [60, 61], "a": []}, {"s": 729, "e": 971, "p": "Old Gold is smoked neither in the house where the Norwegian lives nor in the house where the Ukrainian lives.", "c": 1.0, "d": [62, 58], "a": [15]}, {"s": 737, "e": 987, "p": "Snails are not kept in the house where the Spaniard lives.", "c": 0.95, "d": [3], "a": [5]}, {"s": 747, "e": 964, "p": "Old Gold is not smoked in the house where the Japanese lives.", "c": 1.0, "d": [0], "a": [4]}, {"s": 747, "e": 977, "p": "The house where the Spaniard lives is not the house where Old Gold is smoked.", "c": 0.97, "d": [64, 2], "a": []}, {"s": 750, "e": 1018, "p": "Old Gold is smoked in the house where the Englishman lives.", "c": 1.0, "d": [69], "a": [6]}, {"s": 751, "e": 988, "p": "The Old Gold smoker is not the Norwegian, the Ukrainian, the Spaniard or the Japanese, so he is the Englishman.", "c": 0.95, "d": [63, 66, 65], "a": [2]}, {"s": 754, "e": 995, "p": "The Englishman smokes Old Gold.", "c": 0.98, "d": [68], "a": []}, {"s": 754, "e": 1004, "p": "The Norwegian smokes Kools, not Lucky Strike.", "c": 0.98, "d": [29], "a": [15, 4, 6]}, {"s": 762, "e": 976, "p": "The Englishman smokes Old Gold, not Lucky Strike.", "c": 1.0, "d": [69], "a": [4]}, {"s": 768, "e": 980, "p": "The Ukrainian drinks tea, not orange juice, so he does not smoke Lucky Strike.", "c": 0.98, "d": [], "a": [10, 18, 3, 6]}, {"s": 779, "e": 1018, "p": "None of the Norwegian, the Englishman, the Ukrainian and the Japanese smokes Lucky Strike.", "c": 0.97, "d": [70, 71, 72, 49], "a": []}, {"s": 909, "e": 1157, "p": "The Spaniard smokes Lucky Strike.", "c": 0.88, "d": [73], "a": [2]}, {"s": 913, "e": 1135, "p": "Lucky Strike is smoked in the house where the Spaniard lives.", "c": 1.0, "d": [74], "a": [6]}, {"s": 939, "e": 1144, "p": "Orange juice is drunk in the house where the Spaniard lives.", "c": 0.98, "d": [75, 7], "a": []}, {"s": 948, "e": 1158, "p": "The house where the Englishman lives is not the house where water is drunk.", "c": 0.97, "d": [40, 21], "a": []}, {"s": 965, "e": 1188, "p": "The house where the Englishman lives is not the house where tea is drunk.", "c": 0.98, "d": [4, 52], "a": []}, {"s": 966, "e": 1193, "p": "Orange juice is drunk in the house where the Spaniard lives and in no other house.", "c": 0.98, "d": [76], "a": [3]}, {"s": 972, "e": 1199, "p": "The house where the Englishman lives is not the house where orange juice is drunk.", "c": 1.0, "d": [79, 53], "a": []}, {"s": 978, "e": 1199, "p": "The house where the Englishman lives is red, so it is not green.", "c": 1.0, "d": [], "a": [7, 1]}, {"s": 979, "e": 1230, "p": "The house where the Englishman lives is not the house where coffee is drunk.", "c": 0.97, "d": [81], "a": [9]}, {"s": 980, "e": 1198, "p": "Milk is drunk in the house where the Englishman lives.", "c": 0.97, "d": [77, 78, 80, 82], "a": [3]}, {"s": 988, "e": 1206, "p": "The Englishman lives in house 3.", "c": 0.91, "d": [83, 36], "a": []}, {"s": 994, "e": 1244, "p": "House 3 is red.", "c": 1.0, "d": [84], "a": [7]}, {"s": 997, "e": 1241, "p": "The ivory house is not house 3, which is red.", "c": 1.0, "d": [85], "a": [1]}, {"s": 1004, "e": 1216, "p": "House 4 is ivory.", "c": 1.0, "d": [12, 86], "a": []}, {"s": 1019, "e": 1244, "p": "House 5 is green.", "c": 1.0, "d": [89], "a": []}, {"s": 1019, "e": 1251, "p": "The green house is the house immediately to the right of house 4, which is house 5.", "c": 0.95, "d": [87], "a": [11, 0]}, {"s": 1136, "e": 1344, "p": "Coffee is drunk in house 5.", "c": 0.97, "d": [88], "a": [9]}, {"s": 1145, "e": 1394, "p": "The Norwegian, the Ukrainian and the Englishman live in houses 1, 2 and 3 respectively.", "c": 1.0, "d": [58, 84], "a": [15]}, {"s": 1160, "e": 1380, "p": "The Spaniard does not live in house 1, 2 or 3.", "c": 0.95, "d": [91], "a": [2]}, {"s": 1161, "e": 1398, "p": "House 5 is not the house where orange juice is drunk.", "c": 1.0, "d": [90], "a": [3]}, {"s": 1190, "e": 1433, "p": "House 5 is not the house where the Spaniard lives, because orange juice is drunk in the Spaniard's house and not in house 5.", "c": 0.86, "d": [76, 93], "a": []}, {"s": 1200, "e": 1450, "p": "The Spaniard lives in none of houses 1, 2, 3 and 5.", "c": 1.0, "d": [92, 94], "a": []}, {"s": 1200, "e": 1479, "p": "The Spaniard lives in house 4.", "c": 0.98, "d": [95], "a": [2, 0]}, {"s": 1201, "e": 1416, "p": "The Japanese does not live in house 1, 2, 3 or 4.", "c": 0.98, "d": [91, 96], "a": [2]}, {"s": 1201, "e": 1428, "p": "The Japanese lives in house 5.", "c": 0.95, "d": [97], "a": [2, 0]}, {"s": 1213, "e": 1429, "p": "The dog is kept in house 4.", "c": 1.0, "d": [96, 3], "a": []}, {"s": 1218, "e": 1475, "p": "Old Gold is smoked in house 3.", "c": 0.98, "d": [67, 84], "a": []}, {"s": 1230, "e": 1475, "p": "Snails are kept in house 3.", "c": 1.0, "d": [100, 2], "a": []}, {"s": 1243, "e": 1465, "p": "Lucky Strike is smoked in house 4.", "c": 1.0, "d": [75, 96], "a": []}, {"s": 1246, "e": 1491, "p": "Parliaments are smoked in house 5.", "c": 0.97, "d": [6, 98], "a": []}, {"s": 1247, "e": 1465, "p": "Kools, Old Gold, Lucky Strike and Parliaments are smoked in houses 1, 3, 4 and 5 respectively.", "c": 1.0, "d": [29, 100, 102, 103], "a": []}, {"s": 1252, "e": 1493, "p": "Chesterfields are not smoked in house 1, 3, 4 or 5.", "c": 1.0, "d": [104], "a": [4]}, {"s": 1345, "e": 1585, "p": "Chesterfields are smoked in house 2.", "c": 0.95, "d": [105], "a": [4]}, {"s": 1381, "e": 1624, "p": "The Chesterfield smoker lives in house 2.", "c": 0.98, "d": [106], "a": [4]}, {"s": 1395, "e": 1608, "p": "The fox is kept in a house next to house 2.", "c": 0.98, "d": [107], "a": [16]}, {"s": 1400, "e": 1606, "p": "The fox is kept in house 1 or house 3.", "c": 0.98, "d": [108, 19], "a": []}, {"s": 1417, "e": 1671, "p": "The fox is not kept in house 3.", "c": 0.97, "d": [101], "a": [5]}, {"s": 1431, "e": 1651, "p": "Houses 1, 2, 3 and 4 keep the fox, the horse, the snails and the dog respectively.", "c": 1.0, "d": [112, 33, 101, 99], "a": []}, {"s": 1431, "e": 1692, "p": "The fox is kept in house 1.", "c": 1.0, "d": [109, 110], "a": []}, {"s": 1440, "e": 1651, "p": "The zebra is not kept in house 1, 2, 3 or 4.", "c": 0.98, "d": [111], "a": [5]}, {"s": 1450, "e": 1671, "p": "The zebra is kept in house 5.", "c": 0.95, "d": [113], "a": [5, 0]}, {"s": 1466, "e": 1686, "p": "The Japanese owns the zebra.", "c": 0.98, "d": [114, 98], "a": [6]}]}</script>
+<script>
+(() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const SLOW = 20;
+  const HOLD = 1300;
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const theme = new URLSearchParams(location.search).get('theme');
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+
+  const { claims, assumptions, steps } = JSON.parse(document.getElementById('data').textContent);
+  const END = Math.max(...steps.map(s => s.e));
+  const THEOREM = 'The Japanese owns the zebra.';
+
+  const COLOURS = { red: 'var(--red)', green: 'var(--green)', ivory: 'var(--ivory)', yellow: 'var(--yellow)', blue: 'var(--blue)' };
+  const ROWS = ['nationality', 'drink', 'smoke', 'pet'];
+  const FACTS = {
+    'House 1 is yellow.': ['colour', 1, 'yellow'],
+    'House 2 is blue.': ['colour', 2, 'blue'],
+    'House 3 is red.': ['colour', 3, 'red'],
+    'House 4 is ivory.': ['colour', 4, 'ivory'],
+    'House 5 is green.': ['colour', 5, 'green'],
+    'The Ukrainian lives in house 2.': ['nationality', 2, 'Ukrainian'],
+    'The Englishman lives in house 3.': ['nationality', 3, 'Englishman'],
+    'The Spaniard lives in house 4.': ['nationality', 4, 'Spaniard'],
+    'The Japanese lives in house 5.': ['nationality', 5, 'Japanese'],
+    'Water is drunk in house 1.': ['drink', 1, 'water'],
+    'Tea is drunk in house 2.': ['drink', 2, 'tea'],
+    'Coffee is drunk in house 5.': ['drink', 5, 'coffee'],
+    'Kools are smoked in house 1.': ['smoke', 1, 'Kools'],
+    'Chesterfields are smoked in house 2.': ['smoke', 2, 'Chesterfields'],
+    'Old Gold is smoked in house 3.': ['smoke', 3, 'Old Gold'],
+    'Lucky Strike is smoked in house 4.': ['smoke', 4, 'Lucky Strike'],
+    'Parliaments are smoked in house 5.': ['smoke', 5, 'Parliaments'],
+    'The fox is kept in house 1.': ['pet', 1, 'fox'],
+    'The horse is kept in house 2.': ['pet', 2, 'horse'],
+    'Snails are kept in house 3.': ['pet', 3, 'snails'],
+    'The dog is kept in house 4.': ['pet', 4, 'dog'],
+    'The zebra is kept in house 5.': ['pet', 5, 'zebra'],
+  };
+  const GIVENS = [['nationality', 1, 'Norwegian'], ['drink', 3, 'milk']];
+
+  // Layout
+  const GX0 = 120, GX1 = 880, GY0 = 14, LANE = 10;
+  const x = t => GX0 + (t / END) * (GX1 - GX0);
+  const HX = i => 120 + (i - 0.5) * 152;
+  const HY = 300, ROWY = 375, ROWH = 30;
+
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function text(str, attrs, parent) {
+    const t = el('text', attrs, parent);
+    t.textContent = str;
+    return t;
+  }
+
+  const lanes = [];
+  for (const s of steps) {
+    let i = lanes.findIndex(end => end <= s.s);
+    if (i < 0) { i = lanes.length; lanes.push(0); }
+    lanes[i] = s.e;
+    s.lane = i;
+    s.y = GY0 + i * LANE;
+  }
+  const GY1 = GY0 + lanes.length * LANE;
+
+  const gantt = document.getElementById('gantt');
+  const links = document.getElementById('links');
+  const houses = document.getElementById('houses');
+
+  const axis = el('g', { class: 'axis' }, gantt);
+  for (let t = 0; t <= END; t += 250) {
+    el('line', { x1: x(t), x2: x(t), y1: GY0 - 6, y2: GY1 + 2 }, axis);
+    text(`${(t / 1000).toFixed(2)} s`, { x: x(t), y: GY1 + 16, 'text-anchor': 'middle' }, axis);
+  }
+  text('assumptions', { x: 60, y: GY1 + 16, 'text-anchor': 'middle', class: 'label' }, gantt);
+
+  const asmStep = (GY1 - GY0) / assumptions.length;
+  assumptions.forEach((a, i) => {
+    a.y = GY0 + 3 + i * asmStep;
+    a.el = el('rect', { x: 52, y: a.y - 3, width: 16, height: 6, rx: 3, class: 'asm' }, gantt);
+  });
+
+  steps.forEach(s => {
+    s.el = el('rect', { x: x(s.s), y: s.y, width: 0, height: LANE - 3, rx: (LANE - 3) / 2, class: 'bar' }, gantt);
+    s.fact = FACTS[s.p] || (s.p === THEOREM ? ['theorem'] : null);
+  });
+  const playhead = el('line', { y1: GY0 - 8, y2: GY1 + 4, class: 'playhead' }, gantt);
+
+  const cells = {};
+  const roofs = [], bodies = [];
+  text('colour', { x: 0, y: HY + 24, class: 'label' }, houses);
+  ROWS.forEach((r, j) => text(r, { x: 0, y: ROWY + j * ROWH + 4, class: 'label', 'dominant-baseline': 'central' }, houses));
+  for (let h = 1; h <= 5; h++) {
+    const cx = HX(h);
+    roofs[h] = el('path', { d: `M${cx - 62},${HY} L${cx},${HY - 26} L${cx + 62},${HY} Z`, class: 'roof' }, houses);
+    bodies[h] = el('rect', { x: cx - 54, y: HY, width: 108, height: 44, class: 'body' }, houses);
+    text(h, { x: cx, y: HY + 23, class: 'num', 'text-anchor': 'middle', 'dominant-baseline': 'central' }, houses);
+    ROWS.forEach((r, j) => {
+      const g = el('g', { class: 'cell' }, houses);
+      el('rect', { x: cx - 70, y: ROWY + j * ROWH - 11, width: 140, height: ROWH - 4, rx: 6 }, g);
+      const t = text('', { x: cx, y: ROWY + j * ROWH + 2, 'text-anchor': 'middle', 'dominant-baseline': 'central' }, g);
+      cells[`${r}${h}`] = { g, t };
+    });
+  }
+
+  function setCell(row, h, value, kind) {
+    if (row === 'colour') {
+      roofs[h].style.fill = COLOURS[value];
+      bodies[h].style.fill = COLOURS[value];
+      return;
+    }
+    const c = cells[`${row}${h}`];
+    c.t.textContent = value;
+    c.g.setAttribute('class', `cell known ${kind || ''}`);
+    if (kind === 'fresh') setTimeout(() => c.g.classList.remove('fresh'), reduce ? 0 : 1200);
+  }
+
+  const claimEl = document.getElementById('claim');
+  const fromEl = document.getElementById('from');
+  const statsEl = document.getElementById('stats');
+  document.getElementById('slow').textContent = `${SLOW}×`;
+
+  function curve(x1, y1, x2, y2) {
+    const dx = Math.max(30, Math.abs(x2 - x1) / 2);
+    return `M${x1},${y1 + LANE / 2 - 1.5} C${x1 + dx},${y1 + LANE / 2 - 1.5} ${x2 - dx},${y2 + LANE / 2 - 1.5} ${x2},${y2 + LANE / 2 - 1.5}`;
+  }
+
+  let lit = [];
+  function focus(s) {
+    lit.forEach(e => e.classList.remove('hl'));
+    links.replaceChildren();
+    lit = [s.el];
+    s.d.forEach(i => {
+      const p = steps[i];
+      lit.push(p.el);
+      el('path', { d: curve(x(p.e), p.y, x(s.s), s.y), class: 'link' }, links);
+    });
+    s.a.forEach(i => {
+      const a = assumptions[i];
+      lit.push(a.el);
+      el('path', { d: curve(68, a.y - LANE / 2 + 1.5, x(s.s), s.y), class: 'link' }, links);
+    });
+    lit.forEach(e => e.classList.add('hl'));
+
+    claimEl.innerHTML = '';
+    const tick = document.createElement('span');
+    tick.className = 'tick';
+    tick.textContent = '✓';
+    const conf = document.createElement('span');
+    conf.className = 'conf mono';
+    conf.textContent = `entailed · ${s.c.toFixed(2)}`;
+    claimEl.append(tick, s.p, conf);
+    fromEl.replaceChildren(...s.d.map(i => li(steps[i].p)), ...s.a.map(i => li(`(assume (${assumptions[i].n}))`, true)));
+  }
+  function li(str, mono) {
+    const e = document.createElement('li');
+    if (mono) {
+      const m = document.createElement('span');
+      m.className = 'mono';
+      m.textContent = str;
+      e.append(m);
+    } else e.textContent = str;
+    return e;
+  }
+
+  let queue, shownAt, finished, T, last;
+
+  function reset() {
+    steps.forEach(s => { s.state = 0; s.el.setAttribute('width', 0); s.el.setAttribute('class', 'bar'); });
+    lit.forEach(e => e.classList.remove('hl'));
+    lit = [];
+    links.replaceChildren();
+    for (let h = 1; h <= 5; h++) { roofs[h].style.fill = ''; bodies[h].style.fill = ''; }
+    Object.values(cells).forEach(c => { c.t.textContent = ''; c.g.setAttribute('class', 'cell'); });
+    GIVENS.forEach(([r, h, v]) => setCell(r, h, v, 'given'));
+    claimEl.textContent = '';
+    fromEl.replaceChildren();
+    queue = [];
+    shownAt = -Infinity;
+    finished = null;
+    T = reduce ? END : -1200 / SLOW;
+    last = null;
+  }
+
+  function frame(now) {
+    // The clock crawls while explained facts queue up, so the ticker keeps pace with the playhead.
+    if (last !== null) T = Math.min(END, T + (now - last) / SLOW * (queue.length ? 0.1 : 1));
+    last = now;
+    let done = 0;
+    for (const s of steps) {
+      if (T < s.s) continue;
+      if (T >= s.e) {
+        done++;
+        if (s.state < 2) {
+          s.state = 2;
+          s.el.setAttribute('width', x(s.e) - x(s.s));
+          s.el.classList.add('done');
+          if (s.fact) {
+            s.el.classList.add('fact');
+            queue.push(s);
+          }
+        }
+      } else {
+        s.state = 1;
+        s.el.setAttribute('width', Math.max(1, x(T) - x(s.s)));
+      }
+    }
+    playhead.setAttribute('x1', x(Math.max(0, T)));
+    playhead.setAttribute('x2', x(Math.max(0, T)));
+    statsEl.textContent = `t = ${(Math.max(0, T) / 1000).toFixed(2)} s · ${done}/${steps.length} oracle calls${finished === null ? '' : ` · ${claims}/${claims} claims validated`}`;
+
+    if (queue.length && (reduce || now - shownAt > HOLD)) {
+      const shown = reduce ? queue.splice(0) : [queue.shift()];
+      const s = shown[shown.length - 1];
+      focus(s);
+      shownAt = now;
+      shown.forEach(f => f.fact[0] !== 'theorem' && setCell(...f.fact, reduce ? '' : 'fresh'));
+      if (s.fact[0] === 'theorem') {
+        cells.nationality5.g.classList.add('answer');
+        cells.pet5.g.classList.add('answer');
+      }
+    }
+
+    if (done === steps.length && !queue.length && finished === null) {
+      finished = now;
+      if (!reduce) setTimeout(() => focus(steps.find(s => s.p === THEOREM)), HOLD);
+    }
+    if (reduce && finished !== null) return;
+    if (finished !== null && now - finished > 6000) reset();
+    requestAnimationFrame(frame);
+  }
+
+  reset();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
