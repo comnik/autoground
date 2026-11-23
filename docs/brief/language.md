@@ -110,6 +110,10 @@ Applying names to a sense constructs a fully formed sentence:
 => "Frontend returns AST"
 ```
 
+Backticks are not allowed in readings or string arguments. Rely on `{role}` braces to
+delineate holes and write code identifiers in plain text — `autoground` reserves backticks
+so it stays in control of how field and role references are formatted for the oracle.
+
 Nullary senses are special, because they can be used to define terminology as well:
 
 ```brief

@@ -591,7 +591,8 @@ fn lower_sense(xs: &[Sexp]) -> Result<Sense, ParseError> {
             ))
         }
     };
-    let holes = hole_names(&template).map_err(|message| err(1, 1, message))?;
+    reject_backticks(&xs[2], &template, "readings")?;
+    let holes = hole_names(&template).map_err(|message| err_at(&xs[2], message))?;
     Ok(Sense {
         name,
         template,
@@ -653,7 +654,8 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
             if xs.len() == 1 {
                 return Err(err_at(s, "a finished sentence is written as a string"));
             }
-            let holes = hole_names(template).map_err(|message| err(1, 1, message))?;
+            reject_backticks(&xs[0], template, "readings")?;
+            let holes = hole_names(template).map_err(|message| err_at(&xs[0], message))?;
             Ok((
                 Formula::Apply {
                     reading: Reading::Inline {
@@ -773,7 +775,10 @@ fn lower_args(xs: &[Sexp]) -> Result<Vec<Arg>, ParseError> {
 fn lower_arg(s: &Sexp) -> Result<Arg, ParseError> {
     match &s.kind {
         SexpKind::Symbol(spelling) => Ok(Arg::Name(use_symbol(s, spelling)?)),
-        SexpKind::String(text) => Ok(Arg::Literal(text.clone())),
+        SexpKind::String(text) => {
+            reject_backticks(s, text, "string arguments")?;
+            Ok(Arg::Literal(text.clone()))
+        }
         SexpKind::List(xs) if xs.len() == 1 => {
             let SexpKind::Symbol(spelling) = &xs[0].kind else {
                 return Err(err_at(
@@ -908,6 +913,7 @@ fn inline_sentence(s: &Sexp) -> Result<Option<(Formula, ClauseSpan)>, ParseError
     let SexpKind::String(template) = &s.kind else {
         return Ok(None);
     };
+    reject_backticks(s, template, "readings")?;
     let holes = hole_names(template).map_err(|message| err_at(s, message))?;
     Ok(Some((
         Formula::Apply {
@@ -923,6 +929,18 @@ fn inline_sentence(s: &Sexp) -> Result<Option<(Formula, ClauseSpan)>, ParseError
             children: Vec::new(),
         },
     )))
+}
+
+fn reject_backticks(s: &Sexp, text: &str, what: &str) -> Result<(), ParseError> {
+    if text.contains('`') {
+        return Err(err_at(
+            s,
+            format!(
+                "backticks are not allowed in {what}; rely on {{role}} braces for holes and write names in plain text"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn list(s: &Sexp) -> Result<&[Sexp], ParseError> {
@@ -1442,6 +1460,24 @@ mod tests {
             assert!(
                 err.message
                     .contains("an argument must be a name, a string, or a nullary sense"),
+                "{src}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_backticks_in_readings_and_string_arguments() {
+        for src in [
+            "(sense implemented_by \"the `{interface}` trait is implemented by `{implementation}`\")",
+            "(sense check_mod \"the `check` module validates claims\")",
+            "(claim \"`Oracle` is a trait\" (witness \"src/oracle/mod.rs\"))",
+            "(claim (\"`{a}` calls `{b}`\" A B) (witness \"a.rs\"))",
+            "(claim (stands_for \"`pending`\" \"jev.rs\") (witness \"a.rs\"))",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert!(
+                err.message.contains("backticks are not allowed")
+                    && err.message.contains("{role}"),
                 "{src}: {err}"
             );
         }
