@@ -152,6 +152,7 @@ pub struct Ticket(pub(crate) u64);
 pub struct Answer {
     pub choice: String,
     pub confidence: f64,
+    pub probabilities: Option<BTreeMap<String, f64>>,
     pub noul: Option<f64>,
 }
 

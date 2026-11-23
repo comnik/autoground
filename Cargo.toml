@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "qa"]
+
 [package]
 name = "autoground"
 version = "0.3.0"

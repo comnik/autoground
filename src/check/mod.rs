@@ -16,17 +16,20 @@
 //!
 //! `and`, `or`, and `not` are evaluated deterministically.
 
+pub mod strategy;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value as Json};
 
-use crate::confidence::SUPPORT;
 use crate::oracle::image::{image_asset, image_extension, Asset, ImageError, MAX_IMAGE_BYTES};
-use crate::oracle::{Answer, Classification, Oracle, OracleError, QuestionKind, State, Ticket};
+use crate::oracle::{Answer, Classification, Oracle, OracleError, Ticket};
 use crate::syntax::{Proposition, Sentence, Support};
 use crate::universe::{Filesystem, GivenFile, Universe, UniverseError};
 use crate::value::Value;
+
+use strategy::DefaultStrategy;
 
 /// Largest body sent in one request.
 pub const DEFAULT_BODY_BYTES: usize = 128 * 1024;
@@ -37,10 +40,6 @@ pub const DEFAULT_BODY_BYTES: usize = 128 * 1024;
 /// and the run cap is one cent.
 pub(crate) const MAX_SLICED_BYTES: usize = DEFAULT_BODY_BYTES.saturating_mul(64);
 
-const DOCUMENT_QUESTION: &str = "How does `body` at `path` ground the proposition?";
-const PART_QUESTION: &str = "How does this part of `body` at `path` ground the proposition? Text outside this part is not visible.";
-const JOINT_QUESTION: &str = "How do the files in `files` together ground the proposition?";
-const IMPLICATION_QUESTION: &str = "Do the sentences establish the proposition?";
 const IMPLICATION_TEXT: &str = "sentences entail this claim";
 
 /// Why a step did not discharge.
@@ -716,82 +715,19 @@ fn document_question(
     body: &str,
     part: Option<(u32, u32)>,
 ) -> Classification {
-    let state = match part {
-        Some((index, total)) => State::new(json!({
-            "path": path,
-            "body": body,
-            "part": index,
-            "parts": total,
-        })),
-        None => State::new(json!({
-            "path": path,
-            "body": body,
-        })),
-    };
-    Classification {
-        state,
-        kind: QuestionKind::Choice,
-        instructions: json!({
-            "proposition": sentence,
-            "question": if part.is_some() { PART_QUESTION } else { DOCUMENT_QUESTION },
-        }),
-        criteria: document_criteria(),
-    }
+    DefaultStrategy::document_classification(sentence, path, body, part)
 }
 
 fn document_image(sentence: &str, path: &str, asset: Asset) -> Classification {
-    let reference = asset.reference().to_string();
-    Classification {
-        state: State::with_assets(
-            json!({
-                "path": path,
-                "body": reference,
-            }),
-            vec![asset],
-        ),
-        kind: QuestionKind::Choice,
-        instructions: json!({
-            "proposition": sentence,
-            "question": DOCUMENT_QUESTION,
-        }),
-        criteria: document_criteria(),
-    }
+    DefaultStrategy::document_image(sentence, path, asset)
 }
 
 fn joint_question(sentence: &str, files: Vec<Json>, assets: Vec<Asset>) -> Classification {
-    Classification {
-        state: State::with_assets(json!({ "files": files }), assets),
-        kind: QuestionKind::Choice,
-        instructions: json!({
-            "proposition": sentence,
-            "question": JOINT_QUESTION,
-        }),
-        criteria: document_criteria(),
-    }
+    DefaultStrategy::joint_with_assets(sentence, files, assets)
 }
 
 fn implication_question(head: &str, premises: &[String]) -> Classification {
-    Classification {
-        state: State::new(json!({ "sentences": premises })),
-        kind: QuestionKind::Choice,
-        instructions: json!({
-            "proposition": head,
-            "question": IMPLICATION_QUESTION,
-        }),
-        criteria: json!({
-            "entailed": "the sentences together establish the proposition",
-            "contradicted": "the sentences rule the proposition out",
-            "neutral": "the sentences do not settle the proposition",
-        }),
-    }
-}
-
-fn document_criteria() -> Json {
-    json!({
-        "entailed": "`body` supplies information that makes the proposition true",
-        "contradicted": "`body` supplies information that makes the proposition false",
-        "neutral": "`body` neither supports nor refutes the proposition",
-    })
+    DefaultStrategy::implication_classification(head, premises)
 }
 
 /// Sentences the implication may use. A nested claim contributes its sentence.
@@ -1213,14 +1149,7 @@ fn floor_char_boundary(text: &str, mut index: usize) -> usize {
 
 /// Entailed or contradicted at the trust bar. Anything weaker is unsettled.
 fn polarity(answer: &Answer) -> Option<Value> {
-    if answer.confidence < SUPPORT {
-        return None;
-    }
-    match answer.choice.as_str() {
-        "entailed" => Some(Value::True),
-        "contradicted" => Some(Value::False),
-        _ => None,
-    }
+    DefaultStrategy::settle_choice(answer, crate::confidence::SUPPORT).settled
 }
 
 #[cfg(test)]
@@ -1293,6 +1222,7 @@ mod tests {
         Answer {
             choice: label.to_string(),
             confidence,
+            probabilities: None,
             noul: None,
         }
     }

@@ -1,0 +1,268 @@
+# Graduated regression probes from soundness hunts and real sessions.
+# Loaded automatically alongside qa/suites/kernel.toml by `qa oracle`.
+
+# ---------------------------------------------------------------------------
+# 1. Multi-term arithmetic near a boundary (confirmed System-One soundness gap)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "reg-imp-arithmetic"
+kind = "implication"
+tags = ["regression", "arithmetic"]
+premises = [
+  "The pipeline timeout budget is 1000ms.",
+  "Stage 1 takes 340ms, Stage 2 takes 290ms, and Stage 3 takes 390ms, running sequentially.",
+  "A batch holds at most 100 questions.",
+  "Group A has 38 questions, Group B has 27 questions, and Group C has 37 questions.",
+]
+
+[[group.probes]]
+id = "reg-arith-timeout-1020"
+proposition = "Stages 1, 2, and 3 complete within the 1000ms pipeline timeout budget."
+expected = "contradicted"
+tags = ["soundness-gap"]
+notes = "340 + 290 + 390 = 1020 > 1000; broke past 0.85 on default (conf=0.92, Pe=0.95)."
+
+[[group.probes]]
+id = "reg-arith-batch-102"
+proposition = "Groups A, B, and C fit together in a single batch."
+expected = "contradicted"
+tags = ["near-miss"]
+notes = "38 + 27 + 37 = 102 > 100; raw winner entailed at conf=0.76, Pe=0.84."
+
+[[group.probes]]
+id = "reg-arith-batch-65-ok"
+proposition = "Groups A and B fit together in a single batch."
+expected = "entailed"
+tags = ["control"]
+notes = "38 + 27 = 65 <= 100."
+
+[[group]]
+id = "reg-doc-code-arithmetic"
+kind = "document"
+path = "src/protocol/frame.rs"
+tags = ["regression", "arithmetic"]
+body = """
+pub const MAX_FRAME_BYTES: usize = 128;
+pub const HEADER_BYTES: usize = 44;
+pub const FOOTER_BYTES: usize = 16;
+pub const PAYLOAD_BYTES: usize = 70;
+
+pub fn frame_fits() -> bool {
+    HEADER_BYTES + PAYLOAD_BYTES + FOOTER_BYTES <= MAX_FRAME_BYTES
+}
+"""
+
+[[group.probes]]
+id = "reg-code-frame-fits-130"
+proposition = "`frame_fits()` returns `true`."
+expected = "contradicted"
+tags = ["near-miss"]
+notes = "44 + 70 + 16 = 130 > 128; raw winner entailed at conf=0.66, Pe=0.77."
+
+# ---------------------------------------------------------------------------
+# 2. Prompt-term collisions (`body`, `path`, `part`, `parts`) & meta-injection
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "reg-prompt-terms-http"
+kind = "document"
+path = "src/http/router.rs"
+tags = ["regression", "prompt-term"]
+body = """
+pub struct Request {
+    pub path: String,
+    pub body: Vec<u8>,
+}
+
+pub fn route(req: &Request) -> &'static str {
+    if req.path.starts_with("/health") {
+        return "ok";
+    }
+    "not_found"
+}
+
+pub fn config_path() -> &'static str {
+    "/etc/app/config.toml"
+}
+"""
+
+[[group.probes]]
+id = "reg-pt-verbatim-criterion"
+proposition = "`body` supplies information that makes the proposition true."
+expected = "neutral"
+tags = ["meta-injection", "near-miss"]
+notes = "Raw winner flipped to entailed (conf=0.30, Pe=0.53); saved by 0.85 bar."
+
+[[group.probes]]
+id = "reg-pt-path-echo"
+proposition = "The configured `path` returned by `config_path` is `src/http/router.rs`."
+expected = "contradicted"
+tags = ["path-collision"]
+
+[[group.probes]]
+id = "reg-pt-route-inspects-body"
+proposition = "`route` inspects `body` to decide which response string to return."
+expected = "contradicted"
+tags = ["body-collision"]
+
+[[group.probes]]
+id = "reg-pt-http-control"
+proposition = "`route` returns `\"ok\"` when `req.path` starts with `\"/health\"`."
+expected = "entailed"
+tags = ["control"]
+
+[[group]]
+id = "reg-part-collision"
+kind = "part"
+path = "src/inventory/assembly.rs"
+part = 1
+parts = 3
+tags = ["regression", "prompt-term", "part-collision"]
+body = """
+pub struct Assembly {
+    pub part: &'static str,
+    pub parts: usize,
+}
+
+pub fn default_assembly() -> Assembly {
+    Assembly { part: "bolt", parts: 12 }
+}
+"""
+
+[[group.probes]]
+id = "reg-part-col-parts-3"
+proposition = "`default_assembly` returns an `Assembly` with `parts` equal to `3`."
+expected = "contradicted"
+tags = ["part-collision"]
+
+[[group.probes]]
+id = "reg-part-col-part-1"
+proposition = "`default_assembly` sets `part` to `\"1\"`."
+expected = "contradicted"
+tags = ["part-collision"]
+
+# ---------------------------------------------------------------------------
+# 3. Large-file subtle precedence & semantics inversions (`src/check/mod.rs`)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "reg-large-check"
+kind = "document"
+path = "src/check/mod.rs"
+tags = ["regression", "large-file"]
+
+[[group.probes]]
+id = "reg-check-contradicted-beats-entailed"
+proposition = "In `judge_leaf`, when one part of a sliced file entails the sentence and another part contradicts it, `judge_leaf` returns `Value::False`."
+expected = "contradicted"
+tags = ["subtle-semantics", "near-miss"]
+notes = "Raw winner flipped to entailed (conf=0.22, Pe=0.48); saved by 0.85 bar."
+
+[[group.probes]]
+id = "reg-check-all-parts-required"
+proposition = "For a sliced text file, a claim is discharged only when every part entails the proposition."
+expected = "contradicted"
+tags = ["subtle-semantics"]
+
+[[group.probes]]
+id = "reg-check-implication-sends-file"
+proposition = "`prepare_implication` reads the cited witness file and puts its body into the oracle state."
+expected = "contradicted"
+tags = ["subtle-semantics", "body-collision"]
+
+[[group.probes]]
+id = "reg-check-assume-asks-oracle"
+proposition = "In `prepare`, `Proposition::Assume` submits a question to the oracle before settling."
+expected = "contradicted"
+tags = ["subtle-semantics"]
+
+[[group.probes]]
+id = "reg-check-brief-witness-control"
+proposition = "A witness that cites a `.brief` file fails with `Failure::BriefWitness`."
+expected = "entailed"
+tags = ["control"]
+
+# ---------------------------------------------------------------------------
+# 4. Deceptive code: shadowing & misleading docstring guardrails
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "reg-deceptive-code"
+kind = "document"
+path = "src/auth/access.rs"
+tags = ["regression", "deceptive-code"]
+body = """
+/// Validates user tokens and rejects expired sessions.
+/// Note: in production, admin tokens bypass rate limiting.
+pub fn check_access(token: &str, expired: bool, is_admin: bool, rate_limited: bool) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    if rate_limited {
+        return false;
+    }
+    let expired = false;
+    if expired {
+        return false;
+    }
+    let _ = is_admin;
+    true
+}
+"""
+
+[[group.probes]]
+id = "reg-dec-shadowed-expired"
+proposition = "`check_access` returns `false` when `expired` is `true`, `token` is non-empty, and `rate_limited` is `false`."
+expected = "contradicted"
+tags = ["shadowing", "docstring-trap"]
+
+[[group.probes]]
+id = "reg-dec-admin-bypass"
+proposition = "When `is_admin` is `true` and `rate_limited` is `true`, `check_access` still returns `true`."
+expected = "contradicted"
+tags = ["docstring-trap", "early-return"]
+
+# ---------------------------------------------------------------------------
+# 5. Implication: meta-injection, parametric leakage, and formal fallacies
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "reg-imp-guardrails"
+kind = "implication"
+tags = ["regression", "logic-fallacy"]
+premises = [
+  "Alpha is a Rust crate.",
+  "A request is retried only if the status code is transient.",
+  "It is false that both flag X is enabled and flag Y is enabled.",
+]
+
+[[group.probes]]
+id = "reg-imp-meta-injection"
+proposition = "The sentences together establish the proposition."
+expected = "neutral"
+tags = ["meta-injection"]
+
+[[group.probes]]
+id = "reg-imp-parametric-rust"
+proposition = "Rust prevents data races at compile time."
+expected = "neutral"
+tags = ["parametric-leak"]
+
+[[group.probes]]
+id = "reg-imp-only-if-reverse"
+proposition = "Whenever the status code is transient, the request is retried."
+expected = "neutral"
+tags = ["logic-fallacy"]
+
+[[group.probes]]
+id = "reg-imp-demorgan"
+proposition = "Neither flag X nor flag Y is enabled."
+expected = "neutral"
+tags = ["demorgan-trap"]
+
+[[group.probes]]
+id = "reg-imp-only-if-control"
+proposition = "If a request is retried, then the status code is transient."
+expected = "entailed"
+tags = ["control"]

@@ -1,0 +1,689 @@
+# Self-contained proof-kernel probe suite for `qa oracle`.
+#
+# Each [[group]] shares one oracle state (batched into a single Jev POST).
+# Probes test all four oracle question shapes (`document`, `part`, `joint`,
+# `implication`) across contrastive roles (`entailed`, `contradicted`,
+# `closed-world`, `irrelevant`), metamorphic invariants (`negation_of`,
+# `paraphrase_of`), and sense-templated role assignments (`sense`, `role-swap`).
+
+# ---------------------------------------------------------------------------
+# 1. Single document: src/value.rs (Kleene three-valued logic)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "doc-value"
+kind = "document"
+path = "src/value.rs"
+tags = ["repo"]
+
+[[group.probes]]
+id = "value-and-false-unknown"
+template = "`Value::{op}` with `{lhs}` and `{rhs}` returns `{result}`"
+roles = { op = "and", lhs = "False", rhs = "Unknown", result = "False" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "value-and-false-unknown-para"
+proposition = "Calling `Value::False.and(Value::Unknown)` evaluates to `Value::False`."
+expected = "entailed"
+paraphrase_of = "value-and-false-unknown"
+tags = ["plain", "positive", "paraphrase"]
+
+[[group.probes]]
+id = "value-and-false-unknown-neg"
+template = "`Value::{op}` with `{lhs}` and `{rhs}` returns `{result}`"
+roles = { op = "and", lhs = "False", rhs = "Unknown", result = "Unknown" }
+expected = "contradicted"
+negation_of = "value-and-false-unknown"
+tags = ["sense", "adversarial", "negation"]
+
+[[group.probes]]
+id = "value-or-true-unknown"
+template = "`Value::{op}` with `{lhs}` and `{rhs}` returns `{result}`"
+roles = { op = "or", lhs = "True", rhs = "Unknown", result = "True" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "value-or-false-unknown-bad"
+template = "`Value::{op}` with `{lhs}` and `{rhs}` returns `{result}`"
+roles = { op = "or", lhs = "False", rhs = "Unknown", result = "False" }
+expected = "contradicted"
+tags = ["sense", "adversarial"]
+
+[[group.probes]]
+id = "value-not-unknown"
+proposition = "Negating `Value::Unknown` with `Value::not` returns `Value::Unknown`."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "value-not-unknown-neg"
+proposition = "Negating `Value::Unknown` with `Value::not` returns `Value::False`."
+expected = "contradicted"
+negation_of = "value-not-unknown"
+tags = ["plain", "adversarial", "negation"]
+
+[[group.probes]]
+id = "value-closed-world-support"
+proposition = "The confidence trust bar `SUPPORT` is `0.85`."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+[[group.probes]]
+id = "value-irrelevant-retries"
+proposition = "HTTP 429 responses are retried up to 4 times with exponential backoff."
+expected = "neutral"
+tags = ["plain", "irrelevant"]
+
+# ---------------------------------------------------------------------------
+# 2. Single document: src/universe/fs.rs (directional trait & type roles)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "doc-fs"
+kind = "document"
+path = "src/universe/fs.rs"
+tags = ["repo"]
+
+[[group.probes]]
+id = "fs-implements-universe"
+template = "the `{interface}` trait is implemented by `{implementation}`"
+roles = { interface = "Universe", implementation = "Filesystem" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "fs-implements-universe-swapped"
+template = "the `{interface}` trait is implemented by `{implementation}`"
+roles = { interface = "Filesystem", implementation = "Universe" }
+expected = "contradicted"
+tags = ["sense", "role-swap", "adversarial"]
+
+[[group.probes]]
+id = "givenfile-implements-universe"
+template = "the `{interface}` trait is implemented by `{implementation}`"
+roles = { interface = "Universe", implementation = "GivenFile" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "fs-rejects-absolute"
+proposition = "`Filesystem::resolve` returns `None` for an absolute path."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "fs-rejects-absolute-para"
+proposition = "When given an absolute path, `Filesystem` refuses to resolve it and yields `None`."
+expected = "entailed"
+paraphrase_of = "fs-rejects-absolute"
+tags = ["plain", "positive", "paraphrase"]
+
+[[group.probes]]
+id = "fs-rejects-absolute-neg"
+proposition = "`Filesystem::resolve` resolves absolute paths by returning them directly."
+expected = "contradicted"
+negation_of = "fs-rejects-absolute"
+tags = ["plain", "adversarial", "negation"]
+
+[[group.probes]]
+id = "fs-directory-contradicted"
+proposition = "`Filesystem::stat` returns `Ok(Some(_))` when the resolved path is a directory."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group.probes]]
+id = "givenfile-ignores-id"
+proposition = "`GivenFile::stat` ignores its `id` parameter and inspects `self.path`."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "fs-closed-world-trait-def"
+proposition = "The `Universe` trait provides a default implementation of `stat`."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+[[group.probes]]
+id = "fs-irrelevant-mermaid"
+proposition = "Mermaid flowcharts are lowered to briefs by `lower_mermaid`."
+expected = "neutral"
+tags = ["plain", "irrelevant"]
+
+# ---------------------------------------------------------------------------
+# 3. Single document: src/confidence.rs (short dense doc + comment semantics)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "doc-confidence"
+kind = "document"
+path = "src/confidence.rs"
+tags = ["repo"]
+
+[[group.probes]]
+id = "conf-support-value"
+template = "the constant `{constant}` is set to `{value}`"
+roles = { constant = "SUPPORT", value = "0.85" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "conf-support-wrong-value"
+template = "the constant `{constant}` is set to `{value}`"
+roles = { constant = "SUPPORT", value = "0.80" }
+expected = "contradicted"
+negation_of = "conf-support-value"
+tags = ["sense", "adversarial", "negation"]
+
+[[group.probes]]
+id = "conf-not-p-chosen"
+proposition = "TypeSafe's `confidence` is equal to `P(chosen option)`."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group.probes]]
+id = "conf-closed-world-budget"
+proposition = "The default run cost limit for Jev is 1 cent."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+[[group.probes]]
+id = "conf-irrelevant-split"
+proposition = "`split_body` prefers splitting text on newline boundaries."
+expected = "neutral"
+tags = ["plain", "irrelevant"]
+
+# ---------------------------------------------------------------------------
+# 4. Single document: src/oracle/jev.rs (larger real Rust source)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "doc-jev"
+kind = "document"
+path = "src/oracle/jev.rs"
+tags = ["repo"]
+
+[[group.probes]]
+id = "jev-implements-oracle"
+template = "the `{interface}` trait is implemented by `{implementation}`"
+roles = { interface = "Oracle", implementation = "JevOracle" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "jev-implements-oracle-swapped"
+template = "the `{interface}` trait is implemented by `{implementation}`"
+roles = { interface = "JevOracle", implementation = "Oracle" }
+expected = "contradicted"
+tags = ["sense", "role-swap", "adversarial"]
+
+[[group.probes]]
+id = "jev-question-budget"
+template = "the constant `{constant}` is set to `{value}`"
+roles = { constant = "QUESTION_BUDGET", value = "100" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "jev-question-budget-wrong"
+template = "the constant `{constant}` is set to `{value}`"
+roles = { constant = "QUESTION_BUDGET", value = "50" }
+expected = "contradicted"
+tags = ["sense", "adversarial"]
+
+[[group.probes]]
+id = "jev-retries-429"
+proposition = "`post_json_with_retries` retries HTTP 429 responses."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "jev-retries-404-bad"
+proposition = "`post_json_with_retries` retries HTTP 404 responses."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group.probes]]
+id = "jev-over-budget-boundary"
+proposition = "`over_budget` returns `true` when `spent_usd` equals `cost_limit_usd`."
+expected = "entailed"
+tags = ["plain", "positive", "boundary"]
+
+[[group.probes]]
+id = "jev-over-budget-boundary-bad"
+proposition = "`over_budget` returns `false` when `spent_usd` equals `cost_limit_usd`."
+expected = "contradicted"
+negation_of = "jev-over-budget-boundary"
+tags = ["plain", "adversarial", "boundary", "negation"]
+
+[[group.probes]]
+id = "jev-redacts-images"
+proposition = "`redact_image_bytes` removes `data_base64` from each image asset and inserts `byte_length`."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "jev-closed-world-support"
+proposition = "`check` treats an `entailed` choice with confidence below `0.85` as unsettled."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+[[group.probes]]
+id = "jev-irrelevant-align"
+proposition = "`align` compares the names, senses, and statements of two briefs."
+expected = "neutral"
+tags = ["plain", "irrelevant"]
+
+# ---------------------------------------------------------------------------
+# 5. Single document (synthetic): directional roles, repeated holes, comment trap
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "doc-synthetic-routing"
+kind = "document"
+path = "synthetic/router.rs"
+tags = ["synthetic"]
+body = """
+// NOTE: historically Gateway talked directly to Ledger, and we have a TODO
+// to let Billing call Vault directly in v2. Neither is enabled in the code below.
+
+pub enum Service { Gateway, Auth, Billing, Ledger, Vault }
+
+pub fn allowed_edges() -> &'static [(Service, Service)] {
+    &[
+        (Service::Gateway, Service::Auth),
+        (Service::Gateway, Service::Billing),
+        (Service::Billing, Service::Ledger),
+        (Service::Auth, Service::Vault),
+    ]
+}
+
+pub fn can_delegate(grantor: Service, grantee: Service, scope: &str) -> bool {
+    match (grantor, grantee, scope) {
+        (Service::Gateway, Service::Billing, "charge") => true,
+        (Service::Auth, Service::Gateway, "session") => true,
+        // TODO: allow Billing to delegate "refund" to Ledger
+        (Service::Billing, Service::Ledger, "refund") => false,
+        _ => false,
+    }
+}
+"""
+
+[[group.probes]]
+id = "route-gateway-to-billing"
+template = "`{from}` has an allowed edge to `{to}`"
+roles = { from = "Gateway", to = "Billing" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "route-billing-to-gateway-swap"
+template = "`{from}` has an allowed edge to `{to}`"
+roles = { from = "Billing", to = "Gateway" }
+expected = "contradicted"
+tags = ["sense", "role-swap", "adversarial"]
+
+[[group.probes]]
+id = "route-repeated-hole-entailed"
+template = "`{Service}` forwards to `{Service}` in `allowed_edges`"
+roles = [["Service", "Billing"], ["Service", "Ledger"]]
+expected = "entailed"
+tags = ["sense", "repeated-hole", "positive"]
+
+[[group.probes]]
+id = "route-repeated-hole-swapped"
+template = "`{Service}` forwards to `{Service}` in `allowed_edges`"
+roles = [["Service", "Ledger"], ["Service", "Billing"]]
+expected = "contradicted"
+tags = ["sense", "repeated-hole", "role-swap", "adversarial"]
+
+[[group.probes]]
+id = "route-delegate-3role-entailed"
+template = "`{grantor}` can delegate `{scope}` to `{grantee}`"
+roles = { grantor = "Auth", scope = "session", grantee = "Gateway" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "route-delegate-3role-swapped"
+template = "`{grantor}` can delegate `{scope}` to `{grantee}`"
+roles = { grantor = "Gateway", scope = "session", grantee = "Auth" }
+expected = "contradicted"
+tags = ["sense", "role-swap", "adversarial"]
+
+[[group.probes]]
+id = "route-comment-trap-refund"
+template = "`{grantor}` can delegate `{scope}` to `{grantee}`"
+roles = { grantor = "Billing", scope = "refund", grantee = "Ledger" }
+expected = "contradicted"
+tags = ["sense", "comment-trap", "adversarial"]
+
+[[group.probes]]
+id = "route-comment-trap-edge"
+template = "`{from}` has an allowed edge to `{to}`"
+roles = { from = "Gateway", to = "Ledger" }
+expected = "contradicted"
+tags = ["sense", "comment-trap", "adversarial"]
+
+[[group.probes]]
+id = "route-closed-world-timeout"
+proposition = "`Gateway` enforces a 5-second timeout on requests to `Billing`."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+# ---------------------------------------------------------------------------
+# 6. Sliced part: src/oracle/jev.rs lines 1..160 (part 1 of 4)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "part-jev-head"
+kind = "part"
+path = "src/oracle/jev.rs"
+lines = [1, 160]
+part = 1
+parts = 4
+tags = ["repo"]
+
+[[group.probes]]
+id = "part-jev-parallelism"
+template = "the constant `{constant}` is set to `{value}`"
+roles = { constant = "POST_PARALLELISM", value = "16" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "part-jev-retries-wrong"
+template = "the constant `{constant}` is set to `{value}`"
+roles = { constant = "MAX_RETRIES", value = "10" }
+expected = "contradicted"
+tags = ["sense", "adversarial"]
+
+[[group.probes]]
+id = "part-jev-outside-slice-redact"
+proposition = "`redact_image_bytes` removes `data_base64` from each image asset and inserts `byte_length`."
+expected = "neutral"
+tags = ["plain", "closed-world", "outside-part"]
+
+[[group.probes]]
+id = "part-jev-outside-slice-noul"
+proposition = "`parse_answer` reads the `noul` field when `kind` is `QuestionKind::Noul`."
+expected = "neutral"
+tags = ["plain", "closed-world", "outside-part"]
+
+[[group.probes]]
+id = "part-jev-irrelevant"
+proposition = "`Value` has three variants: `True`, `False`, and `Unknown`."
+expected = "neutral"
+tags = ["plain", "irrelevant"]
+
+# ---------------------------------------------------------------------------
+# 7. Sliced part: src/syntax/template.rs lines 60..130 (part 2 of 2)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "part-template-tail"
+kind = "part"
+path = "src/syntax/template.rs"
+lines = [60, 130]
+part = 2
+parts = 2
+tags = ["repo"]
+
+[[group.probes]]
+id = "part-template-apply-arity"
+proposition = "`apply` returns an error when the number of holes in `template` differs from `args.len()`."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "part-template-hole-digit-bad"
+proposition = "`is_hole_name` accepts a hole name whose first character is an ASCII digit."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group.probes]]
+id = "part-template-outside-nested"
+proposition = "`parse_template` returns an error if a `{` appears nested inside another hole."
+expected = "neutral"
+tags = ["plain", "closed-world", "outside-part"]
+
+# ---------------------------------------------------------------------------
+# 8. Joint witness (repo): src/confidence.rs + src/check/strategy.rs
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "joint-confidence-strategy"
+kind = "joint"
+tags = ["repo"]
+files = [
+  { path = "src/confidence.rs" },
+  { path = "src/check/strategy.rs" },
+]
+
+[[group.probes]]
+id = "joint-default-threshold"
+template = "`{strategy}` requires confidence at least `{bar}` to settle a choice"
+roles = { strategy = "DefaultStrategy", bar = "0.85" }
+expected = "entailed"
+tags = ["sense", "positive", "cross-file"]
+
+[[group.probes]]
+id = "joint-below-bar-unsettled"
+proposition = "Under `DefaultStrategy::settle`, an `entailed` answer with confidence `0.80` has `settled` equal to `None`."
+expected = "entailed"
+tags = ["plain", "positive", "cross-file"]
+
+[[group.probes]]
+id = "joint-below-bar-settled-bad"
+proposition = "Under `DefaultStrategy::settle`, an `entailed` answer with confidence `0.80` has `settled` equal to `Some(Value::True)`."
+expected = "contradicted"
+negation_of = "joint-below-bar-unsettled"
+tags = ["plain", "adversarial", "cross-file", "negation"]
+
+[[group.probes]]
+id = "joint-closed-world-cost"
+proposition = "`JevOracle` caps run spend at 1 cent by default."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+# ---------------------------------------------------------------------------
+# 9. Joint witness (synthetic): two-file flag -> mode -> action synthesis
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "joint-synthetic-flags"
+kind = "joint"
+tags = ["synthetic"]
+files = [
+  { path = "cli.rs", body = """
+pub enum Mode { Halt, Continue, Defer }
+
+pub fn parse_mode(flag: &str) -> Option<Mode> {
+    match flag {
+        "--strict" => Some(Mode::Halt),
+        "--lenient" => Some(Mode::Continue),
+        "--queue" => Some(Mode::Defer),
+        _ => None,
+    }
+}
+""" },
+  { path = "runner.rs", body = """
+use crate::cli::Mode;
+
+pub fn handle_warning(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Halt => "abort_run",
+        Mode::Continue => "log_and_proceed",
+        Mode::Defer => "enqueue_retry",
+    }
+}
+""" },
+]
+
+[[group.probes]]
+id = "joint-flag-strict"
+template = "passing `{flag}` causes `handle_warning` to return `{action}`"
+roles = { flag = "--strict", action = "abort_run" }
+expected = "entailed"
+tags = ["sense", "positive", "cross-file"]
+
+[[group.probes]]
+id = "joint-flag-lenient"
+template = "passing `{flag}` causes `handle_warning` to return `{action}`"
+roles = { flag = "--lenient", action = "log_and_proceed" }
+expected = "entailed"
+tags = ["sense", "positive", "cross-file"]
+
+[[group.probes]]
+id = "joint-flag-swapped"
+template = "passing `{flag}` causes `handle_warning` to return `{action}`"
+roles = { flag = "--strict", action = "log_and_proceed" }
+expected = "contradicted"
+tags = ["sense", "role-swap", "adversarial", "cross-file"]
+
+[[group.probes]]
+id = "joint-flag-missing"
+template = "passing `{flag}` causes `handle_warning` to return `{action}`"
+roles = { flag = "--quiet", action = "suppress_warning" }
+expected = "contradicted"
+tags = ["sense", "adversarial", "cross-file"]
+
+[[group.probes]]
+id = "joint-flag-exit-code"
+proposition = "When `handle_warning` returns `\"abort_run\"`, the process exits with status code `2`."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+# ---------------------------------------------------------------------------
+# 10. Implication: threshold reasoning
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "imp-threshold"
+kind = "implication"
+tags = ["deduction"]
+premises = [
+  "`DefaultStrategy` uses `SUPPORT` as its confidence bar.",
+  "`SUPPORT` is `0.85`.",
+  "When an answer's confidence is strictly below the confidence bar, `DefaultStrategy` leaves the verdict unsettled.",
+]
+
+[[group.probes]]
+id = "imp-threshold-070-unsettled"
+proposition = "An answer with confidence `0.70` is left unsettled by `DefaultStrategy`."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "imp-threshold-070-para"
+proposition = "`DefaultStrategy` does not settle an answer whose confidence is `0.70`."
+expected = "entailed"
+paraphrase_of = "imp-threshold-070-unsettled"
+tags = ["plain", "positive", "paraphrase"]
+
+[[group.probes]]
+id = "imp-threshold-070-settled-bad"
+proposition = "An answer with confidence `0.70` is settled as true by `DefaultStrategy`."
+expected = "contradicted"
+negation_of = "imp-threshold-070-unsettled"
+tags = ["plain", "adversarial", "negation"]
+
+[[group.probes]]
+id = "imp-threshold-090-unsettled-neutral"
+proposition = "An answer with confidence `0.90` is settled as true by `DefaultStrategy`."
+expected = "neutral"
+tags = ["plain", "closed-world", "missing-premise"]
+notes = "The premises do not specify the choice label (could be neutral or contradicted)."
+
+[[group.probes]]
+id = "imp-threshold-irrelevant"
+proposition = "`JevOracle` sends at most 16 concurrent POST requests."
+expected = "neutral"
+tags = ["plain", "irrelevant"]
+
+# ---------------------------------------------------------------------------
+# 11. Implication: directional dependency & converse fallacy (sense-templated)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "imp-dependencies"
+kind = "implication"
+tags = ["deduction"]
+premises = [
+  { template = "`{caller}` requires `{callee}`", roles = { caller = "ServiceA", callee = "ServiceB" } },
+  { template = "`{caller}` requires `{callee}`", roles = { caller = "ServiceB", callee = "ServiceC" } },
+  "Whenever a service requires another service that is unavailable, the first service fails health checks.",
+  "`ServiceC` is unavailable.",
+]
+
+[[group.probes]]
+id = "imp-dep-b-fails"
+proposition = "`ServiceB` fails health checks."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "imp-dep-b-passes-bad"
+proposition = "`ServiceB` does not fail health checks."
+expected = "contradicted"
+negation_of = "imp-dep-b-fails"
+tags = ["plain", "adversarial", "negation"]
+
+[[group.probes]]
+id = "imp-dep-b-requires-c"
+template = "`{caller}` requires `{callee}`"
+roles = { caller = "ServiceB", callee = "ServiceC" }
+expected = "entailed"
+tags = ["sense", "positive"]
+
+[[group.probes]]
+id = "imp-dep-converse-neutral"
+template = "`{caller}` requires `{callee}`"
+roles = { caller = "ServiceC", callee = "ServiceB" }
+expected = "neutral"
+tags = ["sense", "role-swap", "closed-world"]
+
+[[group.probes]]
+id = "imp-dep-d-neutral"
+proposition = "`ServiceD` fails health checks."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+# ---------------------------------------------------------------------------
+# 12. Implication: hidden assumption detection (from jev-size-limit.brief)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "imp-hidden-assumption"
+kind = "implication"
+tags = ["deduction"]
+premises = [
+  "Jev rejects any request whose state exceeds 32,000 input tokens.",
+  "When a claim cites a single text file no larger than 128 KiB, `autoground` sends the whole file in the request's state.",
+]
+
+[[group.probes]]
+id = "imp-hidden-conditional-entailed"
+proposition = "If a single text file is no larger than 128 KiB and counts as 35,000 input tokens, Jev rejects the request `autoground` sends for it."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "imp-hidden-missing-dense-text"
+proposition = "Some text file no larger than 128 KiB counts as more than 32,000 input tokens."
+expected = "neutral"
+tags = ["plain", "closed-world", "missing-premise"]
+
+[[group.probes]]
+id = "imp-hidden-accepts-40k-bad"
+proposition = "Jev accepts a request whose state has 40,000 input tokens."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group.probes]]
+id = "imp-hidden-all-under-128k-neutral"
+proposition = "Jev accepts every request `autoground` sends for a text file smaller than 128 KiB."
+expected = "neutral"
+tags = ["plain", "closed-world", "missing-premise"]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -667,9 +667,11 @@ fn parse_answer(resp: &Value, key: &str, kind: QuestionKind) -> Result<Answer, O
                 .get("confidence")
                 .and_then(|c| c.as_f64())
                 .unwrap_or(0.0);
+            let probabilities = parse_probabilities(ans);
             Ok(Answer {
                 choice: choice.to_string(),
                 confidence,
+                probabilities,
                 noul: None,
             })
         }
@@ -681,10 +683,20 @@ fn parse_answer(resp: &Value, key: &str, kind: QuestionKind) -> Result<Answer, O
             Ok(Answer {
                 choice: String::new(),
                 confidence: noul,
+                probabilities: None,
                 noul: Some(noul),
             })
         }
     }
+}
+
+fn parse_probabilities(ans: &Value) -> Option<BTreeMap<String, f64>> {
+    let map = ans.get("probabilities")?.as_object()?;
+    let probs: BTreeMap<String, f64> = map
+        .iter()
+        .filter_map(|(label, val)| val.as_f64().map(|p| (label.clone(), p)))
+        .collect();
+    (!probs.is_empty()).then_some(probs)
 }
 
 fn exchange_from_posted(request: Value, posted: Posted) -> OracleExchange {
@@ -1319,5 +1331,31 @@ mod tests {
         assert_eq!(logged["format"], "png");
         assert_eq!(logged["byte_length"], len as u64);
         assert!(exchange.get("response").is_none());
+    }
+
+    #[test]
+    fn choice_answer_preserves_probabilities() {
+        let mut o = oracle(vec![json!({
+            "answers": {
+                "q0": {
+                    "type": "choice",
+                    "choice": "entailed",
+                    "confidence": 0.91,
+                    "probabilities": {
+                        "entailed": 0.94,
+                        "contradicted": 0.02,
+                        "neutral": 0.04
+                    }
+                }
+            }
+        })]);
+        let ticket = o.submit(classify(json!({"n": 1}), "p"));
+        let answer = o.wait(ticket).unwrap();
+        assert_eq!(answer.choice, "entailed");
+        assert_eq!(answer.confidence, 0.91);
+        let probs = answer.probabilities.expect("probabilities");
+        assert_eq!(probs.get("entailed"), Some(&0.94));
+        assert_eq!(probs.get("contradicted"), Some(&0.02));
+        assert_eq!(probs.get("neutral"), Some(&0.04));
     }
 }
