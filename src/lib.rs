@@ -16,7 +16,7 @@ pub use compiler::{
 };
 pub use log::Log;
 pub use syntax::{
-    brief_source, extract_briefs, parse, print_program, Form, Formula, MarkdownError, ParseError,
-    Program, Proposition, Reading, Sense,
+    brief_source, extract_briefs, parse, print_program, Define, Form, Formula, Ground,
+    MarkdownError, ParseError, Program, Proposition, Reading, Sense,
 };
 pub use value::Value;

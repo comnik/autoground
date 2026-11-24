@@ -172,7 +172,8 @@ fn check_cmd(
     }
     let started = std::time::Instant::now();
     let base = brief_dir(input);
-    let (src, program, compiled) = load_compiled(input, &base)?;
+    let scan_root = namespace_root(&base);
+    let (src, program, compiled) = load_compiled(input, &scan_root)?;
     let (bound, stdin_tmp) = match file {
         Some(path) if path == Path::new("-") => {
             if !check::cites_dollar(&compiled.claims) {
@@ -330,9 +331,10 @@ fn check_dir(
         println!("no briefs");
         return Ok(0);
     }
+    let scan_root = namespace_root(Path::new(input));
     let prepared: Vec<PreparedBrief> = files
         .iter()
-        .map(|file| match prepare_brief(file) {
+        .map(|file| match prepare_brief(file, &scan_root) {
             Ok(ready) => PreparedBrief::Ready(ready),
             Err(message) => PreparedBrief::Failed {
                 path: file.path.clone(),
@@ -427,10 +429,10 @@ fn check_dir(
     }
 }
 
-fn prepare_brief(file: &autoground::BriefFile) -> Result<ReadyBrief, String> {
+fn prepare_brief(file: &autoground::BriefFile, scan_root: &Path) -> Result<ReadyBrief, String> {
     let input = file.absolute.to_string_lossy().into_owned();
     let base = brief_dir(&input);
-    match load_compiled(&input, &base) {
+    match load_compiled(&input, scan_root) {
         Ok((src, program, compiled)) => {
             if check::cites_dollar(&compiled.claims) {
                 Err("`$` needs a file".to_string())
@@ -527,8 +529,25 @@ fn load_model(input: &str) -> Result<autoground::align::Model, Box<dyn std::erro
     let src = align_source(input)?;
     let program = parse(&src)?;
     let base = brief_dir(input);
-    let (compiled, _) = compile_linked(&program, input, &base)?;
+    let scan_root = namespace_root(&base);
+    let (compiled, _) = compile_linked(&program, input, &scan_root)?;
     Ok(model_of(&program, &compiled))
+}
+
+fn namespace_root(base: &Path) -> PathBuf {
+    let canon = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    for ancestor in canon.ancestors() {
+        if ancestor.join(".git").exists() {
+            return ancestor.to_path_buf();
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd_canon = cwd.canonicalize().unwrap_or(cwd);
+        if canon.starts_with(&cwd_canon) {
+            return cwd_canon;
+        }
+    }
+    base.to_path_buf()
 }
 
 /// `.mmd` lowers to a brief. Every other model is read the way `check` reads it.

@@ -87,7 +87,7 @@ fn declarations(
                 }
             }
             Form::Detail(body) => declarations(body, term_senses, names, senses, terms),
-            Form::Assume(_) | Form::Formula(_) => {}
+            Form::Define(_) | Form::Ground(_) | Form::Assume(_) | Form::Formula(_) => {}
         }
     }
 }
@@ -100,7 +100,10 @@ fn walk(prop: &Proposition, negated: bool, out: &mut BTreeSet<Statement>) {
             }
         }
         Proposition::Not(inner) => walk(inner, !negated, out),
-        Proposition::Sentence(sentence) | Proposition::Assume(sentence) => {
+        Proposition::Sentence(sentence)
+        | Proposition::Assume(sentence)
+        | Proposition::Defined { sentence, .. }
+        | Proposition::Grounded { sentence, .. } => {
             out.insert(stated(&sentence.text, negated));
         }
         Proposition::Claim { sentence, support } => {
@@ -109,6 +112,7 @@ fn walk(prop: &Proposition, negated: bool, out: &mut BTreeSet<Statement>) {
                 walk(prop, negated, out);
             }
         }
+        Proposition::Cert { .. } => {}
         Proposition::Scope { body, .. } => {
             for prop in body {
                 walk(prop, negated, out);

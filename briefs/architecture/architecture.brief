@@ -54,7 +54,7 @@
 
 (claim (combines (Sentence) (Connectives))
   (and
-    (claim "Support::Sentence wraps a Box<Proposition>"
+    (claim "enum Support has a variant Sentence(Box<Proposition>)"
       (witness "../../src/syntax/ast.rs"))
     (claim "Proposition has And, Or, and Not variants, whose operands are other propositions"
       (witness "../../src/syntax/ast.rs"))

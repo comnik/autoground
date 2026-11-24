@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path};
 
-use crate::syntax::{Program, Refer, Sense};
+use crate::syntax::{Program, Proposition, Refer, Sense, Support};
 
 use super::scan::Loaded;
-use super::{compile_with, CompileError, Compiled, Imports, Opened};
+use super::{
+    compile_module, CompileError, Compiled, CompiledModule, ExportedGround, Imports, Opened,
+    ResolvedDefine, SenseKey,
+};
 
 struct Item<'a> {
     path: &'a str,
@@ -38,16 +42,19 @@ pub fn link_parts(
 ) -> Result<(Compiled, super::Vocabulary), CompileError> {
     let index = build_index(entry, entry_path, files)?;
     let order = dependency_order(entry, &index)?;
+    let mut modules: HashMap<String, CompiledModule> = HashMap::new();
     for ns in &order {
-        let program = index[ns].program;
-        let imports = environment(program, &index)?;
-        compile_with(program, &imports).map_err(|err| CompileError {
+        let item = &index[ns];
+        let imports = environment(item.program, item.path, &index, &modules)?;
+        let module = compile_module(item.program, &imports).map_err(|err| CompileError {
             message: format!("in `{ns}`: {}", err.message),
         })?;
+        modules.insert(ns.clone(), module);
     }
-    let imports = environment(entry, &index)?;
+    let target_path = entry_path.unwrap_or("");
+    let imports = environment(entry, target_path, &index, &modules)?;
     let vocab = super::Vocabulary::from_imports(&imports);
-    let compiled = compile_with(entry, &imports)?;
+    let compiled = compile_module(entry, &imports)?.compiled;
     Ok((compiled, vocab))
 }
 
@@ -143,7 +150,9 @@ fn visit(
 
 fn environment(
     program: &Program,
+    target_path: &str,
     index: &HashMap<String, Item<'_>>,
+    modules: &HashMap<String, CompiledModule>,
 ) -> Result<Imports, CompileError> {
     let here = program
         .namespace
@@ -163,9 +172,32 @@ fn environment(
 
     let mut imported_names: HashMap<String, String> = HashMap::new();
     let mut imported_senses: HashMap<String, (String, Sense)> = HashMap::new();
+    let mut imported_defines: HashMap<SenseKey, (String, ResolvedDefine)> = HashMap::new();
+    let mut imported_grounds: HashMap<SenseKey, (String, ExportedGround)> = HashMap::new();
     let mut aliases: HashMap<String, String> = HashMap::new();
     let mut opened: HashMap<String, Opened> = HashMap::new();
     let mut once = HashSet::new();
+
+    let mut reachable = Vec::new();
+    let mut seen_deps = HashSet::new();
+    for require in requires {
+        collect_reachable(&require.namespace, index, &mut seen_deps, &mut reachable);
+    }
+    for ns in &reachable {
+        if let Some(module) = modules.get(ns) {
+            for (key, def) in &module.defines {
+                if let Some((prev, _)) = imported_defines.get(key) {
+                    return Err(CompileError {
+                        message: format!(
+                            "`{}` is defined in both `{prev}` and `{ns}`",
+                            key.display(),
+                        ),
+                    });
+                }
+                imported_defines.insert(key.clone(), (ns.clone(), def.clone()));
+            }
+        }
+    }
 
     for require in requires {
         if require.namespace == here {
@@ -249,6 +281,21 @@ fn environment(
                 &require.namespace,
             )?;
         }
+        if let Some(module) = modules.get(&require.namespace) {
+            for (key, ground) in &module.grounds {
+                if let Some((prev, _)) = imported_grounds.get(key) {
+                    return Err(CompileError {
+                        message: format!(
+                            "`{}` is grounded in both `{prev}` and `{}`",
+                            key.display(),
+                            require.namespace
+                        ),
+                    });
+                }
+                let rebased = rebase_ground(ground, item.path, target_path);
+                imported_grounds.insert(key.clone(), (require.namespace.clone(), rebased));
+            }
+        }
         opened.insert(
             require.namespace.clone(),
             Opened {
@@ -279,7 +326,184 @@ fn environment(
         qualifiers,
         opened,
         owners,
+        defines: imported_defines
+            .into_iter()
+            .map(|(k, (_, v))| (k, v))
+            .collect(),
+        grounds: imported_grounds
+            .into_iter()
+            .map(|(k, (_, v))| (k, v))
+            .collect(),
     })
+}
+
+fn collect_reachable(
+    ns: &str,
+    index: &HashMap<String, Item<'_>>,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    if !seen.insert(ns.to_string()) {
+        return;
+    }
+    if let Some(item) = index.get(ns) {
+        if let Some(decl) = &item.program.namespace {
+            for req in &decl.requires {
+                collect_reachable(&req.namespace, index, seen, out);
+            }
+        }
+        out.push(ns.to_string());
+    }
+}
+
+fn rebase_ground(ground: &ExportedGround, from_file: &str, to_file: &str) -> ExportedGround {
+    ExportedGround {
+        cert_id: ground.cert_id.clone(),
+        witness: ground
+            .witness
+            .iter()
+            .map(|p| rebase_path(p, from_file, to_file))
+            .collect(),
+        certificate: ground
+            .certificate
+            .iter()
+            .map(|prop| rebase_prop(prop, from_file, to_file))
+            .collect(),
+        assumptions: ground.assumptions.clone(),
+    }
+}
+
+fn rebase_prop(prop: &Proposition, from_file: &str, to_file: &str) -> Proposition {
+    match prop {
+        Proposition::And(xs) => Proposition::And(
+            xs.iter()
+                .map(|x| rebase_prop(x, from_file, to_file))
+                .collect(),
+        ),
+        Proposition::Or(xs) => Proposition::Or(
+            xs.iter()
+                .map(|x| rebase_prop(x, from_file, to_file))
+                .collect(),
+        ),
+        Proposition::Not(inner) => {
+            Proposition::Not(Box::new(rebase_prop(inner, from_file, to_file)))
+        }
+        Proposition::Sentence(s) => Proposition::Sentence(s.clone()),
+        Proposition::Assume(s) => Proposition::Assume(s.clone()),
+        Proposition::Defined { sentence, body } => Proposition::Defined {
+            sentence: sentence.clone(),
+            body: Box::new(rebase_prop(body, from_file, to_file)),
+        },
+        Proposition::Claim { sentence, support } => Proposition::Claim {
+            sentence: sentence.clone(),
+            support: rebase_support(support, from_file, to_file),
+        },
+        Proposition::Cert {
+            cert_id,
+            label,
+            targets,
+            support,
+        } => Proposition::Cert {
+            cert_id: cert_id.clone(),
+            label: label.clone(),
+            targets: targets.clone(),
+            support: rebase_support(support, from_file, to_file),
+        },
+        Proposition::Grounded {
+            sentence,
+            cert_id,
+            certificate,
+            witness,
+        } => Proposition::Grounded {
+            sentence: sentence.clone(),
+            cert_id: cert_id.clone(),
+            certificate: certificate
+                .iter()
+                .map(|p| rebase_prop(p, from_file, to_file))
+                .collect(),
+            witness: witness
+                .iter()
+                .map(|p| rebase_path(p, from_file, to_file))
+                .collect(),
+        },
+        Proposition::Scope { body } => Proposition::Scope {
+            body: body
+                .iter()
+                .map(|x| rebase_prop(x, from_file, to_file))
+                .collect(),
+        },
+    }
+}
+
+fn rebase_support(support: &Support, from_file: &str, to_file: &str) -> Support {
+    match support {
+        Support::Witness { paths } => Support::Witness {
+            paths: paths
+                .iter()
+                .map(|p| rebase_path(p, from_file, to_file))
+                .collect(),
+        },
+        Support::Sentence(inner) => {
+            Support::Sentence(Box::new(rebase_prop(inner, from_file, to_file)))
+        }
+    }
+}
+
+fn rebase_path(witness: &str, from_file: &str, to_file: &str) -> String {
+    if witness == "$" {
+        return "$".to_string();
+    }
+    let from_dir = dir_components(from_file);
+    let to_dir = dir_components(to_file);
+    if from_dir == to_dir {
+        return witness.to_string();
+    }
+    let mut target = from_dir;
+    push_normalized(&mut target, witness);
+
+    let mut common = 0;
+    while common < to_dir.len() && common < target.len() && to_dir[common] == target[common] {
+        common += 1;
+    }
+    let mut rel = Vec::new();
+    for _ in common..to_dir.len() {
+        rel.push("..".to_string());
+    }
+    rel.extend_from_slice(&target[common..]);
+    if rel.is_empty() {
+        ".".to_string()
+    } else {
+        rel.join("/")
+    }
+}
+
+fn dir_components(file: &str) -> Vec<String> {
+    if file.is_empty() || file == "<input>" {
+        return Vec::new();
+    }
+    let Some(parent) = Path::new(file).parent() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    push_normalized(&mut out, &parent.to_string_lossy());
+    out
+}
+
+fn push_normalized(out: &mut Vec<String>, path: &str) {
+    for comp in Path::new(path).components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if out.last().is_some_and(|last| last != "..") {
+                    out.pop();
+                } else {
+                    out.push("..".to_string());
+                }
+            }
+            Component::Normal(seg) => out.push(seg.to_string_lossy().into_owned()),
+            Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
 }
 
 enum Binding {
@@ -693,5 +917,71 @@ mod tests {
                 && err.message.contains("as a sentence"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn ground_links_across_namespaces_rebasing_witnesses_and_assumptions() {
+        let files = vec![
+            loaded(
+                "ontology.brief",
+                r#"
+(ns acme.ontology)
+(sense customer "{c} is a customer")
+(sense high_value "{c} is a high-value customer")
+(define (high_value c)
+  (and
+    (customer c)
+    ("{c} has lifetime sales > $25 million" c)))
+"#,
+            ),
+            loaded(
+                "generators/hv/certificate.brief",
+                r#"
+(ns generators.hv
+  (:require [acme.ontology :refer [high_value]]))
+(claim "query.sql selects high-value customers" (witness "query.sql"))
+(assume "out.csv is up to date")
+(ground (high_value c)
+  (witness "out.csv")
+  (and "query.sql selects high-value customers" "out.csv is up to date"))
+"#,
+            ),
+        ];
+        let entry = parse(
+            r#"
+(ns acme.analysis
+  (:require
+    [acme.ontology :refer [high_value]]
+    [generators.hv]))
+(name Acme)
+(and (high_value Acme))
+"#,
+        )
+        .unwrap();
+        let compiled = link(&entry, Some("analysis/decision.brief"), &files).unwrap();
+        assert_eq!(compiled.assumptions, vec!["out.csv is up to date"]);
+        let Proposition::And(xs) = &compiled.claims[0] else {
+            panic!("and");
+        };
+        let Proposition::Grounded {
+            sentence,
+            witness,
+            certificate,
+            ..
+        } = &xs[0]
+        else {
+            panic!("expected Grounded");
+        };
+        assert_eq!(sentence.text, "Acme is a high-value customer");
+        assert_eq!(witness, &vec!["../generators/hv/out.csv".to_string()]);
+        assert_eq!(certificate.len(), 3);
+        let Proposition::Claim {
+            support: Support::Witness { paths },
+            ..
+        } = &certificate[0]
+        else {
+            panic!("expected lifted query claim");
+        };
+        assert_eq!(paths, &vec!["../generators/hv/query.sql".to_string()]);
     }
 }

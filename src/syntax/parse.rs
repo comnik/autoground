@@ -1,7 +1,8 @@
 use std::ops::Range;
 
 use super::ast::{
-    Arg, At, ClauseSpan, Form, Formula, Ident, Ns, Program, Reading, Refer, Require, Sense,
+    Arg, At, ClauseSpan, Define, Form, Formula, Ground, Ident, Ns, Program, Reading, Refer,
+    Require, Sense,
 };
 use super::template::hole_names;
 
@@ -536,6 +537,13 @@ fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
         Some(SexpKind::Symbol(head)) if head == "sense" => {
             Ok((Form::Sense(lower_sense(xs)?), None))
         }
+        Some(SexpKind::Symbol(head)) if head == "define" => {
+            Ok((Form::Define(lower_define(s, xs)?), None))
+        }
+        Some(SexpKind::Symbol(head)) if head == "ground" => {
+            let (form, span) = lower_ground(s, xs)?;
+            Ok((form, Some(span)))
+        }
         Some(SexpKind::Symbol(head)) if head == "assume" => {
             let (formula, span) = lower_assume(s, xs)?;
             Ok((formula, Some(span)))
@@ -600,6 +608,71 @@ fn lower_sense(xs: &[Sexp]) -> Result<Sense, ParseError> {
     })
 }
 
+fn lower_define(s: &Sexp, xs: &[Sexp]) -> Result<Define, ParseError> {
+    if xs.len() != 3 {
+        return Err(err_at(&xs[0], "`define` takes a sense head and a body"));
+    }
+    let (sense, params) = lower_sense_head(&xs[1], "`define`")?;
+    let (body, _) = lower_formula(&xs[2])?;
+    Ok(Define {
+        sense,
+        params,
+        body,
+        at: at_of(s),
+    })
+}
+
+fn lower_ground(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError> {
+    if xs.len() != 4 {
+        return Err(err_at(
+            &xs[0],
+            "`ground` takes a sense head, a witness, and a support",
+        ));
+    }
+    let (sense, params) = lower_sense_head(&xs[1], "`ground`")?;
+    let (witness_formula, _) = lower_formula(&xs[2])?;
+    let Formula::Witness { paths } = witness_formula else {
+        return Err(err_at(&xs[2], "`ground` takes a `(witness ...)`"));
+    };
+    let (support, support_clause) = lower_formula(&xs[3])?;
+    Ok((
+        Form::Ground(Ground {
+            sense,
+            params,
+            witness: paths,
+            support,
+            at: at_of(s),
+        }),
+        ClauseSpan {
+            span: s.span.clone(),
+            children: vec![support_clause],
+        },
+    ))
+}
+
+fn lower_sense_head(s: &Sexp, form: &str) -> Result<(Ident, Vec<String>), ParseError> {
+    let head_xs = match &s.kind {
+        SexpKind::List(items) if !items.is_empty() => items,
+        _ => return Err(err_at(s, format!("{form} heads a sense application"))),
+    };
+    let sense_spelling = expect_symbol(&head_xs[0], &format!("{form} heads a sense name"))?;
+    let sense = use_symbol(&head_xs[0], &sense_spelling)?;
+    let params = lower_params(&head_xs[1..])?;
+    Ok((sense, params))
+}
+
+fn lower_params(xs: &[Sexp]) -> Result<Vec<String>, ParseError> {
+    let mut params = Vec::with_capacity(xs.len());
+    for item in xs {
+        let param = declared_symbol(item, "parameter")?;
+        if params.iter().any(|seen| seen == &param) {
+            return Err(err_at(item, format!("duplicate parameter `{param}`")));
+        }
+        params.push(param);
+    }
+    Ok(params)
+}
+
 fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
     if let Some(sentence) = inline_sentence(s)? {
         return Ok(sentence);
@@ -614,7 +687,10 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
     };
     match &xs[0].kind {
         SexpKind::Symbol(head)
-            if head == "name" || head == "sense" || head == "ns" || head == "assume" =>
+            if matches!(
+                head.as_str(),
+                "name" | "sense" | "define" | "ground" | "ns" | "assume"
+            ) =>
         {
             Err(err_at(
                 &xs[0],
@@ -986,7 +1062,18 @@ pub(crate) fn is_declared_name(spelling: &str) -> bool {
 fn is_reserved_word(spelling: &str) -> bool {
     matches!(
         spelling,
-        "name" | "sense" | "ns" | "and" | "or" | "not" | "claim" | "witness" | "assume" | "detail"
+        "name"
+            | "sense"
+            | "define"
+            | "ground"
+            | "ns"
+            | "and"
+            | "or"
+            | "not"
+            | "claim"
+            | "witness"
+            | "assume"
+            | "detail"
     )
 }
 

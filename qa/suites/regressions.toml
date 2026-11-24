@@ -266,3 +266,77 @@ id = "reg-imp-only-if-control"
 proposition = "If a request is retried, then the status code is transient."
 expected = "entailed"
 tags = ["control"]
+
+# ---------------------------------------------------------------------------
+# 6. Forall certificates: ungrouped large-integer zero-counting & bare-CSV path leak
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "reg-forall-zero-counting"
+kind = "joint"
+tags = ["regression", "forall", "arithmetic"]
+files = [
+  { path = "schema.sql", body = """
+CREATE TABLE customers (
+    id TEXT PRIMARY KEY,
+    -- Stored in US cents (100 cents = $1 USD).
+    lifetime_sales_cents BIGINT NOT NULL,
+    suspended BOOLEAN NOT NULL
+);
+""" },
+  { path = "query.sql", body = """
+SELECT id AS customer_id, 'high_value_customer' AS label
+FROM customers
+WHERE lifetime_sales_cents > 25000000 * 100
+  AND suspended = FALSE;
+""" },
+  { path = "pipeline.py", body = """
+import csv
+
+def materialize(conn):
+    with open("query.sql") as q:
+        sql = q.read()
+    rows = conn.execute(sql).fetchall()
+    with open("out.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["customer_id", "label"])
+        w.writerows(rows)
+""" },
+]
+
+[[group.probes]]
+id = "reg-forall-cents-250m-soundness"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $250 million."
+expected = "neutral"
+tags = ["soundness-gap", "threshold-drift"]
+notes = "25000000 * 100 cents = $25M, not $250M; broke past 0.85 on default (conf=0.85, Pe=0.90), same as raw 2500000000."
+
+[[group.probes]]
+id = "reg-forall-cents-25m-control"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $25 million."
+expected = "entailed"
+tags = ["control"]
+
+[[group]]
+id = "reg-forall-bare-csv-path-leak"
+kind = "document"
+path = "generators/high_value_customer/out.csv"
+tags = ["regression", "forall", "path-collision"]
+body = """
+customer_id
+Acme
+Globex
+"""
+
+[[group.probes]]
+id = "reg-forall-bare-csv-semantic"
+proposition = "Acme is a high-value customer."
+expected = "neutral"
+tags = ["near-miss", "path-leak"]
+notes = "Body has no semantic label; raw winner flipped to entailed (conf=0.83, Pe=0.89) from path alone, saved by 0.85 bar."
+
+[[group.probes]]
+id = "reg-forall-bare-csv-listed-control"
+proposition = "out.csv lists Acme."
+expected = "entailed"
+tags = ["control"]

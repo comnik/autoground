@@ -164,6 +164,26 @@ pub enum Proposition {
         sentence: Sentence,
         support: Support,
     },
+    /// `sentence` holds by definition iff `body` holds (no implication oracle).
+    Defined {
+        sentence: Sentence,
+        body: Box<Proposition>,
+    },
+    /// Certificate for a `ground` rule: proves `targets` from `support` once.
+    Cert {
+        cert_id: String,
+        label: String,
+        targets: Vec<Sentence>,
+        support: Support,
+    },
+    /// `sentence` established via a certified `ground` witness (`=>` soundness).
+    Grounded {
+        sentence: Sentence,
+        cert_id: String,
+        /// Self-contained certificate propositions when imported from another namespace.
+        certificate: Vec<Proposition>,
+        witness: Vec<String>,
+    },
     /// A sentence taken as true, with no evidence.
     Assume(Sentence),
     /// A detail. Names declared in the body stay there. `body` is the claims,
@@ -173,11 +193,32 @@ pub enum Proposition {
     },
 }
 
+/// A stipulative definition attaching a defining body to a sense.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Define {
+    pub sense: Ident,
+    pub params: Vec<String>,
+    pub body: Formula,
+    pub at: At,
+}
+
+/// A certified generator grounding instances of a defined sense via a witness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ground {
+    pub sense: Ident,
+    pub params: Vec<String>,
+    pub witness: Vec<String>,
+    pub support: Formula,
+    pub at: At,
+}
+
 /// A top-level form, or a form inside a detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Form {
     Name(String),
     Sense(Sense),
+    Define(Define),
+    Ground(Ground),
     Assume(Formula),
     Detail(Vec<Form>),
     Formula(Formula),
@@ -217,21 +258,36 @@ impl Program {
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.forms.iter().filter_map(|form| match form {
             Form::Name(name) => Some(name.as_str()),
-            Form::Sense(_) | Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => None,
+            Form::Sense(_)
+            | Form::Define(_)
+            | Form::Ground(_)
+            | Form::Assume(_)
+            | Form::Detail(_)
+            | Form::Formula(_) => None,
         })
     }
 
     pub fn senses(&self) -> impl Iterator<Item = &Sense> {
         self.forms.iter().filter_map(|form| match form {
             Form::Sense(sense) => Some(sense),
-            Form::Name(_) | Form::Assume(_) | Form::Detail(_) | Form::Formula(_) => None,
+            Form::Name(_)
+            | Form::Define(_)
+            | Form::Ground(_)
+            | Form::Assume(_)
+            | Form::Detail(_)
+            | Form::Formula(_) => None,
         })
     }
 
     pub fn claims(&self) -> impl Iterator<Item = &Formula> {
         self.forms.iter().filter_map(|form| match form {
             Form::Formula(formula) => Some(formula),
-            Form::Name(_) | Form::Sense(_) | Form::Assume(_) | Form::Detail(_) => None,
+            Form::Name(_)
+            | Form::Sense(_)
+            | Form::Define(_)
+            | Form::Ground(_)
+            | Form::Assume(_)
+            | Form::Detail(_) => None,
         })
     }
 
@@ -241,8 +297,10 @@ impl Program {
             .iter()
             .zip(self.spans.iter())
             .filter_map(|(form, span)| match form {
-                Form::Formula(_) | Form::Assume(_) | Form::Detail(_) => Some(span.clone()),
-                Form::Name(_) | Form::Sense(_) => None,
+                Form::Formula(_) | Form::Assume(_) | Form::Detail(_) | Form::Ground(_) => {
+                    Some(span.clone())
+                }
+                Form::Name(_) | Form::Sense(_) | Form::Define(_) => None,
             })
             .collect()
     }

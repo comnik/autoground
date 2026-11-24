@@ -687,3 +687,461 @@ id = "imp-hidden-all-under-128k-neutral"
 proposition = "Jev accepts every request `autoground` sends for a text file smaller than 128 KiB."
 expected = "neutral"
 tags = ["plain", "closed-world", "missing-premise"]
+
+# ---------------------------------------------------------------------------
+# 13. Forall certificate (document): filtered SQL/Python generator with OR/NOT
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "forall-doc-generator"
+kind = "document"
+path = "generators/high_value_customer/run.py"
+tags = ["synthetic", "forall"]
+body = """
+# Generates out.csv of high-value customers for downstream checks.
+# TODO: restrict to enterprise tier once tier column is backfilled.
+import csv
+
+QUERY = '''
+SELECT c.id AS customer_id, 'high_value_customer' AS classification
+FROM customers c
+WHERE c.id IN ('Acme', 'Globex', 'Initech')
+  AND c.suspended = FALSE
+  AND (c.lifetime_sales_usd > 25000000 OR c.active_seats > 1000)
+'''
+
+def run(conn):
+    rows = conn.execute(QUERY).fetchall()
+    with open("out.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["customer_id", "classification"])
+        writer.writerows(rows)
+"""
+
+[[group.probes]]
+id = "forall-doc-is-customer"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c is a customer."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "forall-doc-not-suspended"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then it is not the case that c is suspended."
+expected = "entailed"
+tags = ["plain", "positive", "negation-inside-forall"]
+
+[[group.probes]]
+id = "forall-doc-not-suspended-para"
+proposition = "Whenever out.csv establishes that c is a high-value customer, c is not suspended."
+expected = "entailed"
+paraphrase_of = "forall-doc-not-suspended"
+tags = ["plain", "positive", "paraphrase", "negation-inside-forall"]
+
+[[group.probes]]
+id = "forall-doc-disjunction-entailed"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $25 million or c has more than 1000 active seats."
+expected = "entailed"
+tags = ["plain", "positive", "disjunction-inside-forall"]
+
+[[group.probes]]
+id = "forall-doc-disjunction-split-bad"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $25 million."
+expected = "contradicted"
+tags = ["plain", "adversarial", "disjunction-trap"]
+notes = "OR filter admits rows qualifying via active_seats > 1000 without > $25M sales, refuting the universal contract."
+
+[[group.probes]]
+id = "forall-doc-conjunction-upgrade-bad"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $25 million and c has more than 1000 active seats."
+expected = "contradicted"
+tags = ["plain", "adversarial", "disjunction-trap"]
+notes = "OR filter refutes the stricter universal AND contract."
+
+[[group.probes]]
+id = "forall-doc-threshold-drift-bad"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $50 million or c has more than 1000 active seats."
+expected = "contradicted"
+tags = ["plain", "adversarial", "threshold-drift"]
+notes = "Ontology tightened from $25M to $50M; query still filters > $25M, refuting the universal $50M contract."
+
+[[group.probes]]
+id = "forall-doc-suspended-contradicted"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c is suspended."
+expected = "contradicted"
+negation_of = "forall-doc-not-suspended"
+tags = ["plain", "adversarial", "negation"]
+
+[[group.probes]]
+id = "forall-doc-comment-trap-enterprise"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c is on the enterprise tier."
+expected = "neutral"
+tags = ["plain", "comment-trap", "closed-world"]
+notes = "Enterprise tier restriction is only a TODO comment, not enforced in QUERY."
+
+# ---------------------------------------------------------------------------
+# 14. Forall certificate (joint): schema.sql + query.sql + pipeline.py
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "forall-joint-pipeline"
+kind = "joint"
+tags = ["synthetic", "forall"]
+files = [
+  { path = "schema.sql", body = """
+CREATE TABLE customers (
+    id TEXT PRIMARY KEY,
+    -- Stored in US cents (100 cents = $1 USD).
+    lifetime_sales_cents BIGINT NOT NULL,
+    suspended BOOLEAN NOT NULL
+);
+""" },
+  { path = "query.sql", body = """
+SELECT id AS customer_id, 'high_value_customer' AS label
+FROM customers
+WHERE lifetime_sales_cents > 2500000000
+  AND suspended = FALSE;
+""" },
+  { path = "pipeline.py", body = """
+import csv
+
+def materialize(conn):
+    with open("query.sql") as q:
+        sql = q.read()
+    rows = conn.execute(sql).fetchall()
+    with open("out.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["customer_id", "label"])
+        w.writerows(rows)
+""" },
+]
+
+[[group.probes]]
+id = "forall-joint-sales-25m"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $25 million."
+expected = "entailed"
+tags = ["plain", "positive", "cross-file"]
+notes = "2,500,000,000 cents = $25,000,000 USD across schema.sql, query.sql, and pipeline.py."
+
+[[group.probes]]
+id = "forall-joint-sales-10m-weakened"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $10 million."
+expected = "entailed"
+tags = ["plain", "positive", "cross-file"]
+
+[[group.probes]]
+id = "forall-joint-not-suspended"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then it is not the case that c is suspended."
+expected = "entailed"
+tags = ["plain", "positive", "cross-file", "negation-inside-forall"]
+
+[[group.probes]]
+id = "forall-joint-sales-250m-unit-drift"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $250 million."
+expected = "neutral"
+tags = ["plain", "adversarial", "cross-file", "threshold-drift"]
+notes = "Off-by-10x unit trap: 2,500,000,000 cents is $25M, not $250M."
+
+[[group.probes]]
+id = "forall-joint-sales-under-10m-bad"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales less than $10 million."
+expected = "contradicted"
+tags = ["plain", "adversarial", "cross-file"]
+
+[[group.probes]]
+id = "forall-joint-wrong-output-file"
+proposition = "For all c, if staging.csv supports that c is a high-value customer, then c has lifetime sales greater than $25 million."
+expected = "neutral"
+tags = ["plain", "closed-world", "wrong-file"]
+notes = "pipeline.py writes out.csv, not staging.csv."
+
+[[group.probes]]
+id = "forall-joint-unstated-region"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c is located in the United States."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+# ---------------------------------------------------------------------------
+# 15. Forall certificate (document): multi-argument binary relation & role swap
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "forall-doc-binary-owns"
+kind = "document"
+path = "generators/owns/export_owners.py"
+tags = ["synthetic", "forall"]
+body = """
+import csv
+
+QUERY = '''
+SELECT c.id AS customer_id, a.id AS account_id, 'owns' AS relation
+FROM customers c
+JOIN accounts a ON a.billing_owner_id = c.id
+WHERE a.archived = FALSE
+'''
+
+def export(conn):
+    rows = conn.execute(QUERY).fetchall()
+    with open("owners.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["customer_id", "account_id", "relation"])
+        writer.writerows(rows)
+"""
+
+[[group.probes]]
+id = "forall-bin-billing-owner"
+proposition = "For all c and a, if owners.csv supports that c owns a, then c is the billing owner of a."
+expected = "entailed"
+tags = ["plain", "positive", "binary-forall"]
+
+[[group.probes]]
+id = "forall-bin-billing-owner-swapped"
+proposition = "For all c and a, if owners.csv supports that c owns a, then a is the billing owner of c."
+expected = "contradicted"
+tags = ["plain", "role-swap", "adversarial", "binary-forall"]
+
+[[group.probes]]
+id = "forall-bin-account-not-archived"
+proposition = "For all c and a, if owners.csv supports that c owns a, then it is not the case that a is archived."
+expected = "entailed"
+tags = ["plain", "positive", "binary-forall", "negation-inside-forall"]
+
+[[group.probes]]
+id = "forall-bin-account-archived-bad"
+proposition = "For all c and a, if owners.csv supports that c owns a, then a is archived."
+expected = "contradicted"
+negation_of = "forall-bin-account-not-archived"
+tags = ["plain", "adversarial", "binary-forall", "negation"]
+
+[[group.probes]]
+id = "forall-bin-customer-not-archived-swap"
+proposition = "For all c and a, if owners.csv supports that c owns a, then it is not the case that c is archived."
+expected = "neutral"
+tags = ["plain", "role-swap", "closed-world", "binary-forall"]
+notes = "WHERE a.archived = FALSE constrains account a, not customer c."
+
+[[group.probes]]
+id = "forall-bin-wrong-file"
+proposition = "For all c and a, if accounts.csv supports that c owns a, then c is the billing owner of a."
+expected = "neutral"
+tags = ["plain", "closed-world", "wrong-file", "binary-forall"]
+
+# ---------------------------------------------------------------------------
+# 16. Forall certificate (implication): decomposed lifted-support proof
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "forall-imp-certificate"
+kind = "implication"
+tags = ["deduction", "forall"]
+premises = [
+  "query.sql selects only customers that are not suspended and that have either lifetime sales greater than $25 million or more than 1000 active seats.",
+  "pipeline.py runs query.sql and writes each selected customer c into out.csv labeled as a high-value customer.",
+  "out.csv was produced by the current run of pipeline.py and contains no other entries.",
+]
+
+[[group.probes]]
+id = "forall-imp-is-customer"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c is a customer."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "forall-imp-not-suspended"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then it is not the case that c is suspended."
+expected = "entailed"
+tags = ["plain", "positive", "negation-inside-forall"]
+
+[[group.probes]]
+id = "forall-imp-disjunction"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $25 million or c has more than 1000 active seats."
+expected = "entailed"
+tags = ["plain", "positive", "disjunction-inside-forall"]
+
+[[group.probes]]
+id = "forall-imp-disjunction-para"
+proposition = "Whenever out.csv establishes that c is a high-value customer, either c's lifetime sales exceed $25 million or c has over 1000 active seats."
+expected = "entailed"
+paraphrase_of = "forall-imp-disjunction"
+tags = ["plain", "positive", "paraphrase", "disjunction-inside-forall"]
+
+[[group.probes]]
+id = "forall-imp-disjunction-split-neutral"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $25 million."
+expected = "neutral"
+tags = ["plain", "adversarial", "disjunction-trap"]
+notes = "Cannot drop the active_seats > 1000 disjunct."
+
+[[group.probes]]
+id = "forall-imp-threshold-drift-neutral"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c has lifetime sales greater than $50 million or c has more than 1000 active seats."
+expected = "neutral"
+tags = ["plain", "adversarial", "threshold-drift"]
+
+[[group.probes]]
+id = "forall-imp-suspended-contradicted"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c is suspended."
+expected = "contradicted"
+negation_of = "forall-imp-not-suspended"
+tags = ["plain", "adversarial", "negation"]
+
+[[group.probes]]
+id = "forall-imp-converse-neutral"
+proposition = "For all c, if c is an unsuspended customer with lifetime sales greater than $25 million, then out.csv supports that c is a high-value customer."
+expected = "neutral"
+tags = ["plain", "adversarial", "logic-fallacy", "converse"]
+notes = "Premises say 'selects only' (soundness =>), not 'selects all' (completeness <=)."
+
+[[group.probes]]
+id = "forall-imp-wrong-file-neutral"
+proposition = "For all c, if report.csv supports that c is a high-value customer, then c is a customer."
+expected = "neutral"
+tags = ["plain", "closed-world", "wrong-file"]
+
+# ---------------------------------------------------------------------------
+# 17. Generated witnesses (use-site half of certified `ground`)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "forall-wit-csv-positive-only"
+kind = "document"
+path = "generators/high_value_customer/out.csv"
+tags = ["synthetic", "forall", "generated-witness"]
+body = """
+customer_id,classification
+Acme,high_value_customer
+Globex,high_value_customer
+"""
+
+[[group.probes]]
+id = "wit-csv-pos-acme"
+proposition = "Acme is a high-value customer."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "wit-csv-pos-globex"
+proposition = "Globex is a high-value customer."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "wit-csv-pos-acme-neg"
+proposition = "Acme is not a high-value customer."
+expected = "contradicted"
+negation_of = "wit-csv-pos-acme"
+tags = ["plain", "adversarial", "negation"]
+
+[[group.probes]]
+id = "wit-csv-pos-initech-absent"
+proposition = "Initech is a high-value customer."
+expected = "neutral"
+tags = ["plain", "closed-world", "absent-row"]
+notes = "Absent from a positive-only filtered CSV must stay neutral (unknown)."
+
+[[group]]
+id = "forall-wit-csv-bool"
+kind = "document"
+path = "generators/high_value_customer/out.csv"
+tags = ["synthetic", "forall", "generated-witness"]
+body = """
+customer_id,is_high_value_customer
+Acme,true
+Globex,false
+"""
+
+[[group.probes]]
+id = "wit-csv-bool-acme-true"
+proposition = "Acme is a high-value customer."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "wit-csv-bool-globex-false"
+proposition = "Globex is a high-value customer."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group.probes]]
+id = "wit-csv-bool-globex-not"
+proposition = "Globex is not a high-value customer."
+expected = "entailed"
+negation_of = "wit-csv-bool-globex-false"
+tags = ["plain", "positive", "negation"]
+
+[[group.probes]]
+id = "wit-csv-bool-initech-absent"
+proposition = "Initech is a high-value customer."
+expected = "neutral"
+tags = ["plain", "closed-world", "absent-row"]
+
+[[group]]
+id = "forall-wit-markdown"
+kind = "document"
+path = "generators/high_value_customer/out.md"
+tags = ["synthetic", "forall", "generated-witness"]
+body = """
+# Customer Tier Audit (2026-11-24)
+
+- **Acme**: qualifies as a high-value customer ($31.4M lifetime sales, active).
+- **Globex**: does not qualify as a high-value customer ($12.0M lifetime sales, 400 seats).
+- **Umbrella**: pending manual review (sales ledger incomplete).
+"""
+
+[[group.probes]]
+id = "wit-md-acme-true"
+proposition = "Acme is a high-value customer."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "wit-md-globex-false"
+proposition = "Globex is a high-value customer."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group.probes]]
+id = "wit-md-umbrella-pending"
+proposition = "Umbrella is a high-value customer."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+[[group.probes]]
+id = "wit-md-initech-absent"
+proposition = "Initech is a high-value customer."
+expected = "neutral"
+tags = ["plain", "closed-world", "absent-row"]
+
+[[group]]
+id = "forall-wit-binary-csv"
+kind = "document"
+path = "generators/owns/owners.csv"
+tags = ["synthetic", "forall", "generated-witness"]
+body = """
+customer_id,account_id,relation
+Acme,acct_101,owns
+Globex,acct_202,owns
+"""
+
+[[group.probes]]
+id = "wit-bin-acme-owns-101"
+proposition = "Acme owns acct_101."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "wit-bin-swapped"
+proposition = "acct_101 owns Acme."
+expected = "contradicted"
+tags = ["plain", "role-swap", "adversarial"]
+
+[[group.probes]]
+id = "wit-bin-cross-row"
+proposition = "Acme owns acct_202."
+expected = "neutral"
+tags = ["plain", "cross-row", "closed-world"]
+
+[[group.probes]]
+id = "wit-bin-globex-owns-202"
+proposition = "Globex owns acct_202."
+expected = "entailed"
+tags = ["plain", "positive"]

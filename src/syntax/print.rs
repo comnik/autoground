@@ -66,6 +66,41 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
             out.push_str(&quote_const(&sense.template));
             out.push(')');
         }
+        Form::Define(define) => {
+            out.push_str("(define (");
+            push_ident(&define.sense, out);
+            for param in &define.params {
+                out.push(' ');
+                out.push_str(param);
+            }
+            out.push_str(")\n");
+            write_indent(indent + 1, out);
+            write_formula(&define.body, indent + 1, out);
+            out.push(')');
+        }
+        Form::Ground(ground) => {
+            out.push_str("(ground (");
+            push_ident(&ground.sense, out);
+            for param in &ground.params {
+                out.push(' ');
+                out.push_str(param);
+            }
+            out.push_str(")\n");
+            write_indent(indent + 1, out);
+            out.push_str("(witness");
+            for path in &ground.witness {
+                out.push(' ');
+                if path == "$" {
+                    out.push('$');
+                } else {
+                    out.push_str(&quote_const(path));
+                }
+            }
+            out.push_str(")\n");
+            write_indent(indent + 1, out);
+            write_formula(&ground.support, indent + 1, out);
+            out.push(')');
+        }
         Form::Assume(sentence) => {
             out.push_str("(assume ");
             write_formula(sentence, indent, out);
@@ -261,6 +296,24 @@ mod tests {
         let program = parse(src).unwrap();
         let printed = print_program(&program);
         assert!(printed.contains("(creates R (T))"), "{printed}");
+        let again = parse(&printed).unwrap();
+        assert_eq!(program, again);
+    }
+
+    #[test]
+    fn round_trip_keeps_define_and_ground() {
+        let src = r#"(sense customer "{c} is a customer")
+(sense high_value_customer "{c} is a high-value customer")
+(define (high_value_customer c)
+  (and
+    (customer c)
+    ("{c} has lifetime sales > $25 million" c)))
+(ground (high_value_customer c)
+  (witness "out.csv")
+  (witness "query.sql"))
+"#;
+        let program = parse(src).unwrap();
+        let printed = print_program(&program);
         let again = parse(&printed).unwrap();
         assert_eq!(program, again);
     }

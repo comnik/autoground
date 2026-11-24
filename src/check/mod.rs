@@ -142,10 +142,17 @@ pub struct BoundFile {
     pub path: PathBuf,
 }
 
+struct PreparedCert {
+    cert_id: String,
+    work: Vec<Work>,
+    defs: HashSet<String>,
+}
+
 /// Tickets enqueued for one brief, in the order [`Prepared::settle`] reads answers.
 pub struct Prepared {
     work: Vec<Work>,
     defs: HashSet<String>,
+    imported_certs: Vec<PreparedCert>,
     tickets: Vec<Ticket>,
 }
 
@@ -157,11 +164,24 @@ impl Prepared {
     /// `answers` follows [`Prepared::tickets`]. An oracle error fails the report.
     pub fn settle(self, answers: &[Result<Answer, OracleError>]) -> Result<Report, CheckError> {
         let mut cursor = 0;
+        let mut cert_seed: HashMap<String, Value> = HashMap::new();
+        for cert in self.imported_certs {
+            let mut cert_judged = Vec::with_capacity(cert.work.len());
+            for item in cert.work {
+                cert_judged.push(settle(item, answers, &mut cursor)?);
+            }
+            let cert_lemmas = lemma_values_with_seed(&cert_judged, &cert.defs, &cert_seed);
+            let value = cert_lemmas
+                .get(&cert.cert_id)
+                .copied()
+                .unwrap_or(Value::Unknown);
+            cert_seed.insert(cert.cert_id, value);
+        }
         let mut judged = Vec::with_capacity(self.work.len());
         for item in self.work {
             judged.push(settle(item, answers, &mut cursor)?);
         }
-        let lemmas = lemma_values(&judged, &self.defs);
+        let lemmas = lemma_values_with_seed(&judged, &self.defs, &cert_seed);
         let claims = judged.iter().map(|node| render(node, &lemmas)).collect();
         Ok(Report { claims })
     }
@@ -176,10 +196,19 @@ fn proposition_cites_dollar(proposition: &Proposition) -> bool {
     match proposition {
         Proposition::And(xs) | Proposition::Or(xs) => xs.iter().any(proposition_cites_dollar),
         Proposition::Not(inner) => proposition_cites_dollar(inner),
-        Proposition::Claim { support, .. } => match support {
+        Proposition::Defined { body, .. } => proposition_cites_dollar(body),
+        Proposition::Claim { support, .. } | Proposition::Cert { support, .. } => match support {
             Support::Witness { paths } => paths.iter().any(|path| path == "$"),
             Support::Sentence(inner) => proposition_cites_dollar(inner),
         },
+        Proposition::Grounded {
+            witness,
+            certificate,
+            ..
+        } => {
+            witness.iter().any(|path| path == "$")
+                || certificate.iter().any(proposition_cites_dollar)
+        }
         Proposition::Scope { body, .. } => body.iter().any(proposition_cites_dollar),
         Proposition::Sentence(_) | Proposition::Assume(_) => false,
     }
@@ -210,17 +239,34 @@ pub fn submit<O: Oracle>(
         tree: &tree,
         given: given.as_ref(),
     };
+    let mut imported_certs = Vec::new();
+    let mut seen_certs = HashSet::new();
     let mut work = Vec::with_capacity(claims.len());
     for claim in claims {
-        work.push(prepare(claim, &defs, &sources, bound, budget, oracle)?);
+        work.push(prepare(
+            claim,
+            &defs,
+            &sources,
+            bound,
+            budget,
+            oracle,
+            &mut imported_certs,
+            &mut seen_certs,
+        )?);
     }
     let mut tickets = Vec::new();
+    for cert in &imported_certs {
+        for item in &cert.work {
+            push_tickets(item, &mut tickets);
+        }
+    }
     for item in &work {
         push_tickets(item, &mut tickets);
     }
     Ok(Prepared {
         work,
         defs,
+        imported_certs,
         tickets,
     })
 }
@@ -268,9 +314,18 @@ fn collect_heads(proposition: &Proposition, heads: &mut HashSet<String>) {
             }
         }
         Proposition::Not(inner) => collect_heads(inner, heads),
-        Proposition::Sentence(_) => {}
+        Proposition::Sentence(_) | Proposition::Grounded { .. } => {}
+        Proposition::Defined { body, .. } => collect_heads(body, heads),
         Proposition::Claim { sentence, support } => {
             heads.insert(sentence.text.clone());
+            if let Support::Sentence(inner) = support {
+                collect_heads(inner, heads);
+            }
+        }
+        Proposition::Cert {
+            cert_id, support, ..
+        } => {
+            heads.insert(cert_id.clone());
             if let Support::Sentence(inner) = support {
                 collect_heads(inner, heads);
             }
@@ -330,6 +385,7 @@ struct Asked {
 
 struct Work {
     text: String,
+    cert_id: Option<String>,
     failure: Option<Failure>,
     cites: Vec<String>,
     children: Vec<Work>,
@@ -347,6 +403,14 @@ enum Kind {
     /// implication is entailed. False when the support is true and the
     /// implication is contradicted.
     Claim,
+    /// A sentence defined by a `define` form. Takes the exact Kleene value of its body.
+    Defined,
+    /// A `ground` certificate.
+    Cert,
+    /// Reference to a `ground` certificate's settled value.
+    CertUse,
+    /// A sentence grounded via a certified `ground` witness (`=>` soundness).
+    Grounded,
     Assume,
     Scope,
     And,
@@ -354,6 +418,7 @@ enum Kind {
     Not,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare<O: Oracle>(
     proposition: &Proposition,
     defs: &HashSet<String>,
@@ -361,12 +426,15 @@ fn prepare<O: Oracle>(
     bound: Option<&BoundFile>,
     budget: usize,
     oracle: &mut O,
+    imported_certs: &mut Vec<PreparedCert>,
+    seen_certs: &mut HashSet<String>,
 ) -> Result<Work, CheckError> {
     match proposition {
         Proposition::Sentence(sentence) => {
             let defined = defs.contains(&sentence.text);
             Ok(Work {
                 text: sentence.text.clone(),
+                cert_id: None,
                 failure: if defined {
                     None
                 } else {
@@ -379,15 +447,52 @@ fn prepare<O: Oracle>(
                 kind: if defined { Kind::Use } else { Kind::Leaf },
             })
         }
+        Proposition::Defined { sentence, body } => {
+            let child = prepare(
+                body,
+                defs,
+                sources,
+                bound,
+                budget,
+                oracle,
+                imported_certs,
+                seen_certs,
+            )?;
+            Ok(Work {
+                text: sentence.text.clone(),
+                cert_id: None,
+                failure: None,
+                cites: Vec::new(),
+                children: vec![child],
+                implication: None,
+                asked: Vec::new(),
+                kind: Kind::Defined,
+            })
+        }
         Proposition::Claim { sentence, support } => match support {
             Support::Witness { paths } => {
                 prepare_witness(sentence, paths, sources, bound, budget, oracle)
             }
             Support::Sentence(support) => {
-                let child = prepare(support, defs, sources, bound, budget, oracle)?;
-                let implication = Box::new(prepare_implication(sentence, support, oracle));
+                let child = prepare(
+                    support,
+                    defs,
+                    sources,
+                    bound,
+                    budget,
+                    oracle,
+                    imported_certs,
+                    seen_certs,
+                )?;
+                let implication = Box::new(prepare_implication(
+                    sentence,
+                    support,
+                    IMPLICATION_TEXT,
+                    oracle,
+                ));
                 Ok(Work {
                     text: sentence.text.clone(),
+                    cert_id: None,
                     failure: None,
                     cites: Vec::new(),
                     children: vec![child],
@@ -397,8 +502,128 @@ fn prepare<O: Oracle>(
                 })
             }
         },
+        Proposition::Cert {
+            cert_id,
+            label,
+            targets,
+            support,
+        } => match support {
+            Support::Witness { paths } => {
+                let mut children = Vec::with_capacity(targets.len());
+                for target in targets {
+                    children.push(prepare_witness(
+                        target, paths, sources, bound, budget, oracle,
+                    )?);
+                }
+                Ok(Work {
+                    text: label.clone(),
+                    cert_id: Some(cert_id.clone()),
+                    failure: None,
+                    cites: Vec::new(),
+                    children,
+                    implication: None,
+                    asked: Vec::new(),
+                    kind: Kind::Cert,
+                })
+            }
+            Support::Sentence(support) => {
+                let child = prepare(
+                    support,
+                    defs,
+                    sources,
+                    bound,
+                    budget,
+                    oracle,
+                    imported_certs,
+                    seen_certs,
+                )?;
+                let implication = if targets.len() == 1 {
+                    Box::new(prepare_implication(
+                        &targets[0],
+                        support,
+                        &targets[0].text,
+                        oracle,
+                    ))
+                } else {
+                    let steps = targets
+                        .iter()
+                        .map(|target| prepare_implication(target, support, &target.text, oracle))
+                        .collect();
+                    Box::new(Work {
+                        text: IMPLICATION_TEXT.to_string(),
+                        cert_id: None,
+                        failure: None,
+                        cites: Vec::new(),
+                        children: steps,
+                        implication: None,
+                        asked: Vec::new(),
+                        kind: Kind::And,
+                    })
+                };
+                Ok(Work {
+                    text: label.clone(),
+                    cert_id: Some(cert_id.clone()),
+                    failure: None,
+                    cites: Vec::new(),
+                    children: vec![child],
+                    implication: Some(implication),
+                    asked: Vec::new(),
+                    kind: Kind::Cert,
+                })
+            }
+        },
+        Proposition::Grounded {
+            sentence,
+            cert_id,
+            certificate,
+            witness,
+        } => {
+            if !certificate.is_empty() && seen_certs.insert(cert_id.clone()) {
+                let cert_defs = defined_heads(certificate);
+                let mut cert_work = Vec::with_capacity(certificate.len());
+                for item in certificate {
+                    cert_work.push(prepare(
+                        item,
+                        &cert_defs,
+                        sources,
+                        bound,
+                        budget,
+                        oracle,
+                        imported_certs,
+                        seen_certs,
+                    )?);
+                }
+                imported_certs.push(PreparedCert {
+                    cert_id: cert_id.clone(),
+                    work: cert_work,
+                    defs: cert_defs,
+                });
+            }
+            let cert_use = Work {
+                text: cert_id.clone(),
+                cert_id: Some(cert_id.clone()),
+                failure: None,
+                cites: Vec::new(),
+                children: Vec::new(),
+                implication: None,
+                asked: Vec::new(),
+                kind: Kind::CertUse,
+            };
+            let witness_work = prepare_witness(sentence, witness, sources, bound, budget, oracle)?;
+            Ok(Work {
+                text: sentence.text.clone(),
+                cert_id: None,
+                failure: None,
+                cites: Vec::new(),
+                children: vec![cert_use, witness_work],
+                implication: None,
+                asked: Vec::new(),
+                kind: Kind::Grounded,
+            })
+        }
         Proposition::Assume(sentence) => Ok(Work {
             text: sentence.text.clone(),
+            cert_id: None,
             failure: None,
             cites: Vec::new(),
             children: Vec::new(),
@@ -409,10 +634,20 @@ fn prepare<O: Oracle>(
         Proposition::Scope { body } => {
             let mut children = Vec::with_capacity(body.len());
             for claim in body {
-                children.push(prepare(claim, defs, sources, bound, budget, oracle)?);
+                children.push(prepare(
+                    claim,
+                    defs,
+                    sources,
+                    bound,
+                    budget,
+                    oracle,
+                    imported_certs,
+                    seen_certs,
+                )?);
             }
             Ok(Work {
                 text: "detail".to_string(),
+                cert_id: None,
                 failure: None,
                 cites: Vec::new(),
                 children,
@@ -421,16 +656,44 @@ fn prepare<O: Oracle>(
                 kind: Kind::Scope,
             })
         }
-        Proposition::And(xs) => {
-            prepare_bool("and", Kind::And, xs, defs, sources, bound, budget, oracle)
-        }
-        Proposition::Or(xs) => {
-            prepare_bool("or", Kind::Or, xs, defs, sources, bound, budget, oracle)
-        }
+        Proposition::And(xs) => prepare_bool(
+            "and",
+            Kind::And,
+            xs,
+            defs,
+            sources,
+            bound,
+            budget,
+            oracle,
+            imported_certs,
+            seen_certs,
+        ),
+        Proposition::Or(xs) => prepare_bool(
+            "or",
+            Kind::Or,
+            xs,
+            defs,
+            sources,
+            bound,
+            budget,
+            oracle,
+            imported_certs,
+            seen_certs,
+        ),
         Proposition::Not(inner) => {
-            let child = prepare(inner, defs, sources, bound, budget, oracle)?;
+            let child = prepare(
+                inner,
+                defs,
+                sources,
+                bound,
+                budget,
+                oracle,
+                imported_certs,
+                seen_certs,
+            )?;
             Ok(Work {
                 text: "not".to_string(),
+                cert_id: None,
                 failure: None,
                 cites: Vec::new(),
                 children: vec![child],
@@ -442,6 +705,7 @@ fn prepare<O: Oracle>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_bool<O: Oracle>(
     text: &str,
     kind: Kind,
@@ -451,13 +715,25 @@ fn prepare_bool<O: Oracle>(
     bound: Option<&BoundFile>,
     budget: usize,
     oracle: &mut O,
+    imported_certs: &mut Vec<PreparedCert>,
+    seen_certs: &mut HashSet<String>,
 ) -> Result<Work, CheckError> {
     let mut children = Vec::with_capacity(xs.len());
     for proposition in xs {
-        children.push(prepare(proposition, defs, sources, bound, budget, oracle)?);
+        children.push(prepare(
+            proposition,
+            defs,
+            sources,
+            bound,
+            budget,
+            oracle,
+            imported_certs,
+            seen_certs,
+        )?);
     }
     Ok(Work {
         text: text.to_string(),
+        cert_id: None,
         failure: None,
         cites: Vec::new(),
         children,
@@ -478,6 +754,7 @@ fn prepare_witness<O: Oracle>(
     let cites: Vec<String> = paths.iter().map(|path| cite_path(path, bound)).collect();
     let mut work = Work {
         text: sentence.text.clone(),
+        cert_id: None,
         failure: None,
         cites: cites.clone(),
         children: Vec::new(),
@@ -686,10 +963,16 @@ fn is_brief_file(path: &str) -> bool {
             && name[name.len() - ".brief".len()..].eq_ignore_ascii_case(".brief"))
 }
 
-fn prepare_implication<O: Oracle>(head: &Sentence, support: &Proposition, oracle: &mut O) -> Work {
+fn prepare_implication<O: Oracle>(
+    head: &Sentence,
+    support: &Proposition,
+    label: &str,
+    oracle: &mut O,
+) -> Work {
     let premises = premise_sentences(std::slice::from_ref(support));
     let mut work = Work {
-        text: IMPLICATION_TEXT.to_string(),
+        text: label.to_string(),
+        cert_id: None,
         failure: Some(Failure::NotEntailed),
         cites: Vec::new(),
         children: Vec::new(),
@@ -746,14 +1029,16 @@ fn push_premises(proposition: &Proposition, sentences: &mut Vec<String>) {
         Proposition::Sentence(sentence) | Proposition::Assume(sentence) => {
             sentences.push(sentence.grounded.clone());
         }
-        Proposition::Claim { sentence, .. } => sentences.push(sentence.grounded.clone()),
+        Proposition::Claim { sentence, .. }
+        | Proposition::Defined { sentence, .. }
+        | Proposition::Grounded { sentence, .. } => sentences.push(sentence.grounded.clone()),
         Proposition::And(xs) => {
             for proposition in xs {
                 push_premises(proposition, sentences);
             }
         }
         Proposition::Or(_) | Proposition::Not(_) => sentences.push(statement(proposition)),
-        Proposition::Scope { .. } => {}
+        Proposition::Scope { .. } | Proposition::Cert { .. } => {}
     }
 }
 
@@ -762,7 +1047,10 @@ fn statement(proposition: &Proposition) -> String {
         Proposition::Sentence(sentence) | Proposition::Assume(sentence) => {
             sentence.grounded.clone()
         }
-        Proposition::Claim { sentence, .. } => sentence.grounded.clone(),
+        Proposition::Claim { sentence, .. }
+        | Proposition::Defined { sentence, .. }
+        | Proposition::Grounded { sentence, .. } => sentence.grounded.clone(),
+        Proposition::Cert { label, .. } => label.clone(),
         Proposition::And(xs) => xs.iter().map(statement).collect::<Vec<_>>().join(" and "),
         Proposition::Or(xs) => xs.iter().map(statement).collect::<Vec<_>>().join(" or "),
         Proposition::Not(inner) => format!("not ({})", statement(inner)),
@@ -867,6 +1155,7 @@ fn push_tickets(work: &Work, tickets: &mut Vec<Ticket>) {
 /// waits until every detail has a value.
 struct Judged {
     text: String,
+    cert_id: Option<String>,
     kind: Kind,
     children: Vec<Judged>,
     implication: Option<Box<Judged>>,
@@ -892,12 +1181,21 @@ fn settle(
     let asked = take_answers(&work.asked, answers, cursor)?;
     let leaf = match work.kind {
         Kind::Leaf => Some(judge_leaf(&work, &asked)),
-        Kind::Use | Kind::Claim | Kind::Assume | Kind::Scope | Kind::And | Kind::Or | Kind::Not => {
-            None
-        }
+        Kind::Use
+        | Kind::Claim
+        | Kind::Defined
+        | Kind::Cert
+        | Kind::CertUse
+        | Kind::Grounded
+        | Kind::Assume
+        | Kind::Scope
+        | Kind::And
+        | Kind::Or
+        | Kind::Not => None,
     };
     Ok(Judged {
         text: work.text,
+        cert_id: work.cert_id,
         kind: work.kind,
         children,
         implication,
@@ -905,8 +1203,12 @@ fn settle(
     })
 }
 
-fn lemma_values(nodes: &[Judged], defs: &HashSet<String>) -> HashMap<String, Value> {
-    let mut values = HashMap::new();
+fn lemma_values_with_seed(
+    nodes: &[Judged],
+    defs: &HashSet<String>,
+    seed: &HashMap<String, Value>,
+) -> HashMap<String, Value> {
+    let mut values = seed.clone();
     let steps = count_nodes(nodes);
     for _ in 0..=steps {
         if !propagate(nodes, defs, &mut values) {
@@ -939,15 +1241,24 @@ fn propagate(
         if let Some(implication) = &node.implication {
             changed |= propagate(std::slice::from_ref(implication), defs, values);
         }
-        let defines = match node.kind {
-            Kind::Claim | Kind::Assume => true,
-            Kind::Leaf => defs.contains(&node.text),
-            Kind::Use | Kind::Scope | Kind::And | Kind::Or | Kind::Not => false,
+        let key = match node.kind {
+            Kind::Claim | Kind::Assume => Some(node.text.as_str()),
+            Kind::Cert => node.cert_id.as_deref(),
+            Kind::Leaf if defs.contains(&node.text) => Some(node.text.as_str()),
+            Kind::Leaf
+            | Kind::Use
+            | Kind::Defined
+            | Kind::CertUse
+            | Kind::Grounded
+            | Kind::Scope
+            | Kind::And
+            | Kind::Or
+            | Kind::Not => None,
         };
-        if defines {
+        if let Some(key) = key {
             let value = eval_value(node, values);
-            if values.get(&node.text) != Some(&value) {
-                values.insert(node.text.clone(), value);
+            if values.get(key) != Some(&value) {
+                values.insert(key.to_string(), value);
                 changed = true;
             }
         }
@@ -963,7 +1274,17 @@ fn eval_value(node: &Judged, lemmas: &HashMap<String, Value>) -> Value {
             .map(|leaf| leaf.0)
             .unwrap_or(Value::Unknown),
         Kind::Use => lemmas.get(&node.text).copied().unwrap_or(Value::Unknown),
+        Kind::CertUse => node
+            .cert_id
+            .as_deref()
+            .and_then(|id| lemmas.get(id).copied())
+            .unwrap_or(Value::Unknown),
         Kind::Assume => Value::True,
+        Kind::Defined => node
+            .children
+            .first()
+            .map(|child| eval_value(child, lemmas))
+            .unwrap_or(Value::Unknown),
         Kind::And => node
             .children
             .iter()
@@ -996,6 +1317,41 @@ fn eval_value(node: &Judged, lemmas: &HashMap<String, Value>) -> Value {
                     .unwrap_or(Value::Unknown)
             }
         }
+        Kind::Cert => {
+            if let Some(step) = &node.implication {
+                let support = node
+                    .children
+                    .first()
+                    .map(|child| eval_value(child, lemmas))
+                    .unwrap_or(Value::Unknown);
+                if support != Value::True {
+                    Value::Unknown
+                } else {
+                    eval_value(step, lemmas)
+                }
+            } else {
+                node.children
+                    .iter()
+                    .fold(Value::True, |acc, child| acc.and(eval_value(child, lemmas)))
+            }
+        }
+        Kind::Grounded => {
+            let cert = node
+                .children
+                .first()
+                .map(|child| eval_value(child, lemmas))
+                .unwrap_or(Value::Unknown);
+            let wit = node
+                .children
+                .get(1)
+                .map(|child| eval_value(child, lemmas))
+                .unwrap_or(Value::Unknown);
+            if cert == Value::True && wit == Value::True {
+                Value::True
+            } else {
+                Value::Unknown
+            }
+        }
     }
 }
 
@@ -1010,7 +1366,9 @@ fn render(node: &Judged, lemmas: &HashMap<String, Value>) -> Node {
         .as_ref()
         .map(|step| Box::new(render(step, lemmas)));
     let (failure, cites) = match node.kind {
-        Kind::Claim => (claim_failure(node, lemmas), Vec::new()),
+        Kind::Claim | Kind::Cert => (claim_failure(node, lemmas), Vec::new()),
+        Kind::Defined => (defined_failure(node, lemmas), Vec::new()),
+        Kind::Grounded => (grounded_failure(node, lemmas), Vec::new()),
         _ => match &node.leaf {
             Some((_, failure, cites)) => (failure.clone(), cites.clone()),
             None => (None, Vec::new()),
@@ -1030,18 +1388,65 @@ fn render(node: &Judged, lemmas: &HashMap<String, Value>) -> Node {
 /// The implication's failure, once the support holds. A support that failed
 /// leaves the claim unknown and keeps the comment on the support.
 fn claim_failure(node: &Judged, lemmas: &HashMap<String, Value>) -> Option<Failure> {
-    let support_holds = node
+    if let Some(step) = &node.implication {
+        let support_holds = node
+            .children
+            .first()
+            .is_some_and(|child| eval_value(child, lemmas) == Value::True);
+        if !support_holds {
+            return None;
+        }
+        if eval_value(step, lemmas) == Value::True {
+            return None;
+        }
+        return first_failure(step, lemmas);
+    }
+    if node.kind == Kind::Cert && eval_value(node, lemmas) != Value::True {
+        return first_failure(node, lemmas);
+    }
+    None
+}
+
+fn defined_failure(node: &Judged, lemmas: &HashMap<String, Value>) -> Option<Failure> {
+    if eval_value(node, lemmas) == Value::True {
+        return None;
+    }
+    node.children
+        .first()
+        .and_then(|child| first_failure(child, lemmas))
+}
+
+fn grounded_failure(node: &Judged, lemmas: &HashMap<String, Value>) -> Option<Failure> {
+    if eval_value(node, lemmas) == Value::True {
+        return None;
+    }
+    let cert_holds = node
         .children
         .first()
         .is_some_and(|child| eval_value(child, lemmas) == Value::True);
-    if !support_holds {
+    if !cert_holds {
+        return Some(Failure::NotEntailed);
+    }
+    node.children
+        .get(1)
+        .and_then(|child| first_failure(child, lemmas))
+}
+
+fn first_failure(node: &Judged, lemmas: &HashMap<String, Value>) -> Option<Failure> {
+    if eval_value(node, lemmas) == Value::True {
         return None;
     }
-    let step = node.implication.as_ref()?;
-    if eval_value(step, lemmas) == Value::True {
-        return None;
+    if let Some((_, Some(failure), _)) = &node.leaf {
+        return Some(failure.clone());
     }
-    step.leaf.as_ref().and_then(|leaf| leaf.1.clone())
+    for child in &node.children {
+        if let Some(failure) = first_failure(child, lemmas) {
+            return Some(failure);
+        }
+    }
+    node.implication
+        .as_deref()
+        .and_then(|step| first_failure(step, lemmas))
 }
 
 fn take_answers(
@@ -2182,6 +2587,165 @@ mod tests {
         assert!(write_report(&report)
             .contains("LogicReasoner plans deploy units that create LogicOutputTables"));
         assert!(!write_report(&report).contains("output_table_names"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn define_evaluates_deterministically_and_passes_sense_to_implications() {
+        let dir = scratch("define");
+        fs::write(dir.join("cust.txt"), "Acme is a customer\n").unwrap();
+        fs::write(dir.join("sales.txt"), "Acme sales\n").unwrap();
+        let mut oracle = Rec::new(|req| {
+            let prop = req.instructions["proposition"].as_str().unwrap_or("");
+            if prop.contains("Acme") {
+                choice("entailed", 0.95)
+            } else {
+                choice("contradicted", 0.95)
+            }
+        });
+        let report = check(
+            &compiled(
+                r#"
+(name Acme)
+(name Globex)
+(sense customer "{c} is a customer")
+(sense hv "{c} is a high-value customer")
+(define (hv c)
+  (and (customer c) ("{c} has > $25M sales" c)))
+
+(claim (customer Acme) (witness "cust.txt"))
+(claim ("{c} has > $25M sales" Acme) (witness "sales.txt"))
+(claim (customer Globex) (witness "cust.txt"))
+(claim ("{c} has > $25M sales" Globex) (witness "sales.txt"))
+
+(claim "Acme gets priority" (hv Acme))
+(not (hv Globex))
+"#,
+            ),
+            &dir,
+            DEFAULT_BODY_BYTES,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[4].value, Value::True);
+        assert_eq!(report.claims[5].value, Value::True);
+        let implications: Vec<_> = oracle
+            .seen
+            .iter()
+            .filter(|req| req.state.get("sentences").is_some())
+            .collect();
+        assert_eq!(implications.len(), 1);
+        assert_eq!(
+            implications[0].state["sentences"][0].as_str().unwrap(),
+            "Acme is a high-value customer"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ground_checks_imported_certificate_once_and_enforces_soundness() {
+        let dir = scratch("ground-linked");
+        fs::create_dir_all(dir.join("generators/hv")).unwrap();
+        fs::create_dir_all(dir.join("analysis")).unwrap();
+        fs::write(dir.join("generators/hv/query.sql"), "SELECT ...\n").unwrap();
+        fs::write(
+            dir.join("generators/hv/out.csv"),
+            "customer_id,is_high_value\nAcme,true\nGlobex,false\n",
+        )
+        .unwrap();
+
+        let files = vec![
+            crate::Loaded {
+                path: "ontology.brief".into(),
+                program: parse(
+                    r#"
+(ns acme.ontology)
+(sense customer "{c} is a customer")
+(sense hv "{c} is a high-value customer")
+(define (hv c)
+  (and (customer c) ("{c} has > $25M sales" c)))
+"#,
+                )
+                .unwrap(),
+            },
+            crate::Loaded {
+                path: "generators/hv/certificate.brief".into(),
+                program: parse(
+                    r#"
+(ns generators.hv (:require [acme.ontology :refer [hv]]))
+(claim "query.sql selects hv customers" (witness "query.sql"))
+(assume "out.csv is up to date")
+(ground (hv c)
+  (witness "out.csv")
+  (and "query.sql selects hv customers" "out.csv is up to date"))
+"#,
+                )
+                .unwrap(),
+            },
+        ];
+        let entry = parse(
+            r#"
+(ns acme.analysis
+  (:require [acme.ontology :refer [hv]] [generators.hv]))
+(name Acme)
+(name Globex)
+(and (hv Acme))
+(and (hv Globex))
+"#,
+        )
+        .unwrap();
+        let compiled = crate::link(&entry, Some("analysis/decision.brief"), &files).unwrap();
+
+        let mut oracle = Rec::new(|req| {
+            let prop = req.instructions["proposition"].as_str().unwrap_or("");
+            if prop.starts_with("Globex") {
+                choice("contradicted", 0.95)
+            } else {
+                choice("entailed", 0.95)
+            }
+        });
+        let report = check(
+            &compiled.claims,
+            &dir.join("analysis"),
+            DEFAULT_BODY_BYTES,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(report.claims[1].value, Value::Unknown);
+
+        // Certificate checked once (1 witness for query.sql + 2 forall implications),
+        // plus 2 instance checks against out.csv (Acme, Globex) = 5 total questions.
+        let cert_questions = oracle
+            .seen
+            .iter()
+            .filter(|req| {
+                req.instructions["proposition"]
+                    .as_str()
+                    .is_some_and(|p| p.starts_with("For all c,"))
+            })
+            .count();
+        assert_eq!(cert_questions, 2);
+        assert_eq!(oracle.seen.len(), 5);
+
+        // When the certificate fails, even an entailed witness stays Unknown.
+        let mut failing_cert = Rec::new(|req| {
+            let prop = req.instructions["proposition"].as_str().unwrap_or("");
+            if prop.starts_with("For all c,") {
+                choice("neutral", 0.95)
+            } else {
+                choice("entailed", 0.95)
+            }
+        });
+        let failed = check(
+            &compiled.claims,
+            &dir.join("analysis"),
+            DEFAULT_BODY_BYTES,
+            &mut failing_cert,
+        )
+        .unwrap();
+        assert_eq!(failed.claims[0].value, Value::Unknown);
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
