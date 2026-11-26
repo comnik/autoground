@@ -203,6 +203,9 @@ fn check_cmd(
         let onto_str = onto_path.to_string_lossy();
         let onto_src = model_source(&onto_str)?;
         let onto_program = parse(&onto_src)?;
+        let onto_dir = brief_dir(&onto_str);
+        let onto_root = namespace_root(&onto_dir);
+        let common_root = common_ancestor(&scan_root, &onto_root);
         let accepted = match assumptions_path {
             Some(path) => {
                 let s = path.to_string_lossy();
@@ -210,22 +213,27 @@ fn check_cmd(
                 let prog = parse(&text)?;
                 let disp = path
                     .is_file()
-                    .then(|| display_path(&scan_root, path));
+                    .then(|| display_path(&common_root, path));
                 Some((prog, disp))
             }
             None => None,
         };
-        let mut files = scan_namespaces(&scan_root)?;
-        let onto_dir = brief_dir(&onto_str);
-        let onto_root = namespace_root(&onto_dir);
+        let mut files: Vec<_> = scan_namespaces(&scan_root)?
+            .into_iter()
+            .map(|mut f| {
+                f.path = display_path(&common_root, &scan_root.join(&f.path));
+                f
+            })
+            .collect();
         if onto_root != scan_root {
             let mut seen: std::collections::HashSet<String> = files
                 .iter()
                 .filter_map(|f| f.program.namespace.as_ref().map(|ns| ns.name.clone()))
                 .collect();
-            for extra in scan_namespaces(&onto_root)? {
+            for mut extra in scan_namespaces(&onto_root)? {
                 if let Some(ns) = &extra.program.namespace {
                     if seen.insert(ns.name.clone()) {
+                        extra.path = display_path(&common_root, &onto_root.join(&extra.path));
                         files.push(extra);
                     }
                 }
@@ -234,8 +242,8 @@ fn check_cmd(
         let cert_entry = Path::new(input);
         let cert_path = cert_entry
             .is_file()
-            .then(|| display_path(&scan_root, cert_entry));
-        let onto_display = display_path(&scan_root, onto_path);
+            .then(|| display_path(&common_root, cert_entry));
+        let onto_display = display_path(&common_root, onto_path);
         let accepted_ref = accepted
             .as_ref()
             .map(|(prog, path)| (prog, path.as_deref()));
@@ -618,6 +626,24 @@ fn brief_dir(input: &str) -> PathBuf {
         }
     } else {
         PathBuf::from(".")
+    }
+}
+
+fn common_ancestor(left: &Path, right: &Path) -> PathBuf {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    let mut out = PathBuf::new();
+    for (a, b) in left.components().zip(right.components()) {
+        if a == b {
+            out.push(a.as_os_str());
+        } else {
+            break;
+        }
+    }
+    if out.as_os_str().is_empty() {
+        left
+    } else {
+        out
     }
 }
 

@@ -127,6 +127,9 @@ pub enum Formula {
     Witness {
         paths: Vec<String>,
     },
+    Spec {
+        paths: Vec<String>,
+    },
 }
 
 /// What `(:require ...)` pulls in from one namespace.

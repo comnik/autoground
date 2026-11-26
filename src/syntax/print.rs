@@ -206,6 +206,14 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
             }
             out.push(')');
         }
+        Formula::Spec { paths } => {
+            out.push_str("(spec");
+            for path in paths {
+                out.push(' ');
+                out.push_str(&quote_const(path));
+            }
+            out.push(')');
+        }
         Formula::Apply { reading, args, .. } => {
             if args.is_empty() {
                 if let Reading::Inline { template, holes: _ } = reading {
@@ -374,6 +382,11 @@ mod tests {
       (high_value_customer c)
       (customer c))))
 (define (forall [c] (implies (high_value_customer c) (customer c))))
+(sense pagerank "{v} has PageRank {r} in {g}")
+(define (pagerank g v r)
+  (spec "specs/pagerank.lean"))
+(define pr_conservation
+  (spec "specs/pagerank.lean"))
 (certify (is_a Merger CorporateAction)
   (witness "types.rs"))
 (certify (high_value_customer c)

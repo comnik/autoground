@@ -793,6 +793,7 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
         SexpKind::Symbol(head) if head == "forall" => lower_quantifier(s, xs, true),
         SexpKind::Symbol(head) if head == "claim" => lower_claim(s, xs),
         SexpKind::Symbol(head) if head == "witness" => lower_witness(s, xs),
+        SexpKind::Symbol(head) if head == "spec" => lower_spec(s, xs),
         SexpKind::Symbol(head) => Ok((
             Formula::Apply {
                 reading: Reading::Sense(use_symbol(&xs[0], head)?),
@@ -982,6 +983,27 @@ fn lower_witness(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseEr
     }
     Ok((
         Formula::Witness { paths },
+        ClauseSpan {
+            span: s.span.clone(),
+            children: Vec::new(),
+        },
+    ))
+}
+
+fn lower_spec(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseError> {
+    if xs.len() < 2 {
+        return Err(err_at(&xs[0], "`spec` takes a path"));
+    }
+    let mut paths = Vec::with_capacity(xs.len() - 1);
+    for item in &xs[1..] {
+        match &item.kind {
+            SexpKind::String(text) if !text.is_empty() => paths.push(text.clone()),
+            SexpKind::String(_) => return Err(err_at(item, "a spec path is not empty")),
+            _ => return Err(err_at(item, "a spec path is a string")),
+        }
+    }
+    Ok((
+        Formula::Spec { paths },
         ClauseSpan {
             span: s.span.clone(),
             children: Vec::new(),
@@ -1228,6 +1250,7 @@ fn is_reserved_word(spelling: &str) -> bool {
             | "or"
             | "not"
             | "implies"
+            | "spec"
             | "exists"
             | "forall"
             | "claim"

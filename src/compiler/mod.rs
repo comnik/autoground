@@ -61,6 +61,10 @@ pub(crate) enum DefinedBody {
         template: String,
         args: Vec<TemplateArg>,
     },
+    Spec {
+        paths: Vec<String>,
+        labels: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -756,6 +760,7 @@ fn formula_has_claim(formula: &Formula) -> bool {
         } => formula_has_claim(antecedent) || formula_has_claim(consequent),
         Formula::Apply { .. }
         | Formula::Witness { .. }
+        | Formula::Spec { .. }
         | Formula::Exists { .. }
         | Formula::Forall { .. } => false,
     }
@@ -978,7 +983,16 @@ fn collect_defines(
                 message: format!("duplicate definition of sense `{}`", sense_ident.display()),
             });
         }
-        let body = resolve_define_body(body, params, &[], names, senses, ctx)?;
+        let body = match body {
+            Formula::Spec { paths } => {
+                let paths = spec_paths(paths)?;
+                DefinedBody::Spec {
+                    labels: paths.clone(),
+                    paths,
+                }
+            }
+            other => resolve_define_body(other, params, &[], names, senses, ctx)?,
+        };
         if matches!(&body, DefinedBody::And(xs) | DefinedBody::Or(xs) if xs.is_empty()) {
             return Err(CompileError {
                 message: format!(
@@ -1013,15 +1027,34 @@ fn collect_defines(
                 message: format!("duplicate definition of `{name}`"),
             });
         }
-        let resolved_body = resolve_define_body(body, &[], &[], names, senses, ctx)?;
-        if matches!(&resolved_body, DefinedBody::And(xs) | DefinedBody::Or(xs) if xs.is_empty()) {
-            return Err(CompileError {
-                message: format!("`define` body for `{name}` cannot be empty"),
-            });
-        }
-        let text = render_defined_body(&resolved_body, &[], false, false)?;
-        let grounded = render_defined_body(&resolved_body, &[], true, false)?;
-        let sentence = Sentence { text, grounded };
+        let (resolved_body, sentence) = match body {
+            Formula::Spec { paths } => {
+                let paths = spec_paths(paths)?;
+                let sentence = Sentence::from(format!(
+                    "The implementation satisfies the specification in {}",
+                    format_witness_list(&paths)
+                ));
+                (
+                    DefinedBody::Spec {
+                        labels: paths.clone(),
+                        paths,
+                    },
+                    sentence,
+                )
+            }
+            other => {
+                let resolved_body = resolve_define_body(other, &[], &[], names, senses, ctx)?;
+                if matches!(&resolved_body, DefinedBody::And(xs) | DefinedBody::Or(xs) if xs.is_empty())
+                {
+                    return Err(CompileError {
+                        message: format!("`define` body for `{name}` cannot be empty"),
+                    });
+                }
+                let text = render_defined_body(&resolved_body, &[], false, false)?;
+                let grounded = render_defined_body(&resolved_body, &[], true, false)?;
+                (resolved_body, Sentence { text, grounded })
+            }
+        };
         remember(&mut ctx.expansions, &sentence)?;
         let resolved = ResolvedConstraint {
             body: resolved_body,
@@ -1149,6 +1182,9 @@ fn resolve_define_body(
                 "`witness` cannot appear inside a quantifier body".into()
             },
         }),
+        Formula::Spec { .. } => Err(CompileError {
+            message: "`spec` must be the entire body of `define`".into(),
+        }),
         Formula::Apply { reading, args, at } => {
             let mut resolved_args = Vec::with_capacity(args.len());
             for arg in args {
@@ -1270,6 +1306,7 @@ fn collect_define_deps(body: &DefinedBody, out: &mut Vec<SenseKey>) {
                 out.push(key.clone());
             }
         }
+        DefinedBody::Spec { .. } => {}
     }
 }
 
@@ -1556,6 +1593,7 @@ fn collect_claimed_heads(
         }
         Formula::Apply { .. }
         | Formula::Witness { .. }
+        | Formula::Spec { .. }
         | Formula::Exists { .. }
         | Formula::Forall { .. } => {}
     }
@@ -1660,9 +1698,14 @@ fn resolve_certify(
             collect_define_deps(&constraint.body, &mut deps);
             let (requires, imported) = collect_cert_prereqs(&deps, defs, ctx);
             let support = match &certify.support {
-                Formula::Witness { paths } => Support::Witness {
-                    paths: witness_paths(paths)?,
-                },
+                Formula::Witness { paths } => {
+                    let paths = witness_paths(paths)?;
+                    let paths = match &constraint.body {
+                        DefinedBody::Spec { paths: spec, .. } => merge_witness_paths(spec, &paths),
+                        _ => paths,
+                    };
+                    Support::Witness { paths }
+                }
                 other => Support::Sentence(Box::new(resolve(other, names, senses, defs, ctx)?)),
             };
             ctx.certified_rules.push((key, cert_id.clone()));
@@ -1703,9 +1746,14 @@ fn resolve_certify(
             collect_define_deps(&def.body, &mut deps);
             let (requires, imported) = collect_cert_prereqs(&deps, defs, ctx);
             let support = match &certify.support {
-                Formula::Witness { paths } => Support::Witness {
-                    paths: witness_paths(paths)?,
-                },
+                Formula::Witness { paths } => {
+                    let paths = witness_paths(paths)?;
+                    let paths = match &def.body {
+                        DefinedBody::Spec { paths: spec, .. } => merge_witness_paths(spec, &paths),
+                        _ => paths,
+                    };
+                    Support::Witness { paths }
+                }
                 other => Support::Sentence(Box::new(resolve(other, names, senses, defs, ctx)?)),
             };
             ctx.certified_rules.push((key, cert_id.clone()));
@@ -1800,7 +1848,8 @@ fn resolve_ground(
         "ground ({}) via {witness_display}",
         format_ground_head(&ground.sense, &ground.params)
     );
-    let (targets, requires, imported) = if defs.certifies.contains_key(&key) {
+    let has_certify = defs.certifies.contains_key(&key);
+    let (targets, requires, imported) = if has_certify {
         let (requires, imported) = collect_cert_prereqs(std::slice::from_ref(&key), defs, ctx);
         (
             vec![synthesize_provenance_target(
@@ -1822,9 +1871,18 @@ fn resolve_ground(
         )
     };
     let support = match &ground.support {
-        Formula::Witness { paths } => Support::Witness {
-            paths: witness_paths(paths)?,
-        },
+        Formula::Witness { paths } => {
+            let paths = witness_paths(paths)?;
+            let paths = if !has_certify {
+                match &def.body {
+                    DefinedBody::Spec { paths: spec, .. } => merge_witness_paths(spec, &paths),
+                    _ => paths,
+                }
+            } else {
+                paths
+            };
+            Support::Witness { paths }
+        }
         other => Support::Sentence(Box::new(resolve(other, names, senses, defs, ctx)?)),
     };
     Ok(Proposition::Cert {
@@ -1856,6 +1914,22 @@ fn synthesize_certify_target(
 ) -> Result<Sentence, CompileError> {
     let prefix = format_forall_prefix(params);
     let head = head.trim_end_matches('.');
+    if let DefinedBody::Spec { labels, .. } = body {
+        let spec_list = format_witness_list(labels);
+        let rhs = match params {
+            [] => format!("the specification in {spec_list} holds"),
+            [only] => format!("{only} satisfies the specification in {spec_list}"),
+            many => format!(
+                "{} satisfy the specification in {spec_list}",
+                format_witness_list(many)
+            ),
+        };
+        let text = format!("{prefix}{head} if and only if {rhs}.");
+        return Ok(Sentence {
+            grounded: text.clone(),
+            text,
+        });
+    }
     let param_spellings: Vec<Spelling> = params
         .iter()
         .map(|p| Spelling {
@@ -2072,6 +2146,10 @@ fn render_defined_body(
                 Ok(joined)
             }
         }
+        DefinedBody::Spec { labels, .. } => Ok(format!(
+            "this holds under the specification in {}",
+            format_witness_list(labels)
+        )),
     }
 }
 
@@ -2186,6 +2264,9 @@ fn resolve(
         }
         Formula::Witness { .. } => Err(CompileError {
             message: "`witness` is only the support of a claim".into(),
+        }),
+        Formula::Spec { .. } => Err(CompileError {
+            message: "`spec` is only allowed as the body of `define`".into(),
         }),
         Formula::Apply { reading, args, at } => {
             let mut arg_spellings = Vec::with_capacity(args.len());
@@ -2342,6 +2423,9 @@ fn instantiate_defined_body(
             }
             resolve_applied_sentence(sense_key.as_ref(), template, &arg_spellings, defs, ctx)
         }
+        DefinedBody::Spec { .. } => Err(CompileError {
+            message: "a `spec` definition must be certified or grounded".into(),
+        }),
     }
 }
 
@@ -2796,6 +2880,33 @@ fn witness_paths(paths: &[String]) -> Result<Vec<String>, CompileError> {
         }
     }
     Ok(paths.to_vec())
+}
+
+fn spec_paths(paths: &[String]) -> Result<Vec<String>, CompileError> {
+    let mut seen = HashSet::new();
+    for path in paths {
+        if path == "$" || !is_brief_path(path) {
+            return Err(CompileError {
+                message: format!("`{path}` is not a path relative to the brief"),
+            });
+        }
+        if !seen.insert(path.clone()) {
+            return Err(CompileError {
+                message: format!("spec cites `{path}` twice"),
+            });
+        }
+    }
+    Ok(paths.to_vec())
+}
+
+fn merge_witness_paths(spec: &[String], support: &[String]) -> Vec<String> {
+    let mut merged = Vec::with_capacity(spec.len() + support.len());
+    for path in spec.iter().chain(support.iter()) {
+        if !merged.contains(path) {
+            merged.push(path.clone());
+        }
+    }
+    merged
 }
 
 /// A witness path is relative to the brief file. `..` is a parent of that file.
@@ -3946,5 +4057,87 @@ A nullary sense reads either as a noun phrase or as a sentence, not both."
         )
         .unwrap_err();
         assert!(shadowed.message.contains("already bound"), "{shadowed}");
+    }
+
+    #[test]
+    fn spec_define_merges_witness_synthesizes_refinement_and_rejects_ungrounded_use() {
+        let c = compiled(
+            r#"
+(sense pagerank "{v} has PageRank score {r} in {g}")
+(define (pagerank v r g) (spec "specs/pagerank.lean"))
+(define pr_props (spec "specs/pagerank.lean"))
+(certify (pagerank v r g) (witness "pagerank.py"))
+(certify pr_props (witness "pagerank.py"))
+"#,
+        );
+        let Proposition::Cert {
+            targets,
+            support: Support::Witness { paths },
+            ..
+        } = &c.claims[0]
+        else {
+            panic!("expected Cert for pagerank");
+        };
+        assert_eq!(
+            targets[0].text,
+            "For all v, r, and g, v has PageRank score r in g if and only if v, r, and g satisfy the specification in specs/pagerank.lean."
+        );
+        assert_eq!(
+            paths,
+            &vec!["specs/pagerank.lean".to_string(), "pagerank.py".to_string()]
+        );
+
+        let Proposition::Cert {
+            targets: prop_targets,
+            support: Support::Witness { paths: prop_paths },
+            ..
+        } = &c.claims[1]
+        else {
+            panic!("expected Cert for pr_props");
+        };
+        assert_eq!(
+            prop_targets[0].text,
+            "The implementation satisfies the specification in specs/pagerank.lean."
+        );
+        assert_eq!(
+            prop_paths,
+            &vec!["specs/pagerank.lean".to_string(), "pagerank.py".to_string()]
+        );
+
+        let nested = compile(
+            &parse(
+                r#"
+(sense p "{x} holds")
+(define (p x) (and ("{x} exists" x) (spec "specs/p.lean")))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            nested.message.contains("must be the entire body of `define`"),
+            "{nested}"
+        );
+
+        let ungrounded = compile(
+            &parse(
+                r#"
+(name G)
+(name V)
+(name R)
+(sense pagerank "{v} has PageRank score {r} in {g}")
+(define (pagerank g v r) (spec "specs/pagerank.lean"))
+(and (pagerank G V R))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            ungrounded
+                .message
+                .contains("must be certified or grounded"),
+            "{ungrounded}"
+        );
     }
 }

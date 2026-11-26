@@ -5,8 +5,8 @@ use crate::syntax::{Program, Proposition, Refer, Sense, Sentence, Support};
 
 use super::scan::Loaded;
 use super::{
-    compile_module, CompileError, Compiled, CompiledModule, ExportedCertify, ExportedGround,
-    Imports, Opened, ResolvedConstraint, ResolvedDefine, SenseKey,
+    compile_module, CompileError, Compiled, CompiledModule, DefinedBody, ExportedCertify,
+    ExportedGround, Imports, Opened, ResolvedConstraint, ResolvedDefine, SenseKey,
 };
 
 pub(crate) struct Item<'a> {
@@ -209,6 +209,7 @@ pub(crate) fn environment(
     }
     for ns in &reachable {
         if let Some(module) = modules.get(ns) {
+            let from_path = index[ns].path;
             for (key, def) in &module.defines {
                 if let Some((prev, _)) = imported_defines.get(key) {
                     return Err(CompileError {
@@ -218,7 +219,10 @@ pub(crate) fn environment(
                         ),
                     });
                 }
-                imported_defines.insert(key.clone(), (ns.clone(), def.clone()));
+                imported_defines.insert(
+                    key.clone(),
+                    (ns.clone(), rebase_define(def, from_path, target_path)),
+                );
             }
             for (text, sentence) in &module.facts {
                 if let Some((prev, _)) = imported_facts.get(text) {
@@ -237,7 +241,13 @@ pub(crate) fn environment(
                         ),
                     });
                 }
-                imported_constraints.insert(key.clone(), (ns.clone(), constraint.clone()));
+                imported_constraints.insert(
+                    key.clone(),
+                    (
+                        ns.clone(),
+                        rebase_constraint(constraint, from_path, target_path),
+                    ),
+                );
             }
         }
     }
@@ -500,6 +510,37 @@ fn collect_reachable(
             }
         }
         out.push(ns.to_string());
+    }
+}
+
+fn rebase_define(def: &ResolvedDefine, from_file: &str, to_file: &str) -> ResolvedDefine {
+    ResolvedDefine {
+        sense: def.sense.clone(),
+        body: rebase_defined_body(&def.body, from_file, to_file),
+    }
+}
+
+fn rebase_constraint(
+    constraint: &ResolvedConstraint,
+    from_file: &str,
+    to_file: &str,
+) -> ResolvedConstraint {
+    ResolvedConstraint {
+        body: rebase_defined_body(&constraint.body, from_file, to_file),
+        sentence: constraint.sentence.clone(),
+    }
+}
+
+fn rebase_defined_body(body: &DefinedBody, from_file: &str, to_file: &str) -> DefinedBody {
+    match body {
+        DefinedBody::Spec { paths, labels } => DefinedBody::Spec {
+            paths: paths
+                .iter()
+                .map(|p| rebase_path(p, from_file, to_file))
+                .collect(),
+            labels: labels.clone(),
+        },
+        other => other.clone(),
     }
 }
 
@@ -1347,5 +1388,76 @@ mod tests {
             panic!("expected imported canceled Cert");
         };
         assert_eq!(paths, &vec!["../impl/cancel_chains.py".to_string()]);
+    }
+
+    #[test]
+    fn spec_define_rebases_paths_across_ontology_cert_and_run_layers() {
+        let files = vec![
+            loaded(
+                "ontology.brief",
+                r#"
+(ns acme.onto)
+(sense pagerank "{v} has PageRank score {r} in {g}")
+(define (pagerank v r g) (spec "specs/pagerank.lean"))
+"#,
+            ),
+            loaded(
+                "impl/cert.brief",
+                r#"
+(ns impl.pr (:require [acme.onto :refer :all]))
+(certify (pagerank v r g) (witness "pagerank.py"))
+"#,
+            ),
+            loaded(
+                "runs/2026-11-26/ground.brief",
+                r#"
+(ns runs.pr
+  (:require
+    [acme.onto :refer [pagerank]]
+    [impl.pr]))
+(assume "scores.csv came from pagerank.py")
+(ground (pagerank v r g)
+  (witness "scores.csv")
+  "scores.csv came from pagerank.py")
+"#,
+            ),
+        ];
+
+        let cert = link(&files[1].program, Some(files[1].path.as_str()), &files).unwrap();
+        let Proposition::Cert {
+            targets,
+            support: Support::Witness { paths },
+            ..
+        } = &cert.claims[0]
+        else {
+            panic!("expected Cert");
+        };
+        assert_eq!(
+            targets[0].text,
+            "For all v, r, and g, v has PageRank score r in g if and only if v, r, and g satisfy the specification in specs/pagerank.lean."
+        );
+        assert_eq!(
+            paths,
+            &vec!["../specs/pagerank.lean".to_string(), "pagerank.py".to_string()]
+        );
+
+        let run = link(&files[2].program, Some(files[2].path.as_str()), &files).unwrap();
+        let Proposition::Cert { imported, .. } = &run.claims[1] else {
+            panic!("expected ground Cert");
+        };
+        let Proposition::Cert {
+            support: Support::Witness { paths: run_paths },
+            ..
+        } = &imported[0]
+        else {
+            panic!("expected imported Cert");
+        };
+        assert_eq!(
+            run_paths,
+            &vec![
+                "../../specs/pagerank.lean".to_string(),
+                "../../impl/pagerank.py".to_string(),
+            ]
+        );
     }
 }
