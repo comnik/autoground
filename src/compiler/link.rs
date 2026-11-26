@@ -9,9 +9,9 @@ use super::{
     Imports, Opened, ResolvedDefine, SenseKey,
 };
 
-struct Item<'a> {
-    path: &'a str,
-    program: &'a Program,
+pub(crate) struct Item<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) program: &'a Program,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +40,16 @@ pub fn link_parts(
     entry_path: Option<&str>,
     files: &[Loaded],
 ) -> Result<(Compiled, super::Vocabulary), CompileError> {
+    let (module, imports) = link_module(entry, entry_path, files)?;
+    let vocab = super::Vocabulary::from_imports(&imports);
+    Ok((module.compiled, vocab))
+}
+
+pub(crate) fn link_module(
+    entry: &Program,
+    entry_path: Option<&str>,
+    files: &[Loaded],
+) -> Result<(CompiledModule, Imports), CompileError> {
     let index = build_index(entry, entry_path, files)?;
     let order = dependency_order(entry, &index)?;
     let mut modules: HashMap<String, CompiledModule> = HashMap::new();
@@ -53,12 +63,11 @@ pub fn link_parts(
     }
     let target_path = entry_path.unwrap_or("");
     let imports = environment(entry, target_path, &index, &modules)?;
-    let vocab = super::Vocabulary::from_imports(&imports);
-    let compiled = compile_module(entry, &imports)?.compiled;
-    Ok((compiled, vocab))
+    let module = compile_module(entry, &imports)?;
+    Ok((module, imports))
 }
 
-fn build_index<'a>(
+pub(crate) fn build_index<'a>(
     entry: &'a Program,
     entry_path: Option<&'a str>,
     files: &'a [Loaded],
@@ -98,7 +107,7 @@ fn insert<'a>(
     Ok(())
 }
 
-fn dependency_order(
+pub(crate) fn dependency_order(
     entry: &Program,
     index: &HashMap<String, Item<'_>>,
 ) -> Result<Vec<String>, CompileError> {
@@ -148,7 +157,7 @@ fn visit(
     Ok(())
 }
 
-fn environment(
+pub(crate) fn environment(
     program: &Program,
     target_path: &str,
     index: &HashMap<String, Item<'_>>,
@@ -175,6 +184,7 @@ fn environment(
     let mut imported_defines: HashMap<SenseKey, (String, ResolvedDefine)> = HashMap::new();
     let mut imported_facts: HashMap<String, (String, Sentence)> = HashMap::new();
     let mut imported_certifies: HashMap<SenseKey, (String, ExportedCertify)> = HashMap::new();
+    let mut imported_certified_facts: HashMap<String, (String, ExportedCertify)> = HashMap::new();
     let mut imported_grounds: HashMap<SenseKey, (String, ExportedGround)> = HashMap::new();
     let mut aliases: HashMap<String, String> = HashMap::new();
     let mut opened: HashMap<String, Opened> = HashMap::new();
@@ -305,6 +315,18 @@ fn environment(
                 let rebased = rebase_certify(certify, item.path, target_path);
                 imported_certifies.insert(key.clone(), (require.namespace.clone(), rebased));
             }
+            for (fact, certify) in &module.certified_facts {
+                if let Some((prev, _)) = imported_certified_facts.get(fact) {
+                    return Err(CompileError {
+                        message: format!(
+                            "`{fact}` is certified in both `{prev}` and `{}`",
+                            require.namespace
+                        ),
+                    });
+                }
+                let rebased = rebase_certify(certify, item.path, target_path);
+                imported_certified_facts.insert(fact.clone(), (require.namespace.clone(), rebased));
+            }
             for (key, ground) in &module.grounds {
                 if let Some((prev, _)) = imported_grounds.get(key) {
                     return Err(CompileError {
@@ -358,6 +380,10 @@ fn environment(
             .map(|(k, (_, v))| (k, v))
             .collect(),
         certifies: imported_certifies
+            .into_iter()
+            .map(|(k, (_, v))| (k, v))
+            .collect(),
+        certified_facts: imported_certified_facts
             .into_iter()
             .map(|(k, (_, v))| (k, v))
             .collect(),

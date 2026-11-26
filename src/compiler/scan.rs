@@ -7,7 +7,7 @@ use crate::syntax::{brief_source, extract_briefs, mentions_namespace, parse, Pro
 
 /// A model file that declares a namespace. `path` is relative to the repo
 /// when the file lives inside it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Loaded {
     pub path: String,
     pub program: Program,

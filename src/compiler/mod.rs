@@ -6,9 +6,11 @@ use crate::syntax::{
     Sentence, Support,
 };
 
+mod compare;
 mod link;
 mod scan;
 
+pub use compare::{compare_against, AgainstReport};
 pub use link::{link, link_parts};
 pub use scan::{display_path, scan_briefs, scan_namespaces, BriefFile, LoadError, Loaded};
 
@@ -94,8 +96,11 @@ pub(crate) struct GroundRule {
 pub(crate) struct CompiledModule {
     pub(crate) compiled: Compiled,
     pub(crate) defines: HashMap<SenseKey, ResolvedDefine>,
+    pub(crate) define_order: Vec<SenseKey>,
     pub(crate) facts: HashMap<String, Sentence>,
+    pub(crate) fact_order: Vec<String>,
     pub(crate) certifies: HashMap<SenseKey, ExportedCertify>,
+    pub(crate) certified_facts: HashMap<String, ExportedCertify>,
     pub(crate) grounds: HashMap<SenseKey, ExportedGround>,
 }
 
@@ -118,9 +123,11 @@ pub(crate) struct Imports {
     /// Ground definitions exported by required namespaces, keyed by sentence text.
     facts: HashMap<String, Sentence>,
     /// Implementation certifications exported by required namespaces, keyed by canonical sense.
-    certifies: HashMap<SenseKey, ExportedCertify>,
+    pub(crate) certifies: HashMap<SenseKey, ExportedCertify>,
+    /// Certified ground facts exported by required namespaces, keyed by sentence text.
+    pub(crate) certified_facts: HashMap<String, ExportedCertify>,
     /// Grounding rules exported by required namespaces, keyed by canonical sense.
-    grounds: HashMap<SenseKey, ExportedGround>,
+    pub(crate) grounds: HashMap<SenseKey, ExportedGround>,
 }
 
 impl Imports {
@@ -134,6 +141,7 @@ impl Imports {
             defines: HashMap::new(),
             facts: HashMap::new(),
             certifies: HashMap::new(),
+            certified_facts: HashMap::new(),
             grounds: HashMap::new(),
         }
     }
@@ -404,6 +412,8 @@ pub(crate) fn compile_module(
         claimed: HashSet::new(),
         next_detail_id: 0,
         used_ground_assumptions: Vec::new(),
+        certified_rules: Vec::new(),
+        certified_facts: Vec::new(),
     };
 
     let mut defs = Defs {
@@ -439,7 +449,7 @@ pub(crate) fn compile_module(
             })
             .collect(),
     };
-    let (local_defines, local_facts) = collect_defines(
+    let (local_defines, define_order, local_facts, fact_order) = collect_defines(
         &program.forms,
         &declared,
         &sense_by_name,
@@ -448,7 +458,7 @@ pub(crate) fn compile_module(
     )?;
     check_define_cycles(&defs.rules)?;
 
-    let local_certifies = collect_certifies(
+    let _local_certifies = collect_certifies(
         &program.forms,
         &sense_by_name,
         &defs.rules,
@@ -488,7 +498,8 @@ pub(crate) fn compile_module(
         }
     }
 
-    let exported_certifies = export_certifies(&local_certifies, &claims);
+    let exported_certifies = export_certifies(&ctx.certified_rules, &claims);
+    let exported_certified_facts = export_fact_certifies(&ctx.certified_facts, &claims);
     let exported_grounds = export_grounds(&local_grounds, &claims);
 
     Ok(CompiledModule {
@@ -500,8 +511,11 @@ pub(crate) fn compile_module(
             terms: ctx.terms,
         },
         defines: local_defines,
+        define_order,
         facts: local_facts,
+        fact_order,
         certifies: exported_certifies,
+        certified_facts: exported_certified_facts,
         grounds: exported_grounds,
     })
 }
@@ -740,6 +754,8 @@ struct Ctx<'a> {
     claimed: HashSet<String>,
     next_detail_id: usize,
     used_ground_assumptions: Vec<String>,
+    certified_rules: Vec<(SenseKey, String)>,
+    certified_facts: Vec<String>,
 }
 
 fn file_scope(forms: &[Form], imports: &Imports) -> HashMap<String, DeclUse> {
@@ -885,8 +901,17 @@ fn collect_defines(
     senses: &HashMap<String, (SenseKey, Sense)>,
     defs: &mut Defs,
     ctx: &mut Ctx<'_>,
-) -> Result<(HashMap<SenseKey, ResolvedDefine>, HashMap<String, Sentence>), CompileError> {
+) -> Result<
+    (
+        HashMap<SenseKey, ResolvedDefine>,
+        Vec<SenseKey>,
+        HashMap<String, Sentence>,
+        Vec<String>,
+    ),
+    CompileError,
+> {
     let mut local_rules = HashMap::new();
+    let mut rule_order = Vec::new();
     for form in forms {
         let Form::Define(Define::Rule {
             sense: sense_ident,
@@ -924,10 +949,12 @@ fn collect_defines(
         }
         let resolved = ResolvedDefine { sense, body };
         defs.rules.insert(key.clone(), resolved.clone());
+        rule_order.push(key.clone());
         local_rules.insert(key, resolved);
     }
 
     let mut local_facts = HashMap::new();
+    let mut fact_order = Vec::new();
     for form in forms {
         let Form::Define(Define::Fact { sentence, .. }) = form else {
             continue;
@@ -947,9 +974,10 @@ fn collect_defines(
             });
         }
         defs.facts.insert(sentence.text.clone(), sentence.clone());
+        fact_order.push(sentence.text.clone());
         local_facts.insert(sentence.text.clone(), sentence);
     }
-    Ok((local_rules, local_facts))
+    Ok((local_rules, rule_order, local_facts, fact_order))
 }
 
 fn resolve_define_body(
@@ -1454,6 +1482,7 @@ fn resolve_certify(
                 },
                 other => Support::Sentence(Box::new(resolve(other, names, senses, defs, ctx)?)),
             };
+            ctx.certified_rules.push((key, cert_id.clone()));
             return Ok(Proposition::Cert {
                 cert_id,
                 label,
@@ -1486,6 +1515,7 @@ fn resolve_certify(
         },
         other => Support::Sentence(Box::new(resolve(other, names, senses, defs, ctx)?)),
     };
+    ctx.certified_facts.push(sentence.text.clone());
     Ok(Proposition::Claim { sentence, support })
 }
 
@@ -2128,6 +2158,52 @@ fn export_certifies(
             sense_key.clone(),
             ExportedCertify {
                 cert_id: cert_id.clone(),
+                certificate: bundled,
+                assumptions,
+            },
+        );
+    }
+    exported
+}
+
+fn export_fact_certifies(
+    certified_facts: &[String],
+    claims: &[Proposition],
+) -> HashMap<String, ExportedCertify> {
+    if certified_facts.is_empty() {
+        return HashMap::new();
+    }
+    let mut local_defs: HashMap<String, Proposition> = HashMap::new();
+    let mut local_certs: HashMap<String, Proposition> = HashMap::new();
+    collect_exportable_props(claims, &mut local_defs, &mut local_certs);
+
+    let mut exported = HashMap::new();
+    for fact in certified_facts {
+        let Some(claim_prop) = local_defs.get(fact) else {
+            continue;
+        };
+        let mut inline_defs = HashSet::new();
+        collect_inline_defs(claim_prop, &mut inline_defs);
+        let mut bundled = Vec::new();
+        let mut visited_defs = HashSet::new();
+        visited_defs.insert(fact.clone());
+        let mut visited_certs = HashSet::new();
+        bundle_deps(
+            claim_prop,
+            &inline_defs,
+            &local_defs,
+            &local_certs,
+            &mut visited_defs,
+            &mut visited_certs,
+            &mut bundled,
+        );
+        bundled.push(claim_prop.clone());
+        let mut assumptions = Vec::new();
+        collect_assumptions_from_props(&bundled, &mut assumptions);
+        exported.insert(
+            fact.clone(),
+            ExportedCertify {
+                cert_id: format!("fact:{fact}"),
                 certificate: bundled,
                 assumptions,
             },

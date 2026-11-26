@@ -12,7 +12,8 @@ use autoground::oracle::{JevOracle, Oracle, Usage, UsageRecord};
 use autoground::prepare;
 use autoground::report::summary::{print_assumptions, print_file_line, print_run_summary};
 use autoground::{
-    brief_source, compile, display_path, parse, scan_briefs, scan_namespaces, Proposition,
+    brief_source, compare_against, compile, display_path, parse, scan_briefs, scan_namespaces,
+    Proposition,
 };
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -66,6 +67,12 @@ enum Commands {
         /// Defaults to `/tmp/autoground`.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
+        /// Ontology brief whose definitions this check must certify.
+        #[arg(long, value_name = "ONTOLOGY")]
+        against: Option<PathBuf>,
+        /// Brief of accepted assumptions allowed when checking --against an ontology.
+        #[arg(long, value_name = "FILE")]
+        assumptions: Option<PathBuf>,
     },
     /// Compare the names, senses, and statements of two briefs for consistency.
     ///
@@ -127,7 +134,16 @@ fn main() -> ExitCode {
             file,
             budget,
             out,
-        } => match check_cmd(&input, file.as_deref(), budget, out.as_deref()) {
+            against,
+            assumptions,
+        } => match check_cmd(
+            &input,
+            file.as_deref(),
+            budget,
+            out.as_deref(),
+            against.as_deref(),
+            assumptions.as_deref(),
+        ) {
             Ok(code) => ExitCode::from(code),
             Err(err) => fail(err),
         },
@@ -163,20 +179,96 @@ fn check_cmd(
     file: Option<&Path>,
     budget_cents: u64,
     out: Option<&Path>,
+    against: Option<&Path>,
+    assumptions_path: Option<&Path>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
+    if assumptions_path.is_some() && against.is_none() {
+        return Err("`--assumptions` requires `--against`".into());
+    }
     if Path::new(input).is_dir() {
         if file.is_some() {
             return Err("a directory check takes no file".into());
+        }
+        if against.is_some() {
+            return Err("a directory check takes no `--against`".into());
         }
         return check_dir(input, budget_cents, out);
     }
     let started = std::time::Instant::now();
     let base = brief_dir(input);
     let scan_root = namespace_root(&base);
-    let (src, program, compiled) = load_compiled(input, &scan_root)?;
+    let (src, program, claims, assumptions, local_claim_count) = if let Some(onto_path) = against {
+        let cert_src = model_source(input)?;
+        let cert_program = parse(&cert_src)?;
+        let onto_str = onto_path.to_string_lossy();
+        let onto_src = model_source(&onto_str)?;
+        let onto_program = parse(&onto_src)?;
+        let accepted = match assumptions_path {
+            Some(path) => {
+                let s = path.to_string_lossy();
+                let text = model_source(&s)?;
+                let prog = parse(&text)?;
+                let disp = path
+                    .is_file()
+                    .then(|| display_path(&scan_root, path));
+                Some((prog, disp))
+            }
+            None => None,
+        };
+        let mut files = scan_namespaces(&scan_root)?;
+        let onto_dir = brief_dir(&onto_str);
+        let onto_root = namespace_root(&onto_dir);
+        if onto_root != scan_root {
+            let mut seen: std::collections::HashSet<String> = files
+                .iter()
+                .filter_map(|f| f.program.namespace.as_ref().map(|ns| ns.name.clone()))
+                .collect();
+            for extra in scan_namespaces(&onto_root)? {
+                if let Some(ns) = &extra.program.namespace {
+                    if seen.insert(ns.name.clone()) {
+                        files.push(extra);
+                    }
+                }
+            }
+        }
+        let cert_entry = Path::new(input);
+        let cert_path = cert_entry
+            .is_file()
+            .then(|| display_path(&scan_root, cert_entry));
+        let onto_display = display_path(&scan_root, onto_path);
+        let accepted_ref = accepted
+            .as_ref()
+            .map(|(prog, path)| (prog, path.as_deref()));
+        let compared = compare_against(
+            &cert_program,
+            cert_path.as_deref(),
+            &onto_program,
+            &onto_display,
+            accepted_ref,
+            &files,
+        )?;
+        if compared.has_failures() {
+            print!("{}", compared.format_failures());
+            return Ok(1);
+        }
+        let local_count = compared.compiled.claims.len();
+        let mut all_claims = compared.compiled.claims;
+        all_claims.extend(compared.extra_claims);
+        (
+            cert_src,
+            cert_program,
+            all_claims,
+            compared.assumptions,
+            local_count,
+        )
+    } else {
+        let (src, program, compiled) = load_compiled(input, &scan_root)?;
+        let local_count = compiled.claims.len();
+        (src, program, compiled.claims, compiled.assumptions, local_count)
+    };
     let (bound, stdin_tmp) = match file {
         Some(path) if path == Path::new("-") => {
-            if !check::cites_dollar(&compiled.claims) {
+            if !check::cites_dollar(&claims) {
                 return Err("a file needs `(witness $)`".into());
             }
             let tmp = read_stdin_file()?;
@@ -198,7 +290,7 @@ fn check_cmd(
         None => (None, None),
     };
     let result = (|| -> Result<u8, Box<dyn std::error::Error>> {
-        match (check::cites_dollar(&compiled.claims), bound.is_some()) {
+        match (check::cites_dollar(&claims), bound.is_some()) {
             (true, false) => return Err("`$` needs a file".into()),
             (false, true) => return Err("a file needs `(witness $)`".into()),
             _ => {}
@@ -209,8 +301,9 @@ fn check_cmd(
         finish_check(
             &src,
             &program,
-            &compiled.claims,
-            &compiled.assumptions,
+            &claims,
+            local_claim_count,
+            &assumptions,
             &base,
             bound.as_ref(),
             &mut oracle,
@@ -268,10 +361,12 @@ fn print_report(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_check<O: Oracle>(
     src: &str,
     program: &autoground::Program,
     claims: &[Proposition],
+    local_claim_count: usize,
     assumptions: &[String],
     base: &Path,
     bound: Option<&check::BoundFile>,
@@ -283,8 +378,21 @@ fn finish_check<O: Oracle>(
     let usage = oracle.usage();
     let flights = oracle.flights().to_vec();
     let flight_limit = oracle.flight_limit();
-    record_check(log, src, program, &report, &usage, None)?;
-    print_report(src, program, &report)?;
+    let local_report = check::Report {
+        claims: report.claims[..local_claim_count].to_vec(),
+    };
+    record_check(log, src, program, &local_report, &usage, None)?;
+    print_report(src, program, &local_report)?;
+    if report.claims.len() > local_claim_count {
+        let extra_failed: Vec<_> = report.claims[local_claim_count..]
+            .iter()
+            .filter(|claim| claim.value != autoground::Value::True)
+            .cloned()
+            .collect();
+        if !extra_failed.is_empty() {
+            print!("{}", write_report(&check::Report { claims: extra_failed }));
+        }
+    }
     let true_count = report
         .claims
         .iter()
@@ -662,10 +770,37 @@ mod tests {
                         vec!["--cached", "-U0", "origin/main...HEAD", "--", "src",]
                     );
                 }
-                PrepareKind::Transcript { .. } => panic!("transcript"),
+                _ => panic!("diff"),
             },
             Commands::Check { .. } => panic!("check"),
             Commands::Align { .. } => panic!("align"),
+        }
+    }
+
+    #[test]
+    fn check_accepts_against_and_assumptions_flags() {
+        let cli = Cli::try_parse_from([
+            "autoground",
+            "check",
+            "impl/certificate.brief",
+            "--against",
+            "ontology.brief",
+            "--assumptions",
+            "impl/assumptions.brief",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Check {
+                input,
+                against,
+                assumptions,
+                ..
+            } => {
+                assert_eq!(input, "impl/certificate.brief");
+                assert_eq!(against, Some(PathBuf::from("ontology.brief")));
+                assert_eq!(assumptions, Some(PathBuf::from("impl/assumptions.brief")));
+            }
+            _ => panic!("check"),
         }
     }
 }
