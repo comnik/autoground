@@ -612,7 +612,7 @@ fn lower_define(s: &Sexp, xs: &[Sexp]) -> Result<Define, ParseError> {
     match xs.len() {
         2 => {
             let (sentence, _) = lower_formula(&xs[1])?;
-            if !matches!(sentence, Formula::Apply { .. }) {
+            if !matches!(sentence, Formula::Apply { .. } | Formula::Exists { .. }) {
                 return Err(err_at(&xs[1], "`define` takes a sentence"));
             }
             Ok(Define::Fact {
@@ -731,6 +731,7 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
             let (inner, child) = lower_formula(&xs[1])?;
             Ok((Formula::Not(Box::new(inner)), clause(vec![child])))
         }
+        SexpKind::Symbol(head) if head == "exists" => lower_exists(s, xs),
         SexpKind::Symbol(head) if head == "claim" => lower_claim(s, xs),
         SexpKind::Symbol(head) if head == "witness" => lower_witness(s, xs),
         SexpKind::Symbol(head) => Ok((
@@ -771,11 +772,48 @@ fn lower_assume(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError>
         return Err(err_at(&xs[0], "`assume` takes a sentence"));
     }
     let (sentence, _) = lower_formula(&xs[1])?;
-    if !matches!(sentence, Formula::Apply { .. }) {
+    if !matches!(sentence, Formula::Apply { .. } | Formula::Exists { .. }) {
         return Err(err_at(&xs[1], "`assume` takes a sentence"));
     }
     Ok((
         Form::Assume(sentence),
+        ClauseSpan {
+            span: s.span.clone(),
+            children: Vec::new(),
+        },
+    ))
+}
+
+fn lower_exists(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseError> {
+    if xs.len() != 3 {
+        return Err(err_at(
+            &xs[0],
+            "`exists` takes a vector of variables and a formula",
+        ));
+    }
+    let SexpKind::Vector(var_items) = &xs[1].kind else {
+        return Err(err_at(
+            &xs[1],
+            "`exists` takes a vector of variables, e.g. [x]",
+        ));
+    };
+    if var_items.is_empty() {
+        return Err(err_at(&xs[1], "`exists` takes at least one variable"));
+    }
+    let mut vars = Vec::with_capacity(var_items.len());
+    for item in var_items {
+        let var = declared_symbol(item, "variable")?;
+        if vars.iter().any(|seen| seen == &var) {
+            return Err(err_at(item, format!("duplicate variable `{var}`")));
+        }
+        vars.push(var);
+    }
+    let (body, _) = lower_formula(&xs[2])?;
+    Ok((
+        Formula::Exists {
+            vars,
+            body: Box::new(body),
+        },
         ClauseSpan {
             span: s.span.clone(),
             children: Vec::new(),
@@ -810,7 +848,7 @@ fn lower_claim(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseErro
         return Err(err_at(&xs[0], "`claim` takes a sentence and a support"));
     }
     let (sentence, _) = lower_formula(&xs[1])?;
-    if !matches!(sentence, Formula::Apply { .. }) {
+    if !matches!(sentence, Formula::Apply { .. } | Formula::Exists { .. }) {
         return Err(err_at(&xs[1], "`claim` heads a sentence"));
     }
     let (support, child) = lower_formula(&xs[2])?;
@@ -1085,6 +1123,7 @@ fn is_reserved_word(spelling: &str) -> bool {
             | "and"
             | "or"
             | "not"
+            | "exists"
             | "claim"
             | "witness"
             | "assume"

@@ -33,6 +33,7 @@ impl SenseKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TemplateArg {
     Param(usize),
+    Bound(String),
     Fixed { shown: String, grounded: String },
 }
 
@@ -41,6 +42,10 @@ pub(crate) enum DefinedBody {
     And(Vec<DefinedBody>),
     Or(Vec<DefinedBody>),
     Not(Box<DefinedBody>),
+    Exists {
+        vars: Vec<String>,
+        body: Box<DefinedBody>,
+    },
     Apply {
         sense_key: Option<SenseKey>,
         template: String,
@@ -654,7 +659,7 @@ fn formula_has_claim(formula: &Formula) -> bool {
         Formula::Claim { .. } => true,
         Formula::And(xs) | Formula::Or(xs) => xs.iter().any(formula_has_claim),
         Formula::Not(inner) => formula_has_claim(inner),
-        Formula::Apply { .. } | Formula::Witness { .. } => false,
+        Formula::Apply { .. } | Formula::Witness { .. } | Formula::Exists { .. } => false,
     }
 }
 
@@ -862,7 +867,7 @@ fn collect_defines(
                 message: format!("duplicate definition of sense `{}`", sense_ident.display()),
             });
         }
-        let body = resolve_define_body(body, params, names, senses, ctx)?;
+        let body = resolve_define_body(body, params, &[], names, senses, ctx)?;
         if matches!(&body, DefinedBody::And(xs) | DefinedBody::Or(xs) if xs.is_empty()) {
             return Err(CompileError {
                 message: format!(
@@ -904,6 +909,7 @@ fn collect_defines(
 fn resolve_define_body(
     formula: &Formula,
     params: &[String],
+    bound: &[String],
     names: &HashSet<String>,
     senses: &HashMap<String, (SenseKey, Sense)>,
     ctx: &mut Ctx<'_>,
@@ -912,31 +918,65 @@ fn resolve_define_body(
         Formula::And(xs) => {
             let mut out = Vec::with_capacity(xs.len());
             for x in xs {
-                out.push(resolve_define_body(x, params, names, senses, ctx)?);
+                out.push(resolve_define_body(x, params, bound, names, senses, ctx)?);
             }
             Ok(DefinedBody::And(out))
         }
         Formula::Or(xs) => {
             let mut out = Vec::with_capacity(xs.len());
             for x in xs {
-                out.push(resolve_define_body(x, params, names, senses, ctx)?);
+                out.push(resolve_define_body(x, params, bound, names, senses, ctx)?);
             }
             Ok(DefinedBody::Or(out))
         }
         Formula::Not(x) => Ok(DefinedBody::Not(Box::new(resolve_define_body(
-            x, params, names, senses, ctx,
+            x, params, bound, names, senses, ctx,
         )?))),
+        Formula::Exists { vars, body } => {
+            for var in vars {
+                if params.iter().any(|p| p == var) || bound.iter().any(|b| b == var) {
+                    return Err(CompileError {
+                        message: format!("variable `{var}` is already bound in an enclosing scope"),
+                    });
+                }
+            }
+            let mut inner_bound = Vec::with_capacity(bound.len() + vars.len());
+            inner_bound.extend_from_slice(bound);
+            inner_bound.extend(vars.iter().cloned());
+            let inner = resolve_define_body(body, params, &inner_bound, names, senses, ctx)?;
+            if matches!(&inner, DefinedBody::And(xs) | DefinedBody::Or(xs) if xs.is_empty()) {
+                return Err(CompileError {
+                    message: "`exists` body cannot be empty".into(),
+                });
+            }
+            Ok(DefinedBody::Exists {
+                vars: vars.clone(),
+                body: Box::new(inner),
+            })
+        }
         Formula::Claim { .. } => Err(CompileError {
-            message: "`claim` cannot appear inside a `define` body".into(),
+            message: if bound.is_empty() {
+                "`claim` cannot appear inside a `define` body".into()
+            } else {
+                "`claim` cannot appear inside an `exists` body".into()
+            },
         }),
         Formula::Witness { .. } => Err(CompileError {
-            message: "`witness` cannot appear inside a `define` body".into(),
+            message: if bound.is_empty() {
+                "`witness` cannot appear inside a `define` body".into()
+            } else {
+                "`witness` cannot appear inside an `exists` body".into()
+            },
         }),
         Formula::Apply { reading, args, at } => {
             let mut resolved_args = Vec::with_capacity(args.len());
             for arg in args {
                 if let Arg::Name(ident) = arg {
                     if ident.qualifier.is_none() {
+                        if bound.iter().any(|var| var == &ident.name) {
+                            resolved_args.push(TemplateArg::Bound(ident.name.clone()));
+                            continue;
+                        }
                         if let Some(index) = params.iter().position(|param| param == &ident.name) {
                             resolved_args.push(TemplateArg::Param(index));
                             continue;
@@ -1034,6 +1074,7 @@ fn collect_define_deps(body: &DefinedBody, out: &mut Vec<SenseKey>) {
             }
         }
         DefinedBody::Not(inner) => collect_define_deps(inner, out),
+        DefinedBody::Exists { body, .. } => collect_define_deps(body, out),
         DefinedBody::Apply { sense_key, .. } => {
             if let Some(key) = sense_key {
                 out.push(key.clone());
@@ -1145,7 +1186,7 @@ fn collect_claimed_heads(
             ctx.claimed.insert(head.text);
             collect_claimed_heads(support, names, senses, ctx)?;
         }
-        Formula::Apply { .. } | Formula::Witness { .. } => {}
+        Formula::Apply { .. } | Formula::Witness { .. } | Formula::Exists { .. } => {}
     }
     Ok(())
 }
@@ -1286,12 +1327,19 @@ fn synthesize_targets(
     body: &DefinedBody,
 ) -> Result<Vec<Sentence>, CompileError> {
     let prefix = format_quantifier_prefix(params, head, witness);
+    let param_spellings: Vec<Spelling> = params
+        .iter()
+        .map(|p| Spelling {
+            shown: p.clone(),
+            grounded: p.clone(),
+        })
+        .collect();
     let mut conjuncts = Vec::new();
     collect_conjuncts(body, &mut conjuncts);
     let mut targets = Vec::with_capacity(conjuncts.len());
     for conjunct in conjuncts {
-        let shown = render_defined_body(conjunct, params, false, false)?;
-        let grounded = render_defined_body(conjunct, params, true, false)?;
+        let shown = render_defined_body(conjunct, &param_spellings, false, false)?;
+        let grounded = render_defined_body(conjunct, &param_spellings, true, false)?;
         let shown = shown.trim_end_matches('.');
         let grounded = grounded.trim_end_matches('.');
         targets.push(Sentence {
@@ -1313,9 +1361,21 @@ fn collect_conjuncts<'a>(body: &'a DefinedBody, out: &mut Vec<&'a DefinedBody>) 
     }
 }
 
+fn format_exists_prefix(vars: &[String]) -> String {
+    match vars {
+        [] => String::new(),
+        [only] => format!("there exists {only} such that "),
+        [a, b] => format!("there exist {a} and {b} such that "),
+        many => {
+            let (last, init) = many.split_last().expect("non-empty");
+            format!("there exist {}, and {last} such that ", init.join(", "))
+        }
+    }
+}
+
 fn render_defined_body(
     body: &DefinedBody,
-    params: &[String],
+    params: &[Spelling],
     use_grounded: bool,
     nested: bool,
 ) -> Result<String, CompileError> {
@@ -1324,7 +1384,14 @@ fn render_defined_body(
             let values: Vec<String> = args
                 .iter()
                 .map(|arg| match arg {
-                    TemplateArg::Param(index) => params[*index].clone(),
+                    TemplateArg::Param(index) => {
+                        if use_grounded {
+                            params[*index].grounded.clone()
+                        } else {
+                            params[*index].shown.clone()
+                        }
+                    }
+                    TemplateArg::Bound(name) => name.clone(),
                     TemplateArg::Fixed { shown, grounded } => {
                         if use_grounded {
                             grounded.clone()
@@ -1339,6 +1406,10 @@ fn render_defined_body(
         DefinedBody::Not(inner) => {
             let rendered = render_defined_body(inner, params, use_grounded, true)?;
             Ok(format!("it is not the case that {rendered}"))
+        }
+        DefinedBody::Exists { vars, body } => {
+            let rendered = render_defined_body(body, params, use_grounded, true)?;
+            Ok(format!("{}{rendered}", format_exists_prefix(vars)))
         }
         DefinedBody::Or(xs) => {
             let mut parts = Vec::with_capacity(xs.len());
@@ -1431,6 +1502,10 @@ fn resolve(
         Formula::Not(x) => Ok(Proposition::Not(Box::new(resolve(
             x, names, senses, defs, ctx,
         )?))),
+        Formula::Exists { .. } => {
+            let body = resolve_define_body(formula, &[], &[], names, senses, ctx)?;
+            instantiate_defined_body(&body, &[], defs, ctx)
+        }
         Formula::Claim { sentence, support } => {
             let (sentence, head_key) = require_raw_sentence_with_key(
                 sentence,
@@ -1567,6 +1642,22 @@ fn instantiate_defined_body(
         DefinedBody::Not(inner) => Ok(Proposition::Not(Box::new(instantiate_defined_body(
             inner, params, defs, ctx,
         )?))),
+        DefinedBody::Exists { .. } => {
+            let text = render_defined_body(body, params, false, false)?;
+            let grounded = render_defined_body(body, params, true, false)?;
+            let sentence = Sentence { text, grounded };
+            remember(&mut ctx.expansions, &sentence)?;
+            if !ctx.assumed.contains(&sentence.text)
+                && !ctx.claimed.contains(&sentence.text)
+                && defs.facts.contains_key(&sentence.text)
+            {
+                return Ok(Proposition::Defined {
+                    sentence,
+                    body: Box::new(Proposition::And(Vec::new())),
+                });
+            }
+            Ok(Proposition::Sentence(sentence))
+        }
         DefinedBody::Apply {
             sense_key,
             template,
@@ -1576,6 +1667,10 @@ fn instantiate_defined_body(
             for arg in args {
                 match arg {
                     TemplateArg::Param(index) => arg_spellings.push(params[*index].clone()),
+                    TemplateArg::Bound(name) => arg_spellings.push(Spelling {
+                        shown: name.clone(),
+                        grounded: name.clone(),
+                    }),
                     TemplateArg::Fixed { shown, grounded } => arg_spellings.push(Spelling {
                         shown: shown.clone(),
                         grounded: grounded.clone(),
@@ -1604,6 +1699,14 @@ fn require_raw_sentence_with_key(
     ctx: &mut Ctx<'_>,
     message: &str,
 ) -> Result<(Sentence, Option<(String, SenseKey)>), CompileError> {
+    if matches!(formula, Formula::Exists { .. }) {
+        let body = resolve_define_body(formula, &[], &[], names, senses, ctx)?;
+        let text = render_defined_body(&body, &[], false, false)?;
+        let grounded = render_defined_body(&body, &[], true, false)?;
+        let sentence = Sentence { text, grounded };
+        remember(&mut ctx.expansions, &sentence)?;
+        return Ok((sentence, None));
+    }
     let Formula::Apply { reading, args, at } = formula else {
         return Err(CompileError {
             message: message.into(),
@@ -2877,5 +2980,106 @@ A nullary sense reads either as a noun phrase or as a sentence, not both."
         )
         .unwrap_err();
         assert!(dup.message.contains("duplicate definition"), "{dup}");
+    }
+
+    #[test]
+    fn exists_renders_in_ground_targets_instantiates_to_sentence_and_rejects_shadowing() {
+        let c = compiled(
+            r#"
+(name Tx1)
+(sense stacked_cancels "{Transaction} has {Count} cancels stacked on it")
+(sense is_odd "{Number} is odd")
+(sense canceled "{Transaction} is canceled")
+(sense converts_from "{CorporateAction} converts from {Asset}")
+(sense ca_canceled_by "{CorporateAction} is canceled by {Cancel}")
+(sense acts_on "{CorporateAction} acts on {Asset}")
+
+(define (canceled t)
+  (exists [n]
+    (and (stacked_cancels t n) (is_odd n))))
+
+(define (acts_on ca a)
+  (and
+    (converts_from ca a)
+    (not (exists [cancel] (ca_canceled_by ca cancel)))))
+
+(ground (canceled t)
+  (witness "erased.csv")
+  (witness "cancel_chains.py"))
+
+(ground (acts_on ca a)
+  (witness "acts.csv")
+  (witness "corp_actions.py"))
+
+(claim (exists [n] (and (stacked_cancels Tx1 n) (is_odd n)))
+  (witness "log.txt"))
+"#,
+        );
+        let Proposition::Cert { targets, .. } = &c.claims[0] else {
+            panic!("expected Cert for canceled");
+        };
+        assert_eq!(
+            targets.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+            vec![
+                "For all t, if erased.csv supports that t is canceled, then there exists n such that (t has n cancels stacked on it and n is odd)."
+            ]
+        );
+
+        let Proposition::Cert { targets, .. } = &c.claims[1] else {
+            panic!("expected Cert for acts_on");
+        };
+        assert_eq!(
+            targets.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+            vec![
+                "For all ca and a, if acts.csv supports that ca acts on a, then ca converts from a.",
+                "For all ca and a, if acts.csv supports that ca acts on a, then it is not the case that there exists cancel such that ca is canceled by cancel.",
+            ]
+        );
+
+        let ungrounded = compiled(
+            r#"
+(name Tx1)
+(sense stacked_cancels "{Transaction} has {Count} cancels stacked on it")
+(sense is_odd "{Number} is odd")
+(sense canceled "{Transaction} is canceled")
+(define (canceled t)
+  (exists [n]
+    (and (stacked_cancels t n) (is_odd n))))
+(claim (exists [n] (and (stacked_cancels Tx1 n) (is_odd n)))
+  (witness "log.txt"))
+(and (canceled Tx1))
+"#,
+        );
+        let expected_exists =
+            "there exists n such that (Tx1 has n cancels stacked on it and n is odd)";
+        assert_eq!(
+            ungrounded.claims[0],
+            Proposition::Claim {
+                sentence: expected_exists.into(),
+                support: Support::Witness {
+                    paths: vec!["log.txt".into()],
+                },
+            }
+        );
+        assert_eq!(
+            ungrounded.claims[1],
+            Proposition::And(vec![Proposition::Defined {
+                sentence: "Tx1 is canceled".into(),
+                body: Box::new(Proposition::Sentence(expected_exists.into())),
+            }])
+        );
+
+        let shadowed = compile(
+            &parse(
+                r#"
+(sense p "{x} holds")
+(sense q "{x} implies")
+(define (q x) (exists [x] (p x)))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(shadowed.message.contains("already bound"), "{shadowed}");
     }
 }

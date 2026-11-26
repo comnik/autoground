@@ -144,6 +144,13 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
             write_formula(x, indent, out);
             out.push(')');
         }
+        Formula::Exists { vars, body } => {
+            out.push_str("(exists [");
+            out.push_str(&vars.join(" "));
+            out.push_str("] ");
+            write_formula(body, indent, out);
+            out.push(')');
+        }
         Formula::Claim { sentence, support } => {
             out.push_str("(claim ");
             write_formula(sentence, indent, out);
@@ -323,6 +330,7 @@ mod tests {
 (define (high_value_customer c)
   (and
     (customer c)
+    (exists [o] ("{o} belongs to {c}" o c))
     ("{c} has lifetime sales > $25 million" c)))
 (ground (high_value_customer c)
   (witness "out.csv")

@@ -99,6 +99,10 @@ pub enum Formula {
     And(Vec<Formula>),
     Or(Vec<Formula>),
     Not(Box<Formula>),
+    Exists {
+        vars: Vec<String>,
+        body: Box<Formula>,
+    },
     /// A reading applied to arguments. Saturation fills every hole.
     Apply {
         reading: Reading,
