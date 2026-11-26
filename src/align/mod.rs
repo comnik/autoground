@@ -87,7 +87,11 @@ fn declarations(
                 }
             }
             Form::Detail(body) => declarations(body, term_senses, names, senses, terms),
-            Form::Define(_) | Form::Ground(_) | Form::Assume(_) | Form::Formula(_) => {}
+            Form::Define(_)
+            | Form::Certify(_)
+            | Form::Ground(_)
+            | Form::Assume(_)
+            | Form::Formula(_) => {}
         }
     }
 }

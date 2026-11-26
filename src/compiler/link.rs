@@ -5,8 +5,8 @@ use crate::syntax::{Program, Proposition, Refer, Sense, Sentence, Support};
 
 use super::scan::Loaded;
 use super::{
-    compile_module, CompileError, Compiled, CompiledModule, ExportedGround, Imports, Opened,
-    ResolvedDefine, SenseKey,
+    compile_module, CompileError, Compiled, CompiledModule, ExportedCertify, ExportedGround,
+    Imports, Opened, ResolvedDefine, SenseKey,
 };
 
 struct Item<'a> {
@@ -174,6 +174,7 @@ fn environment(
     let mut imported_senses: HashMap<String, (String, Sense)> = HashMap::new();
     let mut imported_defines: HashMap<SenseKey, (String, ResolvedDefine)> = HashMap::new();
     let mut imported_facts: HashMap<String, (String, Sentence)> = HashMap::new();
+    let mut imported_certifies: HashMap<SenseKey, (String, ExportedCertify)> = HashMap::new();
     let mut imported_grounds: HashMap<SenseKey, (String, ExportedGround)> = HashMap::new();
     let mut aliases: HashMap<String, String> = HashMap::new();
     let mut opened: HashMap<String, Opened> = HashMap::new();
@@ -291,6 +292,19 @@ fn environment(
             )?;
         }
         if let Some(module) = modules.get(&require.namespace) {
+            for (key, certify) in &module.certifies {
+                if let Some((prev, _)) = imported_certifies.get(key) {
+                    return Err(CompileError {
+                        message: format!(
+                            "`{}` is certified in both `{prev}` and `{}`",
+                            key.display(),
+                            require.namespace
+                        ),
+                    });
+                }
+                let rebased = rebase_certify(certify, item.path, target_path);
+                imported_certifies.insert(key.clone(), (require.namespace.clone(), rebased));
+            }
             for (key, ground) in &module.grounds {
                 if let Some((prev, _)) = imported_grounds.get(key) {
                     return Err(CompileError {
@@ -343,6 +357,10 @@ fn environment(
             .into_iter()
             .map(|(k, (_, v))| (k, v))
             .collect(),
+        certifies: imported_certifies
+            .into_iter()
+            .map(|(k, (_, v))| (k, v))
+            .collect(),
         grounds: imported_grounds
             .into_iter()
             .map(|(k, (_, v))| (k, v))
@@ -366,6 +384,22 @@ fn collect_reachable(
             }
         }
         out.push(ns.to_string());
+    }
+}
+
+fn rebase_certify(
+    certify: &ExportedCertify,
+    from_file: &str,
+    to_file: &str,
+) -> ExportedCertify {
+    ExportedCertify {
+        cert_id: certify.cert_id.clone(),
+        certificate: certify
+            .certificate
+            .iter()
+            .map(|prop| rebase_prop(prop, from_file, to_file))
+            .collect(),
+        assumptions: certify.assumptions.clone(),
     }
 }
 
@@ -416,11 +450,18 @@ fn rebase_prop(prop: &Proposition, from_file: &str, to_file: &str) -> Propositio
             label,
             targets,
             support,
+            requires,
+            imported,
         } => Proposition::Cert {
             cert_id: cert_id.clone(),
             label: label.clone(),
             targets: targets.clone(),
             support: rebase_support(support, from_file, to_file),
+            requires: requires.clone(),
+            imported: imported
+                .iter()
+                .map(|p| rebase_prop(p, from_file, to_file))
+                .collect(),
         },
         Proposition::Grounded {
             sentence,
@@ -1042,5 +1083,153 @@ mod tests {
                 "Merger is a sub-type of CorporateAction".into()
             )])
         );
+    }
+
+    #[test]
+    fn certify_separates_implementation_adherence_from_data_grounding() {
+        let files = vec![
+            loaded(
+                "ontology.brief",
+                r#"
+(ns acme.ibor)
+(name Transaction)
+(name Trade)
+(sense is_a "{Sub} is a kind of {Super}")
+(sense stacked "{Transaction} has {Count} cancels stacked on it")
+(sense is_odd "{Count} is odd")
+(sense canceled_by "{Transaction} is canceled by {Cancel}")
+(sense canceled "{Transaction} is canceled")
+(sense erased "{Transaction} is erased by {Cancel}")
+(define (is_a Trade Transaction))
+(define (canceled t)
+  (exists [n] (and (stacked t n) (is_odd n))))
+(define (erased t c)
+  (and (canceled t) (canceled_by t c)))
+"#,
+            ),
+            loaded(
+                "impl/cert.brief",
+                r#"
+(ns acme.ibor.impl (:require [acme.ibor :refer :all]))
+(certify (is_a Trade Transaction) (witness "ontology.py"))
+(certify (canceled t) (witness "cancel_chains.py"))
+(certify (erased t c) (witness "ibor.py"))
+"#,
+            ),
+            loaded(
+                "run/ground.brief",
+                r#"
+(ns acme.ibor.run
+  (:require
+    [acme.ibor :refer :all]
+    [acme.ibor.impl]))
+(assume "erased.csv came from ibor.py")
+(ground (erased t c)
+  (witness "erased.csv")
+  (and
+    (claim "ibor.py writes erased transactions to erased.csv" (witness "../impl/ibor.py"))
+    "erased.csv came from ibor.py"))
+"#,
+            ),
+        ];
+
+        // Layer 2: certify emits Claim for fact, iff Certs for rules, and links erased -> canceled.
+        let impl_compiled = link(&files[1].program, Some(files[1].path.as_str()), &files).unwrap();
+        assert!(matches!(
+            &impl_compiled.claims[0],
+            Proposition::Claim { sentence, .. } if sentence.text == "Trade is a kind of Transaction"
+        ));
+        let Proposition::Cert {
+            targets: canceled_targets,
+            requires: canceled_reqs,
+            ..
+        } = &impl_compiled.claims[1]
+        else {
+            panic!("expected Cert for canceled");
+        };
+        assert_eq!(
+            canceled_targets[0].text,
+            "For all t, t is canceled if and only if there exists n such that (t has n cancels stacked on it and n is odd)."
+        );
+        assert!(canceled_reqs.is_empty());
+
+        let Proposition::Cert {
+            targets: erased_targets,
+            requires: erased_reqs,
+            ..
+        } = &impl_compiled.claims[2]
+        else {
+            panic!("expected Cert for erased");
+        };
+        assert_eq!(
+            erased_targets[0].text,
+            "For all t and c, t is erased by c if and only if (t is canceled and t is canceled by c)."
+        );
+        assert_eq!(
+            erased_reqs,
+            &vec!["certify:acme.ibor.impl:acme.ibor/canceled".to_string()]
+        );
+
+        // Layer 3: ground against certified sense asks provenance and imports layer 2 certs.
+        let run_compiled = link(&files[2].program, Some(files[2].path.as_str()), &files).unwrap();
+        let Proposition::Cert {
+            targets: ground_targets,
+            requires: ground_reqs,
+            imported,
+            ..
+        } = &run_compiled.claims[1]
+        else {
+            panic!("expected Cert for ground");
+        };
+        assert_eq!(
+            ground_targets[0].text,
+            "For all t and c, if erased.csv supports that t is erased by c, then t is erased by c."
+        );
+        assert_eq!(
+            ground_reqs,
+            &vec!["certify:acme.ibor.impl:acme.ibor/erased".to_string()]
+        );
+        assert_eq!(imported.len(), 2);
+
+        // Layer 4: downstream brief rebases all paths and inherits assumptions.
+        let decision = parse(
+            r#"
+(ns acme.decision
+  (:require
+    [acme.ibor :refer :all]
+    [acme.ibor.run]))
+(name TX1)
+(name C1)
+(and (erased TX1 C1))
+"#,
+        )
+        .unwrap();
+        let dec = link(&decision, Some("analysis/decision.brief"), &files).unwrap();
+        assert_eq!(dec.assumptions, vec!["erased.csv came from ibor.py"]);
+        let Proposition::And(xs) = &dec.claims[0] else {
+            panic!("and");
+        };
+        let Proposition::Grounded {
+            witness,
+            certificate,
+            ..
+        } = &xs[0]
+        else {
+            panic!("expected Grounded");
+        };
+        assert_eq!(witness, &vec!["../run/erased.csv".to_string()]);
+        assert_eq!(certificate.len(), 2);
+        let Proposition::Cert { imported, .. } = &certificate[1] else {
+            panic!("expected ground Cert");
+        };
+        assert_eq!(imported.len(), 2);
+        let Proposition::Cert {
+            support: Support::Witness { paths },
+            ..
+        } = &imported[0]
+        else {
+            panic!("expected imported canceled Cert");
+        };
+        assert_eq!(paths, &vec!["../impl/cancel_chains.py".to_string()]);
     }
 }

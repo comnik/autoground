@@ -2,8 +2,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::syntax::template::{apply, holes_word, names_word};
 use crate::syntax::{
-    Arg, At, Define, Form, Formula, Ground, Ident, Program, Proposition, Reading, Sense, Sentence,
-    Support,
+    Arg, At, Certify, Define, Form, Formula, Ground, Ident, Program, Proposition, Reading, Sense,
+    Sentence, Support,
 };
 
 mod link;
@@ -60,6 +60,21 @@ pub(crate) struct ResolvedDefine {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExportedCertify {
+    pub(crate) cert_id: String,
+    pub(crate) certificate: Vec<Proposition>,
+    pub(crate) assumptions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CertifyRule {
+    pub(crate) cert_id: String,
+    /// Empty for a certify declared in the same file (its `Cert` is already in `claims`).
+    pub(crate) certificate: Vec<Proposition>,
+    pub(crate) assumptions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExportedGround {
     pub(crate) cert_id: String,
     pub(crate) witness: Vec<String>,
@@ -80,6 +95,7 @@ pub(crate) struct CompiledModule {
     pub(crate) compiled: Compiled,
     pub(crate) defines: HashMap<SenseKey, ResolvedDefine>,
     pub(crate) facts: HashMap<String, Sentence>,
+    pub(crate) certifies: HashMap<SenseKey, ExportedCertify>,
     pub(crate) grounds: HashMap<SenseKey, ExportedGround>,
 }
 
@@ -101,6 +117,8 @@ pub(crate) struct Imports {
     defines: HashMap<SenseKey, ResolvedDefine>,
     /// Ground definitions exported by required namespaces, keyed by sentence text.
     facts: HashMap<String, Sentence>,
+    /// Implementation certifications exported by required namespaces, keyed by canonical sense.
+    certifies: HashMap<SenseKey, ExportedCertify>,
     /// Grounding rules exported by required namespaces, keyed by canonical sense.
     grounds: HashMap<SenseKey, ExportedGround>,
 }
@@ -115,6 +133,7 @@ impl Imports {
             owners: HashMap::new(),
             defines: HashMap::new(),
             facts: HashMap::new(),
+            certifies: HashMap::new(),
             grounds: HashMap::new(),
         }
     }
@@ -124,6 +143,7 @@ impl Imports {
 struct Defs {
     rules: HashMap<SenseKey, ResolvedDefine>,
     facts: HashMap<String, Sentence>,
+    certifies: HashMap<SenseKey, CertifyRule>,
     grounds: HashMap<SenseKey, GroundRule>,
 }
 
@@ -328,6 +348,7 @@ pub(crate) fn compile_module(
                 senses.push(sense.clone());
             }
             Form::Define(_)
+            | Form::Certify(_)
             | Form::Ground(_)
             | Form::Assume(_)
             | Form::Detail(_)
@@ -388,6 +409,20 @@ pub(crate) fn compile_module(
     let mut defs = Defs {
         rules: imports.defines.clone(),
         facts: imports.facts.clone(),
+        certifies: imports
+            .certifies
+            .iter()
+            .map(|(key, exp)| {
+                (
+                    key.clone(),
+                    CertifyRule {
+                        cert_id: exp.cert_id.clone(),
+                        certificate: exp.certificate.clone(),
+                        assumptions: exp.assumptions.clone(),
+                    },
+                )
+            })
+            .collect(),
         grounds: imports
             .grounds
             .iter()
@@ -413,6 +448,15 @@ pub(crate) fn compile_module(
     )?;
     check_define_cycles(&defs.rules)?;
 
+    let local_certifies = collect_certifies(
+        &program.forms,
+        &sense_by_name,
+        &defs.rules,
+        &current_ns,
+        &mut defs.certifies,
+        &mut ctx,
+    )?;
+
     let local_grounds = collect_grounds(
         &program.forms,
         &sense_by_name,
@@ -422,7 +466,7 @@ pub(crate) fn compile_module(
         &mut ctx,
     )?;
 
-    collect_local_heads(&program.forms, &declared, &sense_by_name, &mut ctx)?;
+    collect_local_heads(&program.forms, &declared, &sense_by_name, &defs.rules, &mut ctx)?;
 
     let mut assumptions = Vec::new();
     let claims = resolve_forms(
@@ -444,6 +488,7 @@ pub(crate) fn compile_module(
         }
     }
 
+    let exported_certifies = export_certifies(&local_certifies, &claims);
     let exported_grounds = export_grounds(&local_grounds, &claims);
 
     Ok(CompiledModule {
@@ -456,6 +501,7 @@ pub(crate) fn compile_module(
         },
         defines: local_defines,
         facts: local_facts,
+        certifies: exported_certifies,
         grounds: exported_grounds,
     })
 }
@@ -647,7 +693,7 @@ fn contains_claim_or_assume(forms: &[Form]) -> bool {
 
 fn form_has_claim_or_assume(form: &Form) -> bool {
     match form {
-        Form::Assume(_) | Form::Ground(_) => true,
+        Form::Assume(_) | Form::Certify(_) | Form::Ground(_) => true,
         Form::Detail(body) => contains_claim_or_assume(body),
         Form::Formula(formula) => formula_has_claim(formula),
         Form::Name(_) | Form::Sense(_) | Form::Define(_) => false,
@@ -1083,6 +1129,100 @@ fn collect_define_deps(body: &DefinedBody, out: &mut Vec<SenseKey>) {
     }
 }
 
+fn collect_certifies(
+    forms: &[Form],
+    senses: &HashMap<String, (SenseKey, Sense)>,
+    defines: &HashMap<SenseKey, ResolvedDefine>,
+    scope_prefix: &str,
+    certifies: &mut HashMap<SenseKey, CertifyRule>,
+    ctx: &mut Ctx<'_>,
+) -> Result<Vec<(SenseKey, String)>, CompileError> {
+    let mut local = Vec::new();
+    let mut local_seen = HashSet::new();
+    for form in forms {
+        let Form::Certify(certify) = form else {
+            continue;
+        };
+        let Formula::Apply {
+            reading: Reading::Sense(ident),
+            args,
+            at,
+        } = &certify.head
+        else {
+            continue;
+        };
+        let (key, sense) = resolve_sense_with_key(ident, senses, ctx.imports)?;
+        if !defines.contains_key(&key) {
+            continue;
+        }
+        let params = extract_certify_params(args, &sense, ident)?;
+        if sense.holes.is_empty() {
+            note(ctx, ident, Place::Sentence, *at);
+        }
+        if !local_seen.insert(key.clone()) {
+            return Err(CompileError {
+                message: format!("duplicate `certify` for `{}`", ident.display()),
+            });
+        }
+        let _ = params;
+        let cert_id = if scope_prefix.is_empty() {
+            format!("certify:{}", key.display())
+        } else {
+            format!("certify:{scope_prefix}:{}", key.display())
+        };
+        certifies.insert(
+            key.clone(),
+            CertifyRule {
+                cert_id: cert_id.clone(),
+                certificate: Vec::new(),
+                assumptions: Vec::new(),
+            },
+        );
+        local.push((key, cert_id));
+    }
+    Ok(local)
+}
+
+fn extract_certify_params(
+    args: &[Arg],
+    sense: &Sense,
+    ident: &Ident,
+) -> Result<Vec<String>, CompileError> {
+    if args.len() != sense.holes.len() {
+        return Err(arity_error(
+            &format!("`{}`", ident.display()),
+            &sense.holes,
+            args.len(),
+        ));
+    }
+    let mut params = Vec::with_capacity(args.len());
+    for arg in args {
+        let Arg::Name(arg_ident) = arg else {
+            return Err(CompileError {
+                message: format!(
+                    "`certify` for `{}` takes parameter names",
+                    ident.display()
+                ),
+            });
+        };
+        if arg_ident.qualifier.is_some() {
+            return Err(CompileError {
+                message: format!(
+                    "`certify` parameter `{}` takes no qualifier",
+                    arg_ident.display()
+                ),
+            });
+        }
+        if params.iter().any(|seen| seen == &arg_ident.name) {
+            return Err(CompileError {
+                message: format!("duplicate parameter `{}`", arg_ident.name),
+            });
+        }
+        params.push(arg_ident.name.clone());
+    }
+    Ok(params)
+}
+
 fn collect_grounds(
     forms: &[Form],
     senses: &HashMap<String, (SenseKey, Sense)>,
@@ -1145,6 +1285,7 @@ fn collect_local_heads(
     forms: &[Form],
     names: &HashSet<String>,
     senses: &HashMap<String, (SenseKey, Sense)>,
+    rules: &HashMap<SenseKey, ResolvedDefine>,
     ctx: &mut Ctx<'_>,
 ) -> Result<(), CompileError> {
     for form in forms {
@@ -1160,6 +1301,27 @@ fn collect_local_heads(
                 ctx.assumed.insert(sentence.text);
             }
             Form::Formula(formula) => collect_claimed_heads(formula, names, senses, ctx)?,
+            Form::Certify(certify) => {
+                let is_rule = match &certify.head {
+                    Formula::Apply {
+                        reading: Reading::Sense(ident),
+                        ..
+                    } => resolve_sense_with_key(ident, senses, ctx.imports)
+                        .is_ok_and(|(key, _)| rules.contains_key(&key)),
+                    _ => false,
+                };
+                if !is_rule {
+                    let sentence = require_raw_sentence(
+                        &certify.head,
+                        names,
+                        senses,
+                        ctx,
+                        "`certify` takes a defined sense or fact",
+                    )?;
+                    ctx.claimed.insert(sentence.text);
+                }
+                collect_claimed_heads(&certify.support, names, senses, ctx)?;
+            }
             Form::Ground(ground) => collect_claimed_heads(&ground.support, names, senses, ctx)?,
             Form::Name(_) | Form::Sense(_) | Form::Define(_) | Form::Detail(_) => {}
         }
@@ -1215,6 +1377,16 @@ fn resolve_forms(
                 assumptions.push(text.text.clone());
                 claims.push(Proposition::Assume(text));
             }
+            Form::Certify(certify) => {
+                claims.push(resolve_certify(
+                    certify,
+                    names,
+                    senses,
+                    defs,
+                    scope_prefix,
+                    ctx,
+                )?);
+            }
             Form::Ground(ground) => {
                 claims.push(resolve_ground(
                     ground,
@@ -1244,6 +1416,106 @@ fn resolve_forms(
     Ok(claims)
 }
 
+fn resolve_certify(
+    certify: &Certify,
+    names: &HashSet<String>,
+    senses: &HashMap<String, (SenseKey, Sense)>,
+    defs: &Defs,
+    scope_prefix: &str,
+    ctx: &mut Ctx<'_>,
+) -> Result<Proposition, CompileError> {
+    if let Formula::Apply {
+        reading: Reading::Sense(ident),
+        args,
+        at,
+    } = &certify.head
+    {
+        let (key, sense) = resolve_sense_with_key(ident, senses, ctx.imports)?;
+        if let Some(def) = defs.rules.get(&key) {
+            let params = extract_certify_params(args, &sense, ident)?;
+            if sense.holes.is_empty() {
+                note(ctx, ident, Place::Sentence, *at);
+            }
+            let cert_id = if scope_prefix.is_empty() {
+                format!("certify:{}", key.display())
+            } else {
+                format!("certify:{scope_prefix}:{}", key.display())
+            };
+            let head =
+                apply(&sense.template, &params).map_err(|message| CompileError { message })?;
+            let label = format!("certify ({})", format_ground_head(ident, &params));
+            let target = synthesize_certify_target(&params, &head, &def.body)?;
+            let mut deps = Vec::new();
+            collect_define_deps(&def.body, &mut deps);
+            let (requires, imported) = collect_cert_prereqs(&deps, defs, ctx);
+            let support = match &certify.support {
+                Formula::Witness { paths } => Support::Witness {
+                    paths: witness_paths(paths)?,
+                },
+                other => Support::Sentence(Box::new(resolve(other, names, senses, defs, ctx)?)),
+            };
+            return Ok(Proposition::Cert {
+                cert_id,
+                label,
+                targets: vec![target],
+                support,
+                requires,
+                imported,
+            });
+        }
+    }
+
+    let (sentence, head_key) = require_raw_sentence_with_key(
+        &certify.head,
+        names,
+        senses,
+        ctx,
+        "`certify` takes a defined sense or fact",
+    )?;
+    if !defs.facts.contains_key(&sentence.text) {
+        let what = head_key
+            .map(|(display, _)| display)
+            .unwrap_or_else(|| sentence.text.clone());
+        return Err(CompileError {
+            message: format!("`{what}` cannot be certified without a `define`"),
+        });
+    }
+    let support = match &certify.support {
+        Formula::Witness { paths } => Support::Witness {
+            paths: witness_paths(paths)?,
+        },
+        other => Support::Sentence(Box::new(resolve(other, names, senses, defs, ctx)?)),
+    };
+    Ok(Proposition::Claim { sentence, support })
+}
+
+fn collect_cert_prereqs(
+    dep_keys: &[SenseKey],
+    defs: &Defs,
+    ctx: &mut Ctx<'_>,
+) -> (Vec<String>, Vec<Proposition>) {
+    let mut requires = Vec::new();
+    let mut imported = Vec::new();
+    let mut seen_imported = HashSet::new();
+    for dep in dep_keys {
+        let Some(rule) = defs.certifies.get(dep) else {
+            continue;
+        };
+        if !requires.contains(&rule.cert_id) {
+            requires.push(rule.cert_id.clone());
+        }
+        if !rule.certificate.is_empty() && seen_imported.insert(rule.cert_id.clone()) {
+            imported.extend(rule.certificate.iter().cloned());
+            for assumption in &rule.assumptions {
+                if !ctx.used_ground_assumptions.contains(assumption) {
+                    ctx.used_ground_assumptions.push(assumption.clone());
+                }
+            }
+        }
+    }
+    (requires, imported)
+}
+
 fn resolve_ground(
     ground: &Ground,
     names: &HashSet<String>,
@@ -1268,8 +1540,31 @@ fn resolve_ground(
     let head = apply(&sense.template, &ground.params)
         .map_err(|message| CompileError { message })?;
     let witness_display = format_witness_list(&witness);
-    let label = format!("ground ({}) via {witness_display}", format_ground_head(&ground.sense, &ground.params));
-    let targets = synthesize_targets(&ground.params, &head, &witness_display, &def.body)?;
+    let label = format!(
+        "ground ({}) via {witness_display}",
+        format_ground_head(&ground.sense, &ground.params)
+    );
+    let (targets, requires, imported) = if defs.certifies.contains_key(&key) {
+        let (requires, imported) = collect_cert_prereqs(std::slice::from_ref(&key), defs, ctx);
+        (
+            vec![synthesize_provenance_target(
+                &ground.params,
+                &head,
+                &witness_display,
+            )],
+            requires,
+            imported,
+        )
+    } else {
+        let mut deps = Vec::new();
+        collect_define_deps(&def.body, &mut deps);
+        let (requires, imported) = collect_cert_prereqs(&deps, defs, ctx);
+        (
+            synthesize_targets(&ground.params, &head, &witness_display, &def.body)?,
+            requires,
+            imported,
+        )
+    };
     let support = match &ground.support {
         Formula::Witness { paths } => Support::Witness {
             paths: witness_paths(paths)?,
@@ -1281,7 +1576,55 @@ fn resolve_ground(
         label,
         targets,
         support,
+        requires,
+        imported,
     })
+}
+
+fn format_forall_prefix(params: &[String]) -> String {
+    match params {
+        [] => String::new(),
+        [only] => format!("For all {only}, "),
+        [a, b] => format!("For all {a} and {b}, "),
+        many => {
+            let (last, init) = many.split_last().expect("non-empty");
+            format!("For all {}, and {last}, ", init.join(", "))
+        }
+    }
+}
+
+fn synthesize_certify_target(
+    params: &[String],
+    head: &str,
+    body: &DefinedBody,
+) -> Result<Sentence, CompileError> {
+    let prefix = format_forall_prefix(params);
+    let head = head.trim_end_matches('.');
+    let param_spellings: Vec<Spelling> = params
+        .iter()
+        .map(|p| Spelling {
+            shown: p.clone(),
+            grounded: p.clone(),
+        })
+        .collect();
+    let shown = render_defined_body(body, &param_spellings, false, true)?;
+    let grounded = render_defined_body(body, &param_spellings, true, true)?;
+    let shown = shown.trim_end_matches('.');
+    let grounded = grounded.trim_end_matches('.');
+    Ok(Sentence {
+        text: format!("{prefix}{head} if and only if {shown}."),
+        grounded: format!("{prefix}{head} if and only if {grounded}."),
+    })
+}
+
+fn synthesize_provenance_target(params: &[String], head: &str, witness: &str) -> Sentence {
+    let prefix = format_quantifier_prefix(params, head, witness);
+    let head = head.trim_end_matches('.');
+    let text = format!("{prefix}{head}.");
+    Sentence {
+        grounded: text.clone(),
+        text,
+    }
 }
 
 fn format_ground_head(sense: &Ident, params: &[String]) -> String {
@@ -1405,7 +1748,11 @@ fn render_defined_body(
         }
         DefinedBody::Not(inner) => {
             let rendered = render_defined_body(inner, params, use_grounded, true)?;
-            Ok(format!("it is not the case that {rendered}"))
+            if nested {
+                Ok(format!("(it is not the case that {rendered})"))
+            } else {
+                Ok(format!("it is not the case that {rendered}"))
+            }
         }
         DefinedBody::Exists { vars, body } => {
             let rendered = render_defined_body(body, params, use_grounded, true)?;
@@ -1466,6 +1813,14 @@ fn resolve_detail(
     let mut defs = defs.clone();
     collect_defines(body, &names, &senses, &mut defs, ctx)?;
     check_define_cycles(&defs.rules)?;
+    collect_certifies(
+        body,
+        &senses,
+        &defs.rules,
+        &detail_owner,
+        &mut defs.certifies,
+        ctx,
+    )?;
     collect_grounds(
         body,
         &senses,
@@ -1474,7 +1829,7 @@ fn resolve_detail(
         &mut defs.grounds,
         ctx,
     )?;
-    collect_local_heads(body, &names, &senses, ctx)?;
+    collect_local_heads(body, &names, &senses, &defs.rules, ctx)?;
     let body = resolve_forms(
         body,
         &names,
@@ -1753,6 +2108,34 @@ fn require_raw_sentence_with_key(
     Ok((sentence, head_key))
 }
 
+fn export_certifies(
+    local_certifies: &[(SenseKey, String)],
+    claims: &[Proposition],
+) -> HashMap<SenseKey, ExportedCertify> {
+    if local_certifies.is_empty() {
+        return HashMap::new();
+    }
+    let mut local_defs: HashMap<String, Proposition> = HashMap::new();
+    let mut local_certs: HashMap<String, Proposition> = HashMap::new();
+    collect_exportable_props(claims, &mut local_defs, &mut local_certs);
+
+    let mut exported = HashMap::new();
+    for (sense_key, cert_id) in local_certifies {
+        let Some((bundled, assumptions)) = bundle_cert(cert_id, &local_defs, &local_certs) else {
+            continue;
+        };
+        exported.insert(
+            sense_key.clone(),
+            ExportedCertify {
+                cert_id: cert_id.clone(),
+                certificate: bundled,
+                assumptions,
+            },
+        );
+    }
+    exported
+}
+
 fn export_grounds(
     local_grounds: &[(SenseKey, String, Vec<String>)],
     claims: &[Proposition],
@@ -1766,30 +2149,9 @@ fn export_grounds(
 
     let mut exported = HashMap::new();
     for (sense_key, cert_id, witness) in local_grounds {
-        let Some(cert_prop) = local_certs.get(cert_id) else {
+        let Some((bundled, assumptions)) = bundle_cert(cert_id, &local_defs, &local_certs) else {
             continue;
         };
-        let mut inline_defs = HashSet::new();
-        collect_inline_defs(cert_prop, &mut inline_defs);
-
-        let mut bundled = Vec::new();
-        let mut visited_defs = HashSet::new();
-        let mut visited_certs = HashSet::new();
-        visited_certs.insert(cert_id.clone());
-        bundle_deps(
-            cert_prop,
-            &inline_defs,
-            &local_defs,
-            &local_certs,
-            &mut visited_defs,
-            &mut visited_certs,
-            &mut bundled,
-        );
-        bundled.push(cert_prop.clone());
-
-        let mut assumptions = Vec::new();
-        collect_assumptions_from_props(&bundled, &mut assumptions);
-
         exported.insert(
             sense_key.clone(),
             ExportedGround {
@@ -1801,6 +2163,35 @@ fn export_grounds(
         );
     }
     exported
+}
+
+fn bundle_cert(
+    cert_id: &str,
+    local_defs: &HashMap<String, Proposition>,
+    local_certs: &HashMap<String, Proposition>,
+) -> Option<(Vec<Proposition>, Vec<String>)> {
+    let cert_prop = local_certs.get(cert_id)?;
+    let mut inline_defs = HashSet::new();
+    collect_inline_defs(cert_prop, &mut inline_defs);
+
+    let mut bundled = Vec::new();
+    let mut visited_defs = HashSet::new();
+    let mut visited_certs = HashSet::new();
+    visited_certs.insert(cert_id.to_string());
+    bundle_deps(
+        cert_prop,
+        &inline_defs,
+        local_defs,
+        local_certs,
+        &mut visited_defs,
+        &mut visited_certs,
+        &mut bundled,
+    );
+    bundled.push(cert_prop.clone());
+
+    let mut assumptions = Vec::new();
+    collect_assumptions_from_props(&bundled, &mut assumptions);
+    Some((bundled, assumptions))
 }
 
 fn collect_exportable_props(
@@ -1907,7 +2298,39 @@ fn bundle_deps(
                 out,
             );
         }
-        Proposition::Claim { support, .. } | Proposition::Cert { support, .. } => {
+        Proposition::Claim { support, .. } => {
+            if let Support::Sentence(inner) = support {
+                bundle_deps(
+                    inner,
+                    inline_defs,
+                    local_defs,
+                    local_certs,
+                    visited_defs,
+                    visited_certs,
+                    out,
+                );
+            }
+        }
+        Proposition::Cert {
+            support, requires, ..
+        } => {
+            for req_id in requires {
+                if !visited_certs.contains(req_id) {
+                    if let Some(req_prop) = local_certs.get(req_id) {
+                        visited_certs.insert(req_id.clone());
+                        bundle_deps(
+                            req_prop,
+                            inline_defs,
+                            local_defs,
+                            local_certs,
+                            visited_defs,
+                            visited_certs,
+                            out,
+                        );
+                        out.push(req_prop.clone());
+                    }
+                }
+            }
             if let Support::Sentence(inner) = support {
                 bundle_deps(
                     inner,
@@ -1977,7 +2400,15 @@ fn collect_assumptions_from_props(props: &[Proposition], out: &mut Vec<String>) 
             Proposition::Not(inner) | Proposition::Defined { body: inner, .. } => {
                 collect_assumptions_from_props(std::slice::from_ref(inner), out);
             }
-            Proposition::Claim { support, .. } | Proposition::Cert { support, .. } => {
+            Proposition::Claim { support, .. } => {
+                if let Support::Sentence(inner) = support {
+                    collect_assumptions_from_props(std::slice::from_ref(inner), out);
+                }
+            }
+            Proposition::Cert {
+                support, imported, ..
+            } => {
+                collect_assumptions_from_props(imported, out);
                 if let Support::Sentence(inner) = support {
                     collect_assumptions_from_props(std::slice::from_ref(inner), out);
                 }
@@ -2060,6 +2491,7 @@ pub fn extend_scope(
                 senses.insert(sense.name.clone(), sense.clone());
             }
             Form::Define(_)
+            | Form::Certify(_)
             | Form::Ground(_)
             | Form::Assume(_)
             | Form::Detail(_)
@@ -2114,6 +2546,7 @@ fn extend_scope_with_keys(
                 );
             }
             Form::Define(_)
+            | Form::Certify(_)
             | Form::Ground(_)
             | Form::Assume(_)
             | Form::Detail(_)

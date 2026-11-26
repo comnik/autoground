@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use super::ast::{
-    Arg, At, ClauseSpan, Define, Form, Formula, Ground, Ident, Ns, Program, Reading, Refer,
-    Require, Sense,
+    Arg, At, Certify, ClauseSpan, Define, Form, Formula, Ground, Ident, Ns, Program, Reading,
+    Refer, Require, Sense,
 };
 use super::template::hole_names;
 
@@ -540,6 +540,10 @@ fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
         Some(SexpKind::Symbol(head)) if head == "define" => {
             Ok((Form::Define(lower_define(s, xs)?), None))
         }
+        Some(SexpKind::Symbol(head)) if head == "certify" => {
+            let (form, span) = lower_certify(s, xs)?;
+            Ok((form, Some(span)))
+        }
         Some(SexpKind::Symbol(head)) if head == "ground" => {
             let (form, span) = lower_ground(s, xs)?;
             Ok((form, Some(span)))
@@ -637,6 +641,28 @@ fn lower_define(s: &Sexp, xs: &[Sexp]) -> Result<Define, ParseError> {
     }
 }
 
+fn lower_certify(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError> {
+    if xs.len() != 3 {
+        return Err(err_at(&xs[0], "`certify` takes a definition head and a support"));
+    }
+    let (head, _) = lower_formula(&xs[1])?;
+    if !matches!(head, Formula::Apply { .. } | Formula::Exists { .. }) {
+        return Err(err_at(&xs[1], "`certify` heads a defined sense or fact"));
+    }
+    let (support, support_clause) = lower_formula(&xs[2])?;
+    Ok((
+        Form::Certify(Certify {
+            head,
+            support,
+            at: at_of(s),
+        }),
+        ClauseSpan {
+            span: s.span.clone(),
+            children: vec![support_clause],
+        },
+    ))
+}
+
 fn lower_ground(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError> {
     if xs.len() != 4 {
         return Err(err_at(
@@ -704,7 +730,7 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
         SexpKind::Symbol(head)
             if matches!(
                 head.as_str(),
-                "name" | "sense" | "define" | "ground" | "ns" | "assume"
+                "name" | "sense" | "define" | "certify" | "ground" | "ns" | "assume"
             ) =>
         {
             Err(err_at(
@@ -1118,6 +1144,7 @@ fn is_reserved_word(spelling: &str) -> bool {
         "name"
             | "sense"
             | "define"
+            | "certify"
             | "ground"
             | "ns"
             | "and"

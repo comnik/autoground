@@ -90,6 +90,14 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
                 out.push(')');
             }
         },
+        Form::Certify(certify) => {
+            out.push_str("(certify ");
+            write_formula(&certify.head, indent, out);
+            out.push('\n');
+            write_indent(indent + 1, out);
+            write_formula(&certify.support, indent + 1, out);
+            out.push(')');
+        }
         Form::Ground(ground) => {
             out.push_str("(ground (");
             push_ident(&ground.sense, out);
@@ -332,6 +340,10 @@ mod tests {
     (customer c)
     (exists [o] ("{o} belongs to {c}" o c))
     ("{c} has lifetime sales > $25 million" c)))
+(certify (is_a Merger CorporateAction)
+  (witness "types.rs"))
+(certify (high_value_customer c)
+  (witness "query.sql"))
 (ground (high_value_customer c)
   (witness "out.csv")
   (witness "query.sql"))

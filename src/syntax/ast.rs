@@ -168,23 +168,21 @@ pub enum Proposition {
         sentence: Sentence,
         support: Support,
     },
-    /// `sentence` holds by definition iff `body` holds (no implication oracle).
     Defined {
         sentence: Sentence,
         body: Box<Proposition>,
     },
-    /// Certificate for a `ground` rule: proves `targets` from `support` once.
     Cert {
         cert_id: String,
         label: String,
         targets: Vec<Sentence>,
         support: Support,
+        requires: Vec<String>,
+        imported: Vec<Proposition>,
     },
-    /// `sentence` established via a certified `ground` witness (`=>` soundness).
     Grounded {
         sentence: Sentence,
         cert_id: String,
-        /// Self-contained certificate propositions when imported from another namespace.
         certificate: Vec<Proposition>,
         witness: Vec<String>,
     },
@@ -211,7 +209,13 @@ pub enum Define {
     },
 }
 
-/// A certified generator grounding instances of a defined sense via a witness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Certify {
+    pub head: Formula,
+    pub support: Formula,
+    pub at: At,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ground {
     pub sense: Ident,
@@ -227,6 +231,7 @@ pub enum Form {
     Name(String),
     Sense(Sense),
     Define(Define),
+    Certify(Certify),
     Ground(Ground),
     Assume(Formula),
     Detail(Vec<Form>),
@@ -269,6 +274,7 @@ impl Program {
             Form::Name(name) => Some(name.as_str()),
             Form::Sense(_)
             | Form::Define(_)
+            | Form::Certify(_)
             | Form::Ground(_)
             | Form::Assume(_)
             | Form::Detail(_)
@@ -281,6 +287,7 @@ impl Program {
             Form::Sense(sense) => Some(sense),
             Form::Name(_)
             | Form::Define(_)
+            | Form::Certify(_)
             | Form::Ground(_)
             | Form::Assume(_)
             | Form::Detail(_)
@@ -294,6 +301,7 @@ impl Program {
             Form::Name(_)
             | Form::Sense(_)
             | Form::Define(_)
+            | Form::Certify(_)
             | Form::Ground(_)
             | Form::Assume(_)
             | Form::Detail(_) => None,
@@ -306,9 +314,11 @@ impl Program {
             .iter()
             .zip(self.spans.iter())
             .filter_map(|(form, span)| match form {
-                Form::Formula(_) | Form::Assume(_) | Form::Detail(_) | Form::Ground(_) => {
-                    Some(span.clone())
-                }
+                Form::Formula(_)
+                | Form::Assume(_)
+                | Form::Detail(_)
+                | Form::Certify(_)
+                | Form::Ground(_) => Some(span.clone()),
                 Form::Name(_) | Form::Sense(_) | Form::Define(_) => None,
             })
             .collect()
