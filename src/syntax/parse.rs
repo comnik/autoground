@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use super::ast::{
-    Arg, At, Certify, ClauseSpan, Define, Form, Formula, Ground, Ident, Ns, Program, Reading,
-    Refer, Require, Sense,
+    Arg, At, Certify, CertifyHead, ClauseSpan, Define, Form, Formula, Ground, Ident, Ns, Program,
+    Reading, Refer, Require, Sense,
 };
 use super::template::hole_names;
 
@@ -556,7 +556,12 @@ fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
             let (formula, span) = lower_detail(s, xs)?;
             Ok((formula, Some(span)))
         }
-        Some(SexpKind::Symbol(head)) if matches!(head.as_str(), "claim" | "and" | "or" | "not") => {
+        Some(SexpKind::Symbol(head))
+            if matches!(
+                head.as_str(),
+                "claim" | "and" | "or" | "not" | "implies"
+            ) =>
+        {
             let (formula, clause) = lower_formula(s)?;
             Ok((Form::Formula(formula), Some(clause)))
         }
@@ -612,11 +617,22 @@ fn lower_sense(xs: &[Sexp]) -> Result<Sense, ParseError> {
     })
 }
 
+fn is_closed_sentence_form(formula: &Formula) -> bool {
+    matches!(
+        formula,
+        Formula::Apply { .. }
+            | Formula::Exists { .. }
+            | Formula::Forall { .. }
+            | Formula::Implies { .. }
+            | Formula::Not(_)
+    )
+}
+
 fn lower_define(s: &Sexp, xs: &[Sexp]) -> Result<Define, ParseError> {
     match xs.len() {
         2 => {
             let (sentence, _) = lower_formula(&xs[1])?;
-            if !matches!(sentence, Formula::Apply { .. } | Formula::Exists { .. }) {
+            if !is_closed_sentence_form(&sentence) {
                 return Err(err_at(&xs[1], "`define` takes a sentence"));
             }
             Ok(Define::Fact {
@@ -625,6 +641,15 @@ fn lower_define(s: &Sexp, xs: &[Sexp]) -> Result<Define, ParseError> {
             })
         }
         3 => {
+            if matches!(xs[1].kind, SexpKind::Symbol(_)) {
+                let name = declared_symbol(&xs[1], "definition name")?;
+                let (body, _) = lower_formula(&xs[2])?;
+                return Ok(Define::Constraint {
+                    name,
+                    body,
+                    at: at_of(s),
+                });
+            }
             let (sense, params) = lower_sense_head(&xs[1], "`define`")?;
             let (body, _) = lower_formula(&xs[2])?;
             Ok(Define::Rule {
@@ -636,7 +661,7 @@ fn lower_define(s: &Sexp, xs: &[Sexp]) -> Result<Define, ParseError> {
         }
         _ => Err(err_at(
             &xs[0],
-            "`define` takes a sentence, or a sense head and a body",
+            "`define` takes a sentence, a name and formula, or a sense head and a body",
         )),
     }
 }
@@ -645,10 +670,16 @@ fn lower_certify(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError
     if xs.len() != 3 {
         return Err(err_at(&xs[0], "`certify` takes a definition head and a support"));
     }
-    let (head, _) = lower_formula(&xs[1])?;
-    if !matches!(head, Formula::Apply { .. } | Formula::Exists { .. }) {
-        return Err(err_at(&xs[1], "`certify` heads a defined sense or fact"));
-    }
+    let head = match &xs[1].kind {
+        SexpKind::Symbol(spelling) => CertifyHead::Name(use_symbol(&xs[1], spelling)?),
+        _ => {
+            let (formula, _) = lower_formula(&xs[1])?;
+            if !is_closed_sentence_form(&formula) {
+                return Err(err_at(&xs[1], "`certify` heads a defined sense, name, or fact"));
+            }
+            CertifyHead::Formula(formula)
+        }
+    };
     let (support, support_clause) = lower_formula(&xs[2])?;
     Ok((
         Form::Certify(Certify {
@@ -757,7 +788,9 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
             let (inner, child) = lower_formula(&xs[1])?;
             Ok((Formula::Not(Box::new(inner)), clause(vec![child])))
         }
-        SexpKind::Symbol(head) if head == "exists" => lower_exists(s, xs),
+        SexpKind::Symbol(head) if head == "implies" => lower_implies(s, xs),
+        SexpKind::Symbol(head) if head == "exists" => lower_quantifier(s, xs, false),
+        SexpKind::Symbol(head) if head == "forall" => lower_quantifier(s, xs, true),
         SexpKind::Symbol(head) if head == "claim" => lower_claim(s, xs),
         SexpKind::Symbol(head) if head == "witness" => lower_witness(s, xs),
         SexpKind::Symbol(head) => Ok((
@@ -798,7 +831,10 @@ fn lower_assume(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError>
         return Err(err_at(&xs[0], "`assume` takes a sentence"));
     }
     let (sentence, _) = lower_formula(&xs[1])?;
-    if !matches!(sentence, Formula::Apply { .. } | Formula::Exists { .. }) {
+    if !matches!(
+        sentence,
+        Formula::Apply { .. } | Formula::Exists { .. } | Formula::Forall { .. }
+    ) {
         return Err(err_at(&xs[1], "`assume` takes a sentence"));
     }
     Ok((
@@ -810,21 +846,51 @@ fn lower_assume(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError>
     ))
 }
 
-fn lower_exists(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseError> {
+fn lower_implies(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseError> {
     if xs.len() != 3 {
         return Err(err_at(
             &xs[0],
-            "`exists` takes a vector of variables and a formula",
+            "`implies` takes an antecedent and a consequent formula",
+        ));
+    }
+    let (antecedent, ant_clause) = lower_formula(&xs[1])?;
+    let (consequent, cons_clause) = lower_formula(&xs[2])?;
+    let neg_ant = ClauseSpan {
+        span: ant_clause.span.clone(),
+        children: vec![ant_clause],
+    };
+    Ok((
+        Formula::Implies {
+            antecedent: Box::new(antecedent),
+            consequent: Box::new(consequent),
+        },
+        ClauseSpan {
+            span: s.span.clone(),
+            children: vec![neg_ant, cons_clause],
+        },
+    ))
+}
+
+fn lower_quantifier(
+    s: &Sexp,
+    xs: &[Sexp],
+    universal: bool,
+) -> Result<(Formula, ClauseSpan), ParseError> {
+    let kw = if universal { "forall" } else { "exists" };
+    if xs.len() != 3 {
+        return Err(err_at(
+            &xs[0],
+            format!("`{kw}` takes a vector of variables and a formula"),
         ));
     }
     let SexpKind::Vector(var_items) = &xs[1].kind else {
         return Err(err_at(
             &xs[1],
-            "`exists` takes a vector of variables, e.g. [x]",
+            format!("`{kw}` takes a vector of variables, e.g. [x]"),
         ));
     };
     if var_items.is_empty() {
-        return Err(err_at(&xs[1], "`exists` takes at least one variable"));
+        return Err(err_at(&xs[1], format!("`{kw}` takes at least one variable")));
     }
     let mut vars = Vec::with_capacity(var_items.len());
     for item in var_items {
@@ -835,11 +901,19 @@ fn lower_exists(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseErr
         vars.push(var);
     }
     let (body, _) = lower_formula(&xs[2])?;
-    Ok((
+    let formula = if universal {
+        Formula::Forall {
+            vars,
+            body: Box::new(body),
+        }
+    } else {
         Formula::Exists {
             vars,
             body: Box::new(body),
-        },
+        }
+    };
+    Ok((
+        formula,
         ClauseSpan {
             span: s.span.clone(),
             children: Vec::new(),
@@ -874,7 +948,10 @@ fn lower_claim(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseErro
         return Err(err_at(&xs[0], "`claim` takes a sentence and a support"));
     }
     let (sentence, _) = lower_formula(&xs[1])?;
-    if !matches!(sentence, Formula::Apply { .. } | Formula::Exists { .. }) {
+    if !matches!(
+        sentence,
+        Formula::Apply { .. } | Formula::Exists { .. } | Formula::Forall { .. }
+    ) {
         return Err(err_at(&xs[1], "`claim` heads a sentence"));
     }
     let (support, child) = lower_formula(&xs[2])?;
@@ -1150,7 +1227,9 @@ fn is_reserved_word(spelling: &str) -> bool {
             | "and"
             | "or"
             | "not"
+            | "implies"
             | "exists"
+            | "forall"
             | "claim"
             | "witness"
             | "assume"

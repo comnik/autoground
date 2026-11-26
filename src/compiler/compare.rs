@@ -182,6 +182,11 @@ fn collect_ontology_obligations(
                 rules.push(key.clone());
             }
         }
+        for key in &module.constraint_order {
+            if seen_rules.insert(key.clone()) {
+                rules.push(key.clone());
+            }
+        }
         for fact in &module.fact_order {
             if seen_facts.insert(fact.clone()) {
                 facts.push(fact.clone());
@@ -193,6 +198,11 @@ fn collect_ontology_obligations(
     let imports = environment(ontology, ontology_path, &index, &modules)?;
     let root = compile_module(ontology, &imports)?;
     for key in &root.define_order {
+        if seen_rules.insert(key.clone()) {
+            rules.push(key.clone());
+        }
+    }
+    for key in &root.constraint_order {
         if seen_rules.insert(key.clone()) {
             rules.push(key.clone());
         }
@@ -337,6 +347,8 @@ mod tests {
 (sense p "{x} holds")
 (define (is_a A B))
 (define (p x) ("{x} is positive" x))
+(define all_p_nonneg
+  (forall [x] (implies (p x) ("{x} is non-negative" x))))
 "#,
         )
         .unwrap();
@@ -351,8 +363,9 @@ mod tests {
             loaded(
                 "impl/rules.brief",
                 r#"
-(ns impl.rules (:require [acme.ontology :refer :all]))
-(certify (p x) (witness "rules.py"))
+(ns impl.rules (:require [acme.ontology :as onto]))
+(certify (onto/p x) (witness "rules.py"))
+(certify onto/all_p_nonneg (witness "rules.py"))
 "#,
             ),
         ];
@@ -375,6 +388,26 @@ mod tests {
         )
         .unwrap();
         assert!(!report.has_failures(), "{}", report.format_failures());
-        assert_eq!(report.extra_claims.len(), 2);
+        assert_eq!(report.extra_claims.len(), 3);
+
+        // Omitting the named constraint fails coverage with its constraint name.
+        let missing = parse(
+            r#"
+(ns impl.missing (:require [acme.ontology :refer :all]))
+(certify (is_a A B) (witness "types.py"))
+(certify (p x) (witness "rules.py"))
+"#,
+        )
+        .unwrap();
+        let missing_report = compare_against(
+            &missing,
+            Some("impl/missing.brief"),
+            &ontology,
+            "ontology.brief",
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(missing_report.missing_certifies, vec!["all_p_nonneg"]);
     }
 }

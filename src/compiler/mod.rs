@@ -2,8 +2,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::syntax::template::{apply, holes_word, names_word};
 use crate::syntax::{
-    Arg, At, Certify, Define, Form, Formula, Ground, Ident, Program, Proposition, Reading, Sense,
-    Sentence, Support,
+    Arg, At, Certify, CertifyHead, Define, Form, Formula, Ground, Ident, Program, Proposition,
+    Reading, Sense, Sentence, Support,
 };
 
 mod compare;
@@ -44,7 +44,15 @@ pub(crate) enum DefinedBody {
     And(Vec<DefinedBody>),
     Or(Vec<DefinedBody>),
     Not(Box<DefinedBody>),
+    Implies {
+        antecedent: Box<DefinedBody>,
+        consequent: Box<DefinedBody>,
+    },
     Exists {
+        vars: Vec<String>,
+        body: Box<DefinedBody>,
+    },
+    Forall {
         vars: Vec<String>,
         body: Box<DefinedBody>,
     },
@@ -59,6 +67,12 @@ pub(crate) enum DefinedBody {
 pub(crate) struct ResolvedDefine {
     pub(crate) sense: Sense,
     pub(crate) body: DefinedBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedConstraint {
+    pub(crate) body: DefinedBody,
+    pub(crate) sentence: Sentence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +113,8 @@ pub(crate) struct CompiledModule {
     pub(crate) define_order: Vec<SenseKey>,
     pub(crate) facts: HashMap<String, Sentence>,
     pub(crate) fact_order: Vec<String>,
+    pub(crate) constraints: HashMap<SenseKey, ResolvedConstraint>,
+    pub(crate) constraint_order: Vec<SenseKey>,
     pub(crate) certifies: HashMap<SenseKey, ExportedCertify>,
     pub(crate) certified_facts: HashMap<String, ExportedCertify>,
     pub(crate) grounds: HashMap<SenseKey, ExportedGround>,
@@ -122,6 +138,10 @@ pub(crate) struct Imports {
     defines: HashMap<SenseKey, ResolvedDefine>,
     /// Ground definitions exported by required namespaces, keyed by sentence text.
     facts: HashMap<String, Sentence>,
+    /// Named closed constraints exported by required namespaces, keyed by canonical key.
+    constraints: HashMap<SenseKey, ResolvedConstraint>,
+    /// Referred constraint names mapped to their canonical key.
+    constraint_names: HashMap<String, SenseKey>,
     /// Implementation certifications exported by required namespaces, keyed by canonical sense.
     pub(crate) certifies: HashMap<SenseKey, ExportedCertify>,
     /// Certified ground facts exported by required namespaces, keyed by sentence text.
@@ -140,6 +160,8 @@ impl Imports {
             owners: HashMap::new(),
             defines: HashMap::new(),
             facts: HashMap::new(),
+            constraints: HashMap::new(),
+            constraint_names: HashMap::new(),
             certifies: HashMap::new(),
             certified_facts: HashMap::new(),
             grounds: HashMap::new(),
@@ -151,6 +173,8 @@ impl Imports {
 struct Defs {
     rules: HashMap<SenseKey, ResolvedDefine>,
     facts: HashMap<String, Sentence>,
+    constraints: HashMap<SenseKey, ResolvedConstraint>,
+    constraint_names: HashMap<String, SenseKey>,
     certifies: HashMap<SenseKey, CertifyRule>,
     grounds: HashMap<SenseKey, GroundRule>,
 }
@@ -419,6 +443,8 @@ pub(crate) fn compile_module(
     let mut defs = Defs {
         rules: imports.defines.clone(),
         facts: imports.facts.clone(),
+        constraints: imports.constraints.clone(),
+        constraint_names: imports.constraint_names.clone(),
         certifies: imports
             .certifies
             .iter()
@@ -449,10 +475,11 @@ pub(crate) fn compile_module(
             })
             .collect(),
     };
-    let (local_defines, define_order, local_facts, fact_order) = collect_defines(
+    let local_defs = collect_defines(
         &program.forms,
         &declared,
         &sense_by_name,
+        &current_ns,
         &mut defs,
         &mut ctx,
     )?;
@@ -462,6 +489,8 @@ pub(crate) fn compile_module(
         &program.forms,
         &sense_by_name,
         &defs.rules,
+        &defs.constraints,
+        &defs.constraint_names,
         &current_ns,
         &mut defs.certifies,
         &mut ctx,
@@ -510,10 +539,12 @@ pub(crate) fn compile_module(
             assumptions,
             terms: ctx.terms,
         },
-        defines: local_defines,
-        define_order,
-        facts: local_facts,
-        fact_order,
+        defines: local_defs.rules,
+        define_order: local_defs.rule_order,
+        facts: local_defs.facts,
+        fact_order: local_defs.fact_order,
+        constraints: local_defs.constraints,
+        constraint_order: local_defs.constraint_order,
         certifies: exported_certifies,
         certified_facts: exported_certified_facts,
         grounds: exported_grounds,
@@ -719,7 +750,14 @@ fn formula_has_claim(formula: &Formula) -> bool {
         Formula::Claim { .. } => true,
         Formula::And(xs) | Formula::Or(xs) => xs.iter().any(formula_has_claim),
         Formula::Not(inner) => formula_has_claim(inner),
-        Formula::Apply { .. } | Formula::Witness { .. } | Formula::Exists { .. } => false,
+        Formula::Implies {
+            antecedent,
+            consequent,
+        } => formula_has_claim(antecedent) || formula_has_claim(consequent),
+        Formula::Apply { .. }
+        | Formula::Witness { .. }
+        | Formula::Exists { .. }
+        | Formula::Forall { .. } => false,
     }
 }
 
@@ -895,21 +933,23 @@ fn remember(
     }
 }
 
+struct LocalDefines {
+    rules: HashMap<SenseKey, ResolvedDefine>,
+    rule_order: Vec<SenseKey>,
+    facts: HashMap<String, Sentence>,
+    fact_order: Vec<String>,
+    constraints: HashMap<SenseKey, ResolvedConstraint>,
+    constraint_order: Vec<SenseKey>,
+}
+
 fn collect_defines(
     forms: &[Form],
     names: &HashSet<String>,
     senses: &HashMap<String, (SenseKey, Sense)>,
+    owner: &str,
     defs: &mut Defs,
     ctx: &mut Ctx<'_>,
-) -> Result<
-    (
-        HashMap<SenseKey, ResolvedDefine>,
-        Vec<SenseKey>,
-        HashMap<String, Sentence>,
-        Vec<String>,
-    ),
-    CompileError,
-> {
+) -> Result<LocalDefines, CompileError> {
     let mut local_rules = HashMap::new();
     let mut rule_order = Vec::new();
     for form in forms {
@@ -953,6 +993,46 @@ fn collect_defines(
         local_rules.insert(key, resolved);
     }
 
+    let mut local_constraints = HashMap::new();
+    let mut constraint_order = Vec::new();
+    for form in forms {
+        let Form::Define(Define::Constraint { name, body, .. }) = form else {
+            continue;
+        };
+        if names.contains(name) || senses.contains_key(name) {
+            return Err(CompileError {
+                message: format!("`{name}` is already declared as a name or sense"),
+            });
+        }
+        let key = SenseKey {
+            owner: owner.to_string(),
+            name: name.clone(),
+        };
+        if local_constraints.contains_key(&key) || defs.constraints.contains_key(&key) {
+            return Err(CompileError {
+                message: format!("duplicate definition of `{name}`"),
+            });
+        }
+        let resolved_body = resolve_define_body(body, &[], &[], names, senses, ctx)?;
+        if matches!(&resolved_body, DefinedBody::And(xs) | DefinedBody::Or(xs) if xs.is_empty()) {
+            return Err(CompileError {
+                message: format!("`define` body for `{name}` cannot be empty"),
+            });
+        }
+        let text = render_defined_body(&resolved_body, &[], false, false)?;
+        let grounded = render_defined_body(&resolved_body, &[], true, false)?;
+        let sentence = Sentence { text, grounded };
+        remember(&mut ctx.expansions, &sentence)?;
+        let resolved = ResolvedConstraint {
+            body: resolved_body,
+            sentence,
+        };
+        defs.constraints.insert(key.clone(), resolved.clone());
+        defs.constraint_names.insert(name.clone(), key.clone());
+        constraint_order.push(key.clone());
+        local_constraints.insert(key, resolved);
+    }
+
     let mut local_facts = HashMap::new();
     let mut fact_order = Vec::new();
     for form in forms {
@@ -977,7 +1057,14 @@ fn collect_defines(
         fact_order.push(sentence.text.clone());
         local_facts.insert(sentence.text.clone(), sentence);
     }
-    Ok((local_rules, rule_order, local_facts, fact_order))
+    Ok(LocalDefines {
+        rules: local_rules,
+        rule_order,
+        facts: local_facts,
+        fact_order,
+        constraints: local_constraints,
+        constraint_order,
+    })
 }
 
 fn resolve_define_body(
@@ -1006,7 +1093,19 @@ fn resolve_define_body(
         Formula::Not(x) => Ok(DefinedBody::Not(Box::new(resolve_define_body(
             x, params, bound, names, senses, ctx,
         )?))),
-        Formula::Exists { vars, body } => {
+        Formula::Implies {
+            antecedent,
+            consequent,
+        } => Ok(DefinedBody::Implies {
+            antecedent: Box::new(resolve_define_body(
+                antecedent, params, bound, names, senses, ctx,
+            )?),
+            consequent: Box::new(resolve_define_body(
+                consequent, params, bound, names, senses, ctx,
+            )?),
+        }),
+        Formula::Exists { vars, body } | Formula::Forall { vars, body } => {
+            let universal = matches!(formula, Formula::Forall { .. });
             for var in vars {
                 if params.iter().any(|p| p == var) || bound.iter().any(|b| b == var) {
                     return Err(CompileError {
@@ -1019,27 +1118,35 @@ fn resolve_define_body(
             inner_bound.extend(vars.iter().cloned());
             let inner = resolve_define_body(body, params, &inner_bound, names, senses, ctx)?;
             if matches!(&inner, DefinedBody::And(xs) | DefinedBody::Or(xs) if xs.is_empty()) {
+                let kw = if universal { "forall" } else { "exists" };
                 return Err(CompileError {
-                    message: "`exists` body cannot be empty".into(),
+                    message: format!("`{kw}` body cannot be empty"),
                 });
             }
-            Ok(DefinedBody::Exists {
-                vars: vars.clone(),
-                body: Box::new(inner),
-            })
+            if universal {
+                Ok(DefinedBody::Forall {
+                    vars: vars.clone(),
+                    body: Box::new(inner),
+                })
+            } else {
+                Ok(DefinedBody::Exists {
+                    vars: vars.clone(),
+                    body: Box::new(inner),
+                })
+            }
         }
         Formula::Claim { .. } => Err(CompileError {
             message: if bound.is_empty() {
                 "`claim` cannot appear inside a `define` body".into()
             } else {
-                "`claim` cannot appear inside an `exists` body".into()
+                "`claim` cannot appear inside a quantifier body".into()
             },
         }),
         Formula::Witness { .. } => Err(CompileError {
             message: if bound.is_empty() {
                 "`witness` cannot appear inside a `define` body".into()
             } else {
-                "`witness` cannot appear inside an `exists` body".into()
+                "`witness` cannot appear inside a quantifier body".into()
             },
         }),
         Formula::Apply { reading, args, at } => {
@@ -1148,7 +1255,16 @@ fn collect_define_deps(body: &DefinedBody, out: &mut Vec<SenseKey>) {
             }
         }
         DefinedBody::Not(inner) => collect_define_deps(inner, out),
-        DefinedBody::Exists { body, .. } => collect_define_deps(body, out),
+        DefinedBody::Implies {
+            antecedent,
+            consequent,
+        } => {
+            collect_define_deps(antecedent, out);
+            collect_define_deps(consequent, out);
+        }
+        DefinedBody::Exists { body, .. } | DefinedBody::Forall { body, .. } => {
+            collect_define_deps(body, out)
+        }
         DefinedBody::Apply { sense_key, .. } => {
             if let Some(key) = sense_key {
                 out.push(key.clone());
@@ -1157,10 +1273,13 @@ fn collect_define_deps(body: &DefinedBody, out: &mut Vec<SenseKey>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_certifies(
     forms: &[Form],
     senses: &HashMap<String, (SenseKey, Sense)>,
     defines: &HashMap<SenseKey, ResolvedDefine>,
+    constraints: &HashMap<SenseKey, ResolvedConstraint>,
+    constraint_names: &HashMap<String, SenseKey>,
     scope_prefix: &str,
     certifies: &mut HashMap<SenseKey, CertifyRule>,
     ctx: &mut Ctx<'_>,
@@ -1171,44 +1290,94 @@ fn collect_certifies(
         let Form::Certify(certify) = form else {
             continue;
         };
-        let Formula::Apply {
-            reading: Reading::Sense(ident),
-            args,
-            at,
-        } = &certify.head
-        else {
-            continue;
-        };
-        let (key, sense) = resolve_sense_with_key(ident, senses, ctx.imports)?;
-        if !defines.contains_key(&key) {
-            continue;
+        match &certify.head {
+            CertifyHead::Name(ident) => {
+                let Some((key, _)) =
+                    resolve_constraint_ident(ident, constraints, constraint_names, ctx.imports)?
+                else {
+                    continue;
+                };
+                if !local_seen.insert(key.clone()) {
+                    return Err(CompileError {
+                        message: format!("duplicate `certify` for `{}`", ident.display()),
+                    });
+                }
+                let cert_id = if scope_prefix.is_empty() {
+                    format!("certify:{}", key.display())
+                } else {
+                    format!("certify:{scope_prefix}:{}", key.display())
+                };
+                certifies.insert(
+                    key.clone(),
+                    CertifyRule {
+                        cert_id: cert_id.clone(),
+                        certificate: Vec::new(),
+                        assumptions: Vec::new(),
+                    },
+                );
+                local.push((key, cert_id));
+            }
+            CertifyHead::Formula(Formula::Apply {
+                reading: Reading::Sense(ident),
+                args,
+                at,
+            }) => {
+                let (key, sense) = resolve_sense_with_key(ident, senses, ctx.imports)?;
+                if !defines.contains_key(&key) {
+                    continue;
+                }
+                let _params = extract_certify_params(args, &sense, ident)?;
+                if sense.holes.is_empty() {
+                    note(ctx, ident, Place::Sentence, *at);
+                }
+                if !local_seen.insert(key.clone()) {
+                    return Err(CompileError {
+                        message: format!("duplicate `certify` for `{}`", ident.display()),
+                    });
+                }
+                let cert_id = if scope_prefix.is_empty() {
+                    format!("certify:{}", key.display())
+                } else {
+                    format!("certify:{scope_prefix}:{}", key.display())
+                };
+                certifies.insert(
+                    key.clone(),
+                    CertifyRule {
+                        cert_id: cert_id.clone(),
+                        certificate: Vec::new(),
+                        assumptions: Vec::new(),
+                    },
+                );
+                local.push((key, cert_id));
+            }
+            CertifyHead::Formula(_) => continue,
         }
-        let params = extract_certify_params(args, &sense, ident)?;
-        if sense.holes.is_empty() {
-            note(ctx, ident, Place::Sentence, *at);
-        }
-        if !local_seen.insert(key.clone()) {
-            return Err(CompileError {
-                message: format!("duplicate `certify` for `{}`", ident.display()),
-            });
-        }
-        let _ = params;
-        let cert_id = if scope_prefix.is_empty() {
-            format!("certify:{}", key.display())
-        } else {
-            format!("certify:{scope_prefix}:{}", key.display())
-        };
-        certifies.insert(
-            key.clone(),
-            CertifyRule {
-                cert_id: cert_id.clone(),
-                certificate: Vec::new(),
-                assumptions: Vec::new(),
-            },
-        );
-        local.push((key, cert_id));
     }
     Ok(local)
+}
+
+fn resolve_constraint_ident<'a>(
+    ident: &Ident,
+    constraints: &'a HashMap<SenseKey, ResolvedConstraint>,
+    constraint_names: &HashMap<String, SenseKey>,
+    imports: &Imports,
+) -> Result<Option<(SenseKey, &'a ResolvedConstraint)>, CompileError> {
+    if let Some(qualifier) = &ident.qualifier {
+        let Some(ns) = imports.qualifiers.get(qualifier) else {
+            return Err(CompileError {
+                message: format!("`{qualifier}` is not a required namespace"),
+            });
+        };
+        let key = SenseKey {
+            owner: ns.clone(),
+            name: ident.name.clone(),
+        };
+        Ok(constraints.get(&key).map(|c| (key, c)))
+    } else if let Some(key) = constraint_names.get(&ident.name) {
+        Ok(constraints.get(key).map(|c| (key.clone(), c)))
+    } else {
+        Ok(None)
+    }
 }
 
 fn extract_certify_params(
@@ -1330,23 +1499,25 @@ fn collect_local_heads(
             }
             Form::Formula(formula) => collect_claimed_heads(formula, names, senses, ctx)?,
             Form::Certify(certify) => {
-                let is_rule = match &certify.head {
-                    Formula::Apply {
-                        reading: Reading::Sense(ident),
-                        ..
-                    } => resolve_sense_with_key(ident, senses, ctx.imports)
-                        .is_ok_and(|(key, _)| rules.contains_key(&key)),
-                    _ => false,
-                };
-                if !is_rule {
-                    let sentence = require_raw_sentence(
-                        &certify.head,
-                        names,
-                        senses,
-                        ctx,
-                        "`certify` takes a defined sense or fact",
-                    )?;
-                    ctx.claimed.insert(sentence.text);
+                if let CertifyHead::Formula(formula) = &certify.head {
+                    let is_rule = match formula {
+                        Formula::Apply {
+                            reading: Reading::Sense(ident),
+                            ..
+                        } => resolve_sense_with_key(ident, senses, ctx.imports)
+                            .is_ok_and(|(key, _)| rules.contains_key(&key)),
+                        _ => false,
+                    };
+                    if !is_rule {
+                        let sentence = require_raw_sentence(
+                            formula,
+                            names,
+                            senses,
+                            ctx,
+                            "`certify` takes a defined sense, name, or fact",
+                        )?;
+                        ctx.claimed.insert(sentence.text);
+                    }
                 }
                 collect_claimed_heads(&certify.support, names, senses, ctx)?;
             }
@@ -1370,13 +1541,23 @@ fn collect_claimed_heads(
             }
         }
         Formula::Not(inner) => collect_claimed_heads(inner, names, senses, ctx)?,
+        Formula::Implies {
+            antecedent,
+            consequent,
+        } => {
+            collect_claimed_heads(antecedent, names, senses, ctx)?;
+            collect_claimed_heads(consequent, names, senses, ctx)?;
+        }
         Formula::Claim { sentence, support } => {
             let head =
                 require_raw_sentence(sentence, names, senses, ctx, "`claim` heads a sentence")?;
             ctx.claimed.insert(head.text);
             collect_claimed_heads(support, names, senses, ctx)?;
         }
-        Formula::Apply { .. } | Formula::Witness { .. } | Formula::Exists { .. } => {}
+        Formula::Apply { .. }
+        | Formula::Witness { .. }
+        | Formula::Exists { .. }
+        | Formula::Forall { .. } => {}
     }
     Ok(())
 }
@@ -1452,11 +1633,56 @@ fn resolve_certify(
     scope_prefix: &str,
     ctx: &mut Ctx<'_>,
 ) -> Result<Proposition, CompileError> {
+    let formula = match &certify.head {
+        CertifyHead::Name(ident) => {
+            let Some((key, constraint)) = resolve_constraint_ident(
+                ident,
+                &defs.constraints,
+                &defs.constraint_names,
+                ctx.imports,
+            )?
+            else {
+                return Err(CompileError {
+                    message: format!("`{}` cannot be certified without a `define`", ident.display()),
+                });
+            };
+            let cert_id = if scope_prefix.is_empty() {
+                format!("certify:{}", key.display())
+            } else {
+                format!("certify:{scope_prefix}:{}", key.display())
+            };
+            let label = format!("certify {}", ident.display());
+            let target = Sentence {
+                text: format!("{}.", constraint.sentence.text.trim_end_matches('.')),
+                grounded: format!("{}.", constraint.sentence.grounded.trim_end_matches('.')),
+            };
+            let mut deps = Vec::new();
+            collect_define_deps(&constraint.body, &mut deps);
+            let (requires, imported) = collect_cert_prereqs(&deps, defs, ctx);
+            let support = match &certify.support {
+                Formula::Witness { paths } => Support::Witness {
+                    paths: witness_paths(paths)?,
+                },
+                other => Support::Sentence(Box::new(resolve(other, names, senses, defs, ctx)?)),
+            };
+            ctx.certified_rules.push((key, cert_id.clone()));
+            return Ok(Proposition::Cert {
+                cert_id,
+                label,
+                targets: vec![target],
+                support,
+                requires,
+                imported,
+            });
+        }
+        CertifyHead::Formula(formula) => formula,
+    };
+
     if let Formula::Apply {
         reading: Reading::Sense(ident),
         args,
         at,
-    } = &certify.head
+    } = formula
     {
         let (key, sense) = resolve_sense_with_key(ident, senses, ctx.imports)?;
         if let Some(def) = defs.rules.get(&key) {
@@ -1495,11 +1721,11 @@ fn resolve_certify(
     }
 
     let (sentence, head_key) = require_raw_sentence_with_key(
-        &certify.head,
+        formula,
         names,
         senses,
         ctx,
-        "`certify` takes a defined sense or fact",
+        "`certify` takes a defined sense, name, or fact",
     )?;
     if !defs.facts.contains_key(&sentence.text) {
         let what = head_key
@@ -1746,6 +1972,18 @@ fn format_exists_prefix(vars: &[String]) -> String {
     }
 }
 
+fn format_forall_lower(vars: &[String]) -> String {
+    match vars {
+        [] => String::new(),
+        [only] => format!("for all {only}, "),
+        [a, b] => format!("for all {a} and {b}, "),
+        many => {
+            let (last, init) = many.split_last().expect("non-empty");
+            format!("for all {}, and {last}, ", init.join(", "))
+        }
+    }
+}
+
 fn render_defined_body(
     body: &DefinedBody,
     params: &[Spelling],
@@ -1784,9 +2022,31 @@ fn render_defined_body(
                 Ok(format!("it is not the case that {rendered}"))
             }
         }
+        DefinedBody::Implies {
+            antecedent,
+            consequent,
+        } => {
+            let ant = render_defined_body(antecedent, params, use_grounded, true)?;
+            let cons = render_defined_body(consequent, params, use_grounded, true)?;
+            let rendered = format!("if {ant}, then {cons}");
+            if nested {
+                Ok(format!("({rendered})"))
+            } else {
+                Ok(rendered)
+            }
+        }
         DefinedBody::Exists { vars, body } => {
             let rendered = render_defined_body(body, params, use_grounded, true)?;
             Ok(format!("{}{rendered}", format_exists_prefix(vars)))
+        }
+        DefinedBody::Forall { vars, body } => {
+            let rendered = render_defined_body(body, params, use_grounded, false)?;
+            let out = format!("{}{rendered}", format_forall_lower(vars));
+            if nested {
+                Ok(format!("({out})"))
+            } else {
+                Ok(out)
+            }
         }
         DefinedBody::Or(xs) => {
             let mut parts = Vec::with_capacity(xs.len());
@@ -1841,12 +2101,14 @@ fn resolve_detail(
     let (names, senses) = extend_scope_with_keys(body, names, senses, &detail_owner)?;
     ctx.scopes.push(scope_decls(body));
     let mut defs = defs.clone();
-    collect_defines(body, &names, &senses, &mut defs, ctx)?;
+    collect_defines(body, &names, &senses, &detail_owner, &mut defs, ctx)?;
     check_define_cycles(&defs.rules)?;
     collect_certifies(
         body,
         &senses,
         &defs.rules,
+        &defs.constraints,
+        &defs.constraint_names,
         &detail_owner,
         &mut defs.certifies,
         ctx,
@@ -1887,7 +2149,15 @@ fn resolve(
         Formula::Not(x) => Ok(Proposition::Not(Box::new(resolve(
             x, names, senses, defs, ctx,
         )?))),
-        Formula::Exists { .. } => {
+        Formula::Implies {
+            antecedent,
+            consequent,
+        } => {
+            let ant = resolve(antecedent, names, senses, defs, ctx)?;
+            let cons = resolve(consequent, names, senses, defs, ctx)?;
+            Ok(Proposition::Or(vec![Proposition::Not(Box::new(ant)), cons]))
+        }
+        Formula::Exists { .. } | Formula::Forall { .. } => {
             let body = resolve_define_body(formula, &[], &[], names, senses, ctx)?;
             instantiate_defined_body(&body, &[], defs, ctx)
         }
@@ -2027,7 +2297,15 @@ fn instantiate_defined_body(
         DefinedBody::Not(inner) => Ok(Proposition::Not(Box::new(instantiate_defined_body(
             inner, params, defs, ctx,
         )?))),
-        DefinedBody::Exists { .. } => {
+        DefinedBody::Implies {
+            antecedent,
+            consequent,
+        } => {
+            let ant = instantiate_defined_body(antecedent, params, defs, ctx)?;
+            let cons = instantiate_defined_body(consequent, params, defs, ctx)?;
+            Ok(Proposition::Or(vec![Proposition::Not(Box::new(ant)), cons]))
+        }
+        DefinedBody::Exists { .. } | DefinedBody::Forall { .. } => {
             let text = render_defined_body(body, params, false, false)?;
             let grounded = render_defined_body(body, params, true, false)?;
             let sentence = Sentence { text, grounded };
@@ -2084,7 +2362,13 @@ fn require_raw_sentence_with_key(
     ctx: &mut Ctx<'_>,
     message: &str,
 ) -> Result<(Sentence, Option<(String, SenseKey)>), CompileError> {
-    if matches!(formula, Formula::Exists { .. }) {
+    if matches!(
+        formula,
+        Formula::Exists { .. }
+            | Formula::Forall { .. }
+            | Formula::Implies { .. }
+            | Formula::Not(_)
+    ) {
         let body = resolve_define_body(formula, &[], &[], names, senses, ctx)?;
         let text = render_defined_body(&body, &[], false, false)?;
         let grounded = render_defined_body(&body, &[], true, false)?;
@@ -3584,6 +3868,78 @@ A nullary sense reads either as a noun phrase or as a sentence, not both."
 (sense p "{x} holds")
 (sense q "{x} implies")
 (define (q x) (exists [x] (p x)))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(shadowed.message.contains("already bound"), "{shadowed}");
+    }
+
+    #[test]
+    fn forall_implies_and_closed_constraints() {
+        let c = compiled(
+            r#"
+(name A)
+(sense affects "{ca} affects {t}")
+(sense raw_affects "{ca} directly affects {t}")
+(sense yields "{ca} yields {ef}")
+(sense cancels "{ef} cancels {t}")
+(define (affects ca t) (raw_affects ca t))
+(define yields_exchange_from
+  (forall [ca t]
+    (implies (affects ca t)
+      (exists [ef] (and (yields ca ef) (cancels ef t))))))
+(define (forall [x] (implies ("{x} is positive" x) ("{x} is non-negative" x))))
+(certify (affects ca t) (witness "affects.py"))
+(certify yields_exchange_from (witness "exchange.py"))
+(certify (forall [x] (implies ("{x} is positive" x) ("{x} is non-negative" x)))
+  (witness "math.py"))
+(implies ("{x} is positive" A) ("{x} is non-negative" A))
+"#,
+        );
+
+        let Proposition::Cert {
+            label,
+            targets,
+            requires,
+            ..
+        } = &c.claims[1]
+        else {
+            panic!("expected Cert for yields_exchange_from");
+        };
+        assert_eq!(label, "certify yields_exchange_from");
+        assert_eq!(
+            targets.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+            vec![
+                "for all ca and t, if ca affects t, then there exists ef such that (ca yields ef and ef cancels t)."
+            ]
+        );
+        assert_eq!(requires, &vec!["certify:affects".to_string()]);
+
+        assert_eq!(
+            c.claims[2],
+            Proposition::Claim {
+                sentence: "for all x, if x is positive, then x is non-negative".into(),
+                support: Support::Witness {
+                    paths: vec!["math.py".into()],
+                },
+            }
+        );
+
+        assert_eq!(
+            c.claims[3],
+            Proposition::Or(vec![
+                Proposition::Not(Box::new(Proposition::Sentence("A is positive".into()))),
+                Proposition::Sentence("A is non-negative".into()),
+            ])
+        );
+
+        let shadowed = compile(
+            &parse(
+                r#"
+(sense p "{x} holds")
+(define bad (forall [x] (forall [x] (p x))))
 "#,
             )
             .unwrap(),

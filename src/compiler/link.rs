@@ -6,7 +6,7 @@ use crate::syntax::{Program, Proposition, Refer, Sense, Sentence, Support};
 use super::scan::Loaded;
 use super::{
     compile_module, CompileError, Compiled, CompiledModule, ExportedCertify, ExportedGround,
-    Imports, Opened, ResolvedDefine, SenseKey,
+    Imports, Opened, ResolvedConstraint, ResolvedDefine, SenseKey,
 };
 
 pub(crate) struct Item<'a> {
@@ -178,11 +178,23 @@ pub(crate) fn environment(
         .senses()
         .map(|sense| (sense.name.clone(), sense.clone()))
         .collect();
+    let constraints_here: HashSet<String> = program
+        .forms
+        .iter()
+        .filter_map(|form| match form {
+            crate::syntax::Form::Define(crate::syntax::Define::Constraint { name, .. }) => {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect();
 
     let mut imported_names: HashMap<String, String> = HashMap::new();
     let mut imported_senses: HashMap<String, (String, Sense)> = HashMap::new();
     let mut imported_defines: HashMap<SenseKey, (String, ResolvedDefine)> = HashMap::new();
     let mut imported_facts: HashMap<String, (String, Sentence)> = HashMap::new();
+    let mut imported_constraints: HashMap<SenseKey, (String, ResolvedConstraint)> = HashMap::new();
+    let mut imported_constraint_names: HashMap<String, (String, SenseKey)> = HashMap::new();
     let mut imported_certifies: HashMap<SenseKey, (String, ExportedCertify)> = HashMap::new();
     let mut imported_certified_facts: HashMap<String, (String, ExportedCertify)> = HashMap::new();
     let mut imported_grounds: HashMap<SenseKey, (String, ExportedGround)> = HashMap::new();
@@ -215,6 +227,17 @@ pub(crate) fn environment(
                     });
                 }
                 imported_facts.insert(text.clone(), (ns.clone(), sentence.clone()));
+            }
+            for (key, constraint) in &module.constraints {
+                if let Some((prev, _)) = imported_constraints.get(key) {
+                    return Err(CompileError {
+                        message: format!(
+                            "`{}` is defined in both `{prev}` and `{ns}`",
+                            key.display()
+                        ),
+                    });
+                }
+                imported_constraints.insert(key.clone(), (ns.clone(), constraint.clone()));
             }
         }
     }
@@ -253,16 +276,23 @@ pub(crate) fn environment(
             .senses()
             .map(|sense| (sense.name.clone(), sense.clone()))
             .collect();
+        let declared_constraints: HashSet<String> = modules
+            .get(&require.namespace)
+            .map(|m| m.constraints.keys().map(|k| k.name.clone()).collect())
+            .unwrap_or_default();
         let spellings: Vec<String> = match &require.refer {
             Refer::Nothing => Vec::new(),
             Refer::All => {
                 let mut all: Vec<_> = declared_names.iter().cloned().collect();
                 all.extend(declared_senses.keys().cloned());
+                all.extend(declared_constraints.iter().cloned());
                 all
             }
             Refer::Only(list) => {
                 for spelling in list {
-                    if !declared_names.contains(spelling) && !declared_senses.contains_key(spelling)
+                    if !declared_names.contains(spelling)
+                        && !declared_senses.contains_key(spelling)
+                        && !declared_constraints.contains(spelling)
                     {
                         return Err(CompileError {
                             message: format!(
@@ -276,6 +306,58 @@ pub(crate) fn environment(
             }
         };
         for spelling in &spellings {
+            if declared_constraints.contains(spelling) {
+                if names_here.contains(spelling)
+                    || senses_here.contains_key(spelling)
+                    || constraints_here.contains(spelling)
+                {
+                    return Err(CompileError {
+                        message: format!(
+                            "`{spelling}` is declared in `{here}` and `{}`",
+                            require.namespace
+                        ),
+                    });
+                }
+                if let Some(prev) = imported_names
+                    .get(spelling)
+                    .or_else(|| imported_senses.get(spelling).map(|(ns, _)| ns))
+                    .or_else(|| imported_constraint_names.get(spelling).map(|(ns, _)| ns))
+                {
+                    return Err(CompileError {
+                        message: format!(
+                            "`{spelling}` is referred from both `{prev}` and `{}`",
+                            require.namespace
+                        ),
+                    });
+                }
+                imported_constraint_names.insert(
+                    spelling.clone(),
+                    (
+                        require.namespace.clone(),
+                        SenseKey {
+                            owner: require.namespace.clone(),
+                            name: spelling.clone(),
+                        },
+                    ),
+                );
+                continue;
+            }
+            if constraints_here.contains(spelling) {
+                return Err(CompileError {
+                    message: format!(
+                        "`{spelling}` is declared in `{here}` and `{}`",
+                        require.namespace
+                    ),
+                });
+            }
+            if let Some((prev, _)) = imported_constraint_names.get(spelling) {
+                return Err(CompileError {
+                    message: format!(
+                        "`{spelling}` is referred from both `{prev}` and `{}`",
+                        require.namespace
+                    ),
+                });
+            }
             let as_name = declared_names.contains(spelling);
             let as_sense = declared_senses.contains_key(spelling);
             if as_name && as_sense {
@@ -376,6 +458,14 @@ pub(crate) fn environment(
             .map(|(k, (_, v))| (k, v))
             .collect(),
         facts: imported_facts
+            .into_iter()
+            .map(|(k, (_, v))| (k, v))
+            .collect(),
+        constraints: imported_constraints
+            .into_iter()
+            .map(|(k, (_, v))| (k, v))
+            .collect(),
+        constraint_names: imported_constraint_names
             .into_iter()
             .map(|(k, (_, v))| (k, v))
             .collect(),

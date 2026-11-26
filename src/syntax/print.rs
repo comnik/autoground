@@ -89,10 +89,21 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
                 write_formula(sentence, indent, out);
                 out.push(')');
             }
+            super::ast::Define::Constraint { name, body, .. } => {
+                out.push_str("(define ");
+                out.push_str(name);
+                out.push('\n');
+                write_indent(indent + 1, out);
+                write_formula(body, indent + 1, out);
+                out.push(')');
+            }
         },
         Form::Certify(certify) => {
             out.push_str("(certify ");
-            write_formula(&certify.head, indent, out);
+            match &certify.head {
+                super::ast::CertifyHead::Name(ident) => push_ident(ident, out),
+                super::ast::CertifyHead::Formula(formula) => write_formula(formula, indent, out),
+            }
             out.push('\n');
             write_indent(indent + 1, out);
             write_formula(&certify.support, indent + 1, out);
@@ -152,8 +163,25 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
             write_formula(x, indent, out);
             out.push(')');
         }
+        Formula::Implies {
+            antecedent,
+            consequent,
+        } => {
+            out.push_str("(implies ");
+            write_formula(antecedent, indent, out);
+            out.push(' ');
+            write_formula(consequent, indent, out);
+            out.push(')');
+        }
         Formula::Exists { vars, body } => {
             out.push_str("(exists [");
+            out.push_str(&vars.join(" "));
+            out.push_str("] ");
+            write_formula(body, indent, out);
+            out.push(')');
+        }
+        Formula::Forall { vars, body } => {
+            out.push_str("(forall [");
             out.push_str(&vars.join(" "));
             out.push_str("] ");
             write_formula(body, indent, out);
@@ -340,9 +368,17 @@ mod tests {
     (customer c)
     (exists [o] ("{o} belongs to {c}" o c))
     ("{c} has lifetime sales > $25 million" c)))
+(define all_hv_are_customers
+  (forall [c]
+    (implies
+      (high_value_customer c)
+      (customer c))))
+(define (forall [c] (implies (high_value_customer c) (customer c))))
 (certify (is_a Merger CorporateAction)
   (witness "types.rs"))
 (certify (high_value_customer c)
+  (witness "query.sql"))
+(certify all_hv_are_customers
   (witness "query.sql"))
 (ground (high_value_customer c)
   (witness "out.csv")

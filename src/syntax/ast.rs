@@ -99,7 +99,15 @@ pub enum Formula {
     And(Vec<Formula>),
     Or(Vec<Formula>),
     Not(Box<Formula>),
+    Implies {
+        antecedent: Box<Formula>,
+        consequent: Box<Formula>,
+    },
     Exists {
+        vars: Vec<String>,
+        body: Box<Formula>,
+    },
+    Forall {
         vars: Vec<String>,
         body: Box<Formula>,
     },
@@ -207,11 +215,22 @@ pub enum Define {
         sentence: Formula,
         at: At,
     },
+    Constraint {
+        name: String,
+        body: Formula,
+        at: At,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertifyHead {
+    Name(Ident),
+    Formula(Formula),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Certify {
-    pub head: Formula,
+    pub head: CertifyHead,
     pub support: Formula,
     pub at: At,
 }
