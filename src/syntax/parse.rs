@@ -609,17 +609,32 @@ fn lower_sense(xs: &[Sexp]) -> Result<Sense, ParseError> {
 }
 
 fn lower_define(s: &Sexp, xs: &[Sexp]) -> Result<Define, ParseError> {
-    if xs.len() != 3 {
-        return Err(err_at(&xs[0], "`define` takes a sense head and a body"));
+    match xs.len() {
+        2 => {
+            let (sentence, _) = lower_formula(&xs[1])?;
+            if !matches!(sentence, Formula::Apply { .. }) {
+                return Err(err_at(&xs[1], "`define` takes a sentence"));
+            }
+            Ok(Define::Fact {
+                sentence,
+                at: at_of(s),
+            })
+        }
+        3 => {
+            let (sense, params) = lower_sense_head(&xs[1], "`define`")?;
+            let (body, _) = lower_formula(&xs[2])?;
+            Ok(Define::Rule {
+                sense,
+                params,
+                body,
+                at: at_of(s),
+            })
+        }
+        _ => Err(err_at(
+            &xs[0],
+            "`define` takes a sentence, or a sense head and a body",
+        )),
     }
-    let (sense, params) = lower_sense_head(&xs[1], "`define`")?;
-    let (body, _) = lower_formula(&xs[2])?;
-    Ok(Define {
-        sense,
-        params,
-        body,
-        at: at_of(s),
-    })
 }
 
 fn lower_ground(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError> {

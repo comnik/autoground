@@ -193,13 +193,18 @@ pub enum Proposition {
     },
 }
 
-/// A stipulative definition attaching a defining body to a sense.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Define {
-    pub sense: Ident,
-    pub params: Vec<String>,
-    pub body: Formula,
-    pub at: At,
+pub enum Define {
+    Rule {
+        sense: Ident,
+        params: Vec<String>,
+        body: Formula,
+        at: At,
+    },
+    Fact {
+        sentence: Formula,
+        at: At,
+    },
 }
 
 /// A certified generator grounding instances of a defined sense via a witness.

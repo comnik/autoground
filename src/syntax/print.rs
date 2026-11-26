@@ -66,18 +66,30 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
             out.push_str(&quote_const(&sense.template));
             out.push(')');
         }
-        Form::Define(define) => {
-            out.push_str("(define (");
-            push_ident(&define.sense, out);
-            for param in &define.params {
-                out.push(' ');
-                out.push_str(param);
+        Form::Define(define) => match define {
+            super::ast::Define::Rule {
+                sense,
+                params,
+                body,
+                ..
+            } => {
+                out.push_str("(define (");
+                push_ident(sense, out);
+                for param in params {
+                    out.push(' ');
+                    out.push_str(param);
+                }
+                out.push_str(")\n");
+                write_indent(indent + 1, out);
+                write_formula(body, indent + 1, out);
+                out.push(')');
             }
-            out.push_str(")\n");
-            write_indent(indent + 1, out);
-            write_formula(&define.body, indent + 1, out);
-            out.push(')');
-        }
+            super::ast::Define::Fact { sentence, .. } => {
+                out.push_str("(define ");
+                write_formula(sentence, indent, out);
+                out.push(')');
+            }
+        },
         Form::Ground(ground) => {
             out.push_str("(ground (");
             push_ident(&ground.sense, out);
@@ -302,7 +314,11 @@ mod tests {
 
     #[test]
     fn round_trip_keeps_define_and_ground() {
-        let src = r#"(sense customer "{c} is a customer")
+        let src = r#"(name CorporateAction)
+(name Merger)
+(sense is_a "{X} is a sub-type of {Y}")
+(define (is_a Merger CorporateAction))
+(sense customer "{c} is a customer")
 (sense high_value_customer "{c} is a high-value customer")
 (define (high_value_customer c)
   (and

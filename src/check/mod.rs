@@ -2748,4 +2748,34 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn bodyless_define_is_true_without_oracle_calls_and_supports_implications() {
+        let dir = scratch("bodyless-define");
+        let mut oracle = Rec::new(entailed);
+        let report = check(
+            &compiled(
+                r#"
+(name CorporateAction)
+(name Merger)
+(sense is_a "{X} is a sub-type of {Y}")
+(define (is_a Merger CorporateAction))
+(and (is_a Merger CorporateAction))
+(claim "mergers are corporate actions" (is_a Merger CorporateAction))
+"#,
+            ),
+            &dir,
+            DEFAULT_BODY_BYTES,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(report.claims[1].value, Value::True);
+        assert_eq!(oracle.seen.len(), 1);
+        assert_eq!(
+            oracle.seen[0].state["sentences"][0].as_str().unwrap(),
+            "Merger is a sub-type of CorporateAction"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

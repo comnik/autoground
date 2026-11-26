@@ -2,7 +2,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::syntax::template::{apply, holes_word, names_word};
 use crate::syntax::{
-    Arg, At, Form, Formula, Ground, Ident, Program, Proposition, Reading, Sense, Sentence, Support,
+    Arg, At, Define, Form, Formula, Ground, Ident, Program, Proposition, Reading, Sense, Sentence,
+    Support,
 };
 
 mod link;
@@ -73,6 +74,7 @@ pub(crate) struct GroundRule {
 pub(crate) struct CompiledModule {
     pub(crate) compiled: Compiled,
     pub(crate) defines: HashMap<SenseKey, ResolvedDefine>,
+    pub(crate) facts: HashMap<String, Sentence>,
     pub(crate) grounds: HashMap<SenseKey, ExportedGround>,
 }
 
@@ -90,8 +92,10 @@ pub(crate) struct Imports {
     opened: HashMap<String, Opened>,
     /// A referred sense spelling, mapped to the namespace that declares it.
     owners: HashMap<String, String>,
-    /// Definitions exported by required namespaces, keyed by canonical sense.
+    /// Parameterized definitions exported by required namespaces, keyed by canonical sense.
     defines: HashMap<SenseKey, ResolvedDefine>,
+    /// Ground definitions exported by required namespaces, keyed by sentence text.
+    facts: HashMap<String, Sentence>,
     /// Grounding rules exported by required namespaces, keyed by canonical sense.
     grounds: HashMap<SenseKey, ExportedGround>,
 }
@@ -105,9 +109,17 @@ impl Imports {
             opened: HashMap::new(),
             owners: HashMap::new(),
             defines: HashMap::new(),
+            facts: HashMap::new(),
             grounds: HashMap::new(),
         }
     }
+}
+
+#[derive(Clone)]
+struct Defs {
+    rules: HashMap<SenseKey, ResolvedDefine>,
+    facts: HashMap<String, Sentence>,
+    grounds: HashMap<SenseKey, GroundRule>,
 }
 
 /// Where a resolved name was declared.
@@ -363,58 +375,56 @@ pub(crate) fn compile_module(
         scopes: vec![file_scope(&program.forms, imports)],
         terms: BTreeSet::new(),
         assumed: HashSet::new(),
+        claimed: HashSet::new(),
         next_detail_id: 0,
         used_ground_assumptions: Vec::new(),
     };
 
-    let mut defines = imports.defines.clone();
-    let local_defines = collect_defines(
+    let mut defs = Defs {
+        rules: imports.defines.clone(),
+        facts: imports.facts.clone(),
+        grounds: imports
+            .grounds
+            .iter()
+            .map(|(key, exp)| {
+                (
+                    key.clone(),
+                    GroundRule {
+                        cert_id: exp.cert_id.clone(),
+                        witness: exp.witness.clone(),
+                        certificate: exp.certificate.clone(),
+                        assumptions: exp.assumptions.clone(),
+                    },
+                )
+            })
+            .collect(),
+    };
+    let (local_defines, local_facts) = collect_defines(
         &program.forms,
         &declared,
         &sense_by_name,
-        &mut defines,
+        &mut defs,
         &mut ctx,
     )?;
-    check_define_cycles(&defines)?;
+    check_define_cycles(&defs.rules)?;
 
-    let mut grounds: HashMap<SenseKey, GroundRule> = imports
-        .grounds
-        .iter()
-        .map(|(key, exp)| {
-            (
-                key.clone(),
-                GroundRule {
-                    cert_id: exp.cert_id.clone(),
-                    witness: exp.witness.clone(),
-                    certificate: exp.certificate.clone(),
-                    assumptions: exp.assumptions.clone(),
-                },
-            )
-        })
-        .collect();
     let local_grounds = collect_grounds(
         &program.forms,
         &sense_by_name,
-        &defines,
+        &defs.rules,
         &current_ns,
-        &mut grounds,
+        &mut defs.grounds,
         &mut ctx,
     )?;
 
-    collect_assumed(
-        &program.forms,
-        &declared,
-        &sense_by_name,
-        &mut ctx,
-    )?;
+    collect_local_heads(&program.forms, &declared, &sense_by_name, &mut ctx)?;
 
     let mut assumptions = Vec::new();
     let claims = resolve_forms(
         &program.forms,
         &declared,
         &sense_by_name,
-        &defines,
-        &grounds,
+        &defs,
         &current_ns,
         &mut ctx,
         &mut assumptions,
@@ -440,6 +450,7 @@ pub(crate) fn compile_module(
             terms: ctx.terms,
         },
         defines: local_defines,
+        facts: local_facts,
         grounds: exported_grounds,
     })
 }
@@ -675,6 +686,7 @@ struct Ctx<'a> {
     scopes: Vec<HashMap<String, DeclUse>>,
     terms: BTreeSet<(String, String)>,
     assumed: HashSet<String>,
+    claimed: HashSet<String>,
     next_detail_id: usize,
     used_ground_assumptions: Vec<String>,
 }
@@ -820,41 +832,73 @@ fn collect_defines(
     forms: &[Form],
     names: &HashSet<String>,
     senses: &HashMap<String, (SenseKey, Sense)>,
-    defines: &mut HashMap<SenseKey, ResolvedDefine>,
+    defs: &mut Defs,
     ctx: &mut Ctx<'_>,
-) -> Result<HashMap<SenseKey, ResolvedDefine>, CompileError> {
-    let mut local = HashMap::new();
+) -> Result<(HashMap<SenseKey, ResolvedDefine>, HashMap<String, Sentence>), CompileError> {
+    let mut local_rules = HashMap::new();
     for form in forms {
-        let Form::Define(def) = form else {
+        let Form::Define(Define::Rule {
+            sense: sense_ident,
+            params,
+            body,
+            at,
+        }) = form
+        else {
             continue;
         };
-        let (key, sense) = resolve_sense_with_key(&def.sense, senses, ctx.imports)?;
-        if def.params.len() != sense.holes.len() {
+        let (key, sense) = resolve_sense_with_key(sense_ident, senses, ctx.imports)?;
+        if params.len() != sense.holes.len() {
             return Err(arity_error(
-                &format!("`{}`", def.sense.display()),
+                &format!("`{}`", sense_ident.display()),
                 &sense.holes,
-                def.params.len(),
+                params.len(),
             ));
         }
         if sense.holes.is_empty() {
-            note(ctx, &def.sense, Place::Sentence, def.at);
+            note(ctx, sense_ident, Place::Sentence, *at);
         }
-        if local.contains_key(&key) || defines.contains_key(&key) {
+        if local_rules.contains_key(&key) || defs.rules.contains_key(&key) {
             return Err(CompileError {
-                message: format!("duplicate definition of sense `{}`", def.sense.display()),
+                message: format!("duplicate definition of sense `{}`", sense_ident.display()),
             });
         }
-        let body = resolve_define_body(&def.body, &def.params, names, senses, ctx)?;
+        let body = resolve_define_body(body, params, names, senses, ctx)?;
         if matches!(&body, DefinedBody::And(xs) | DefinedBody::Or(xs) if xs.is_empty()) {
             return Err(CompileError {
-                message: format!("`define` body for `{}` cannot be empty", def.sense.display()),
+                message: format!(
+                    "`define` body for `{}` cannot be empty",
+                    sense_ident.display()
+                ),
             });
         }
         let resolved = ResolvedDefine { sense, body };
-        defines.insert(key.clone(), resolved.clone());
-        local.insert(key, resolved);
+        defs.rules.insert(key.clone(), resolved.clone());
+        local_rules.insert(key, resolved);
     }
-    Ok(local)
+
+    let mut local_facts = HashMap::new();
+    for form in forms {
+        let Form::Define(Define::Fact { sentence, .. }) = form else {
+            continue;
+        };
+        let (sentence, head_key) =
+            require_raw_sentence_with_key(sentence, names, senses, ctx, "`define` takes a sentence")?;
+        if let Some((ident_display, key)) = head_key {
+            if defs.rules.contains_key(&key) {
+                return Err(CompileError {
+                    message: format!("`{ident_display}` is already defined by `define`"),
+                });
+            }
+        }
+        if local_facts.contains_key(&sentence.text) || defs.facts.contains_key(&sentence.text) {
+            return Err(CompileError {
+                message: format!("duplicate definition of `{}`", sentence.text),
+            });
+        }
+        defs.facts.insert(sentence.text.clone(), sentence.clone());
+        local_facts.insert(sentence.text.clone(), sentence);
+    }
+    Ok((local_rules, local_facts))
 }
 
 fn resolve_define_body(
@@ -1056,29 +1100,61 @@ fn collect_grounds(
     Ok(local)
 }
 
-fn collect_assumed(
+fn collect_local_heads(
     forms: &[Form],
     names: &HashSet<String>,
     senses: &HashMap<String, (SenseKey, Sense)>,
     ctx: &mut Ctx<'_>,
 ) -> Result<(), CompileError> {
     for form in forms {
-        if let Form::Assume(formula) = form {
-            let sentence =
-                require_raw_sentence(formula, names, senses, ctx, "`assume` takes a sentence")?;
-            ctx.assumed.insert(sentence.text);
+        match form {
+            Form::Assume(formula) => {
+                let sentence = require_raw_sentence(
+                    formula,
+                    names,
+                    senses,
+                    ctx,
+                    "`assume` takes a sentence",
+                )?;
+                ctx.assumed.insert(sentence.text);
+            }
+            Form::Formula(formula) => collect_claimed_heads(formula, names, senses, ctx)?,
+            Form::Ground(ground) => collect_claimed_heads(&ground.support, names, senses, ctx)?,
+            Form::Name(_) | Form::Sense(_) | Form::Define(_) | Form::Detail(_) => {}
         }
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+fn collect_claimed_heads(
+    formula: &Formula,
+    names: &HashSet<String>,
+    senses: &HashMap<String, (SenseKey, Sense)>,
+    ctx: &mut Ctx<'_>,
+) -> Result<(), CompileError> {
+    match formula {
+        Formula::And(xs) | Formula::Or(xs) => {
+            for x in xs {
+                collect_claimed_heads(x, names, senses, ctx)?;
+            }
+        }
+        Formula::Not(inner) => collect_claimed_heads(inner, names, senses, ctx)?,
+        Formula::Claim { sentence, support } => {
+            let head =
+                require_raw_sentence(sentence, names, senses, ctx, "`claim` heads a sentence")?;
+            ctx.claimed.insert(head.text);
+            collect_claimed_heads(support, names, senses, ctx)?;
+        }
+        Formula::Apply { .. } | Formula::Witness { .. } => {}
+    }
+    Ok(())
+}
+
 fn resolve_forms(
     forms: &[Form],
     names: &HashSet<String>,
     senses: &HashMap<String, (SenseKey, Sense)>,
-    defines: &HashMap<SenseKey, ResolvedDefine>,
-    grounds: &HashMap<SenseKey, GroundRule>,
+    defs: &Defs,
     scope_prefix: &str,
     ctx: &mut Ctx<'_>,
     assumptions: &mut Vec<String>,
@@ -1103,8 +1179,7 @@ fn resolve_forms(
                     ground,
                     names,
                     senses,
-                    defines,
-                    grounds,
+                    defs,
                     scope_prefix,
                     ctx,
                 )?);
@@ -1114,33 +1189,30 @@ fn resolve_forms(
                     body,
                     names,
                     senses,
-                    defines,
-                    grounds,
+                    defs,
                     scope_prefix,
                     ctx,
                     assumptions,
                 )?);
             }
             Form::Formula(formula) => {
-                claims.push(resolve(formula, names, senses, defines, grounds, ctx)?);
+                claims.push(resolve(formula, names, senses, defs, ctx)?);
             }
         }
     }
     Ok(claims)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_ground(
     ground: &Ground,
     names: &HashSet<String>,
     senses: &HashMap<String, (SenseKey, Sense)>,
-    defines: &HashMap<SenseKey, ResolvedDefine>,
-    grounds: &HashMap<SenseKey, GroundRule>,
+    defs: &Defs,
     scope_prefix: &str,
     ctx: &mut Ctx<'_>,
 ) -> Result<Proposition, CompileError> {
     let (key, sense) = resolve_sense_with_key(&ground.sense, senses, ctx.imports)?;
-    let def = defines.get(&key).ok_or_else(|| CompileError {
+    let def = defs.rules.get(&key).ok_or_else(|| CompileError {
         message: format!(
             "`{}` cannot be grounded without a `define`",
             ground.sense.display()
@@ -1161,9 +1233,7 @@ fn resolve_ground(
         Formula::Witness { paths } => Support::Witness {
             paths: witness_paths(paths)?,
         },
-        other => Support::Sentence(Box::new(resolve(
-            other, names, senses, defines, grounds, ctx,
-        )?)),
+        other => Support::Sentence(Box::new(resolve(other, names, senses, defs, ctx)?)),
     };
     Ok(Proposition::Cert {
         cert_id,
@@ -1299,13 +1369,11 @@ fn render_defined_body(
 
 /// Names and senses declared in `body` are visible inside the detail and
 /// nowhere else. The scope contributes the sentences it validates.
-#[allow(clippy::too_many_arguments)]
 fn resolve_detail(
     body: &[Form],
     names: &HashSet<String>,
     senses: &HashMap<String, (SenseKey, Sense)>,
-    defines: &HashMap<SenseKey, ResolvedDefine>,
-    grounds: &HashMap<SenseKey, GroundRule>,
+    defs: &Defs,
     scope_prefix: &str,
     ctx: &mut Ctx<'_>,
     assumptions: &mut Vec<String>,
@@ -1324,18 +1392,23 @@ fn resolve_detail(
     };
     let (names, senses) = extend_scope_with_keys(body, names, senses, &detail_owner)?;
     ctx.scopes.push(scope_decls(body));
-    let mut defines = defines.clone();
-    collect_defines(body, &names, &senses, &mut defines, ctx)?;
-    check_define_cycles(&defines)?;
-    let mut grounds = grounds.clone();
-    collect_grounds(body, &senses, &defines, &detail_owner, &mut grounds, ctx)?;
-    collect_assumed(body, &names, &senses, ctx)?;
+    let mut defs = defs.clone();
+    collect_defines(body, &names, &senses, &mut defs, ctx)?;
+    check_define_cycles(&defs.rules)?;
+    collect_grounds(
+        body,
+        &senses,
+        &defs.rules,
+        &detail_owner,
+        &mut defs.grounds,
+        ctx,
+    )?;
+    collect_local_heads(body, &names, &senses, ctx)?;
     let body = resolve_forms(
         body,
         &names,
         &senses,
-        &defines,
-        &grounds,
+        &defs,
         &detail_owner,
         ctx,
         assumptions,
@@ -1349,19 +1422,14 @@ fn resolve(
     formula: &Formula,
     names: &HashSet<String>,
     senses: &HashMap<String, (SenseKey, Sense)>,
-    defines: &HashMap<SenseKey, ResolvedDefine>,
-    grounds: &HashMap<SenseKey, GroundRule>,
+    defs: &Defs,
     ctx: &mut Ctx<'_>,
 ) -> Result<Proposition, CompileError> {
     match formula {
-        Formula::And(xs) => Ok(Proposition::And(resolve_all(
-            xs, names, senses, defines, grounds, ctx,
-        )?)),
-        Formula::Or(xs) => Ok(Proposition::Or(resolve_all(
-            xs, names, senses, defines, grounds, ctx,
-        )?)),
+        Formula::And(xs) => Ok(Proposition::And(resolve_all(xs, names, senses, defs, ctx)?)),
+        Formula::Or(xs) => Ok(Proposition::Or(resolve_all(xs, names, senses, defs, ctx)?)),
         Formula::Not(x) => Ok(Proposition::Not(Box::new(resolve(
-            x, names, senses, defines, grounds, ctx,
+            x, names, senses, defs, ctx,
         )?))),
         Formula::Claim { sentence, support } => {
             let (sentence, head_key) = require_raw_sentence_with_key(
@@ -1372,7 +1440,7 @@ fn resolve(
                 "`claim` heads a sentence",
             )?;
             if let Some((ident_display, key)) = head_key {
-                if defines.contains_key(&key) {
+                if defs.rules.contains_key(&key) {
                     return Err(CompileError {
                         message: format!("`{ident_display}` is already defined by `define`"),
                     });
@@ -1382,9 +1450,7 @@ fn resolve(
                 Formula::Witness { paths } => Support::Witness {
                     paths: witness_paths(paths)?,
                 },
-                other => Support::Sentence(Box::new(resolve(
-                    other, names, senses, defines, grounds, ctx,
-                )?)),
+                other => Support::Sentence(Box::new(resolve(other, names, senses, defs, ctx)?)),
             };
             Ok(Proposition::Claim { sentence, support })
         }
@@ -1423,14 +1489,7 @@ fn resolve(
                     note(ctx, ident, Place::Sentence, *at);
                 }
             }
-            resolve_applied_sentence(
-                sense_key.as_ref(),
-                &template,
-                &arg_spellings,
-                defines,
-                grounds,
-                ctx,
-            )
+            resolve_applied_sentence(sense_key.as_ref(), &template, &arg_spellings, defs, ctx)
         }
     }
 }
@@ -1439,8 +1498,7 @@ fn resolve_applied_sentence(
     sense_key: Option<&SenseKey>,
     template: &str,
     arg_spellings: &[Spelling],
-    defines: &HashMap<SenseKey, ResolvedDefine>,
-    grounds: &HashMap<SenseKey, GroundRule>,
+    defs: &Defs,
     ctx: &mut Ctx<'_>,
 ) -> Result<Proposition, CompileError> {
     let shown_args: Vec<String> = arg_spellings.iter().map(|s| s.shown.clone()).collect();
@@ -1450,11 +1508,11 @@ fn resolve_applied_sentence(
     let sentence = Sentence { text, grounded };
     remember(&mut ctx.expansions, &sentence)?;
 
+    if ctx.assumed.contains(&sentence.text) || ctx.claimed.contains(&sentence.text) {
+        return Ok(Proposition::Sentence(sentence));
+    }
     if let Some(key) = sense_key {
-        if ctx.assumed.contains(&sentence.text) {
-            return Ok(Proposition::Sentence(sentence));
-        }
-        if let Some(ground) = grounds.get(key) {
+        if let Some(ground) = defs.grounds.get(key) {
             for assumption in &ground.assumptions {
                 if !ctx.used_ground_assumptions.contains(assumption) {
                     ctx.used_ground_assumptions.push(assumption.clone());
@@ -1467,13 +1525,19 @@ fn resolve_applied_sentence(
                 witness: ground.witness.clone(),
             });
         }
-        if let Some(def) = defines.get(key) {
-            let body = instantiate_defined_body(&def.body, arg_spellings, defines, grounds, ctx)?;
+        if let Some(def) = defs.rules.get(key) {
+            let body = instantiate_defined_body(&def.body, arg_spellings, defs, ctx)?;
             return Ok(Proposition::Defined {
                 sentence,
                 body: Box::new(body),
             });
         }
+    }
+    if defs.facts.contains_key(&sentence.text) {
+        return Ok(Proposition::Defined {
+            sentence,
+            body: Box::new(Proposition::And(Vec::new())),
+        });
     }
 
     Ok(Proposition::Sentence(sentence))
@@ -1482,27 +1546,26 @@ fn resolve_applied_sentence(
 fn instantiate_defined_body(
     body: &DefinedBody,
     params: &[Spelling],
-    defines: &HashMap<SenseKey, ResolvedDefine>,
-    grounds: &HashMap<SenseKey, GroundRule>,
+    defs: &Defs,
     ctx: &mut Ctx<'_>,
 ) -> Result<Proposition, CompileError> {
     match body {
         DefinedBody::And(xs) => {
             let mut out = Vec::with_capacity(xs.len());
             for x in xs {
-                out.push(instantiate_defined_body(x, params, defines, grounds, ctx)?);
+                out.push(instantiate_defined_body(x, params, defs, ctx)?);
             }
             Ok(Proposition::And(out))
         }
         DefinedBody::Or(xs) => {
             let mut out = Vec::with_capacity(xs.len());
             for x in xs {
-                out.push(instantiate_defined_body(x, params, defines, grounds, ctx)?);
+                out.push(instantiate_defined_body(x, params, defs, ctx)?);
             }
             Ok(Proposition::Or(out))
         }
         DefinedBody::Not(inner) => Ok(Proposition::Not(Box::new(instantiate_defined_body(
-            inner, params, defines, grounds, ctx,
+            inner, params, defs, ctx,
         )?))),
         DefinedBody::Apply {
             sense_key,
@@ -1519,14 +1582,7 @@ fn instantiate_defined_body(
                     }),
                 }
             }
-            resolve_applied_sentence(
-                sense_key.as_ref(),
-                template,
-                &arg_spellings,
-                defines,
-                grounds,
-                ctx,
-            )
+            resolve_applied_sentence(sense_key.as_ref(), template, &arg_spellings, defs, ctx)
         }
     }
 }
@@ -1968,13 +2024,12 @@ fn resolve_all(
     formulas: &[Formula],
     names: &HashSet<String>,
     senses: &HashMap<String, (SenseKey, Sense)>,
-    defines: &HashMap<SenseKey, ResolvedDefine>,
-    grounds: &HashMap<SenseKey, GroundRule>,
+    defs: &Defs,
     ctx: &mut Ctx<'_>,
 ) -> Result<Vec<Proposition>, CompileError> {
     let mut out = Vec::with_capacity(formulas.len());
     for formula in formulas {
-        out.push(resolve(formula, names, senses, defines, grounds, ctx)?);
+        out.push(resolve(formula, names, senses, defs, ctx)?);
     }
     Ok(out)
 }
@@ -2778,5 +2833,49 @@ A nullary sense reads either as a noun phrase or as a sentence, not both."
                 .contains("cannot be grounded without a `define`"),
             "{no_define}"
         );
+    }
+
+    #[test]
+    fn bodyless_define_desugars_to_empty_and_and_allows_multiple_facts_per_sense() {
+        let c = compiled(
+            r#"
+(name CorporateAction)
+(name Merger)
+(name Dividend)
+(sense is_a "{X} is a sub-type of {Y}")
+(define (is_a Merger CorporateAction))
+(define (is_a Dividend CorporateAction))
+(and (is_a Merger CorporateAction) (is_a Dividend CorporateAction))
+"#,
+        );
+        assert!(c.assumptions.is_empty());
+        assert_eq!(
+            c.claims,
+            vec![Proposition::And(vec![
+                Proposition::Defined {
+                    sentence: "Merger is a sub-type of CorporateAction".into(),
+                    body: Box::new(Proposition::And(Vec::new())),
+                },
+                Proposition::Defined {
+                    sentence: "Dividend is a sub-type of CorporateAction".into(),
+                    body: Box::new(Proposition::And(Vec::new())),
+                },
+            ])]
+        );
+
+        let dup = compile(
+            &parse(
+                r#"
+(name CorporateAction)
+(name Merger)
+(sense is_a "{X} is a sub-type of {Y}")
+(define (is_a Merger CorporateAction))
+(define (is_a Merger CorporateAction))
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(dup.message.contains("duplicate definition"), "{dup}");
     }
 }

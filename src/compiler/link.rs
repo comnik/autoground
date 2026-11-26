@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
 
-use crate::syntax::{Program, Proposition, Refer, Sense, Support};
+use crate::syntax::{Program, Proposition, Refer, Sense, Sentence, Support};
 
 use super::scan::Loaded;
 use super::{
@@ -173,6 +173,7 @@ fn environment(
     let mut imported_names: HashMap<String, String> = HashMap::new();
     let mut imported_senses: HashMap<String, (String, Sense)> = HashMap::new();
     let mut imported_defines: HashMap<SenseKey, (String, ResolvedDefine)> = HashMap::new();
+    let mut imported_facts: HashMap<String, (String, Sentence)> = HashMap::new();
     let mut imported_grounds: HashMap<SenseKey, (String, ExportedGround)> = HashMap::new();
     let mut aliases: HashMap<String, String> = HashMap::new();
     let mut opened: HashMap<String, Opened> = HashMap::new();
@@ -195,6 +196,14 @@ fn environment(
                     });
                 }
                 imported_defines.insert(key.clone(), (ns.clone(), def.clone()));
+            }
+            for (text, sentence) in &module.facts {
+                if let Some((prev, _)) = imported_facts.get(text) {
+                    return Err(CompileError {
+                        message: format!("`{text}` is defined in both `{prev}` and `{ns}`"),
+                    });
+                }
+                imported_facts.insert(text.clone(), (ns.clone(), sentence.clone()));
             }
         }
     }
@@ -327,6 +336,10 @@ fn environment(
         opened,
         owners,
         defines: imported_defines
+            .into_iter()
+            .map(|(k, (_, v))| (k, v))
+            .collect(),
+        facts: imported_facts
             .into_iter()
             .map(|(k, (_, v))| (k, v))
             .collect(),
@@ -983,5 +996,51 @@ mod tests {
             panic!("expected lifted query claim");
         };
         assert_eq!(paths, &vec!["../generators/hv/query.sql".to_string()]);
+    }
+
+    #[test]
+    fn bodyless_define_exports_across_namespaces_and_can_be_claimed() {
+        let files = vec![loaded(
+            "ontology.brief",
+            r#"
+(ns acme.ontology)
+(name CorporateAction)
+(name Merger)
+(sense is_a "{X} is a sub-type of {Y}")
+(define (is_a Merger CorporateAction))
+"#,
+        )];
+        let consumer = parse(
+            r#"
+(ns acme.consumer (:require [acme.ontology :refer :all]))
+(and (is_a Merger CorporateAction))
+"#,
+        )
+        .unwrap();
+        let compiled = link(&consumer, None, &files).unwrap();
+        assert!(compiled.assumptions.is_empty());
+        assert_eq!(
+            compiled.claims,
+            vec![Proposition::And(vec![Proposition::Defined {
+                sentence: "Merger is a sub-type of CorporateAction".into(),
+                body: Box::new(Proposition::And(Vec::new())),
+            }])]
+        );
+
+        let verifier = parse(
+            r#"
+(ns acme.verify (:require [acme.ontology :refer :all]))
+(claim (is_a Merger CorporateAction) (witness "types.rs"))
+(and (is_a Merger CorporateAction))
+"#,
+        )
+        .unwrap();
+        let verified = link(&verifier, None, &files).unwrap();
+        assert_eq!(
+            verified.claims[1],
+            Proposition::And(vec![Proposition::Sentence(
+                "Merger is a sub-type of CorporateAction".into()
+            )])
+        );
     }
 }
