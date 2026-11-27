@@ -137,7 +137,7 @@ its own:
 (sense identifies "the code identifies {X}")
 
 (claim (identifies (FrontTarget))
-  (witness ...))
+  (witness "src/frontend/mod.rs"))
 ```
 
 ### Claims and Witnesses

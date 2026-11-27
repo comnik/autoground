@@ -59,6 +59,11 @@ pub fn scan_namespaces(root: &Path) -> Result<Vec<Loaded>, LoadError> {
             continue;
         }
         let path = entry.path();
+        let is_md = has_ext(path, "md");
+        let is_brief = has_ext(path, "brief");
+        if !is_md && !is_brief {
+            continue;
+        }
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(err) => {
@@ -68,7 +73,7 @@ pub fn scan_namespaces(root: &Path) -> Result<Vec<Loaded>, LoadError> {
             }
         };
         let owned;
-        let src = if has_ext(path, "md") {
+        let src = if is_md {
             match brief_source(&text) {
                 Ok(src) => {
                     owned = src;
@@ -76,10 +81,8 @@ pub fn scan_namespaces(root: &Path) -> Result<Vec<Loaded>, LoadError> {
                 }
                 Err(_) => continue,
             }
-        } else if has_ext(path, "brief") {
-            text.as_str()
         } else {
-            continue;
+            text.as_str()
         };
         let display = display_path(&root, path);
         match parse(src) {
@@ -260,6 +263,7 @@ mod tests {
         std::fs::write(root.join("secret/hidden.brief"), "(ns com.acme.hidden)\n").unwrap();
         std::fs::write(root.join("legacy.brief"), "(declare component \"{X}\")\n").unwrap();
         std::fs::write(root.join("plain.md"), "no fences\n").unwrap();
+        std::fs::write(root.join("image.gif"), [0xff_u8, 0xfe, 0x00]).unwrap();
 
         let files = scan_namespaces(&root).unwrap();
         let client = files
