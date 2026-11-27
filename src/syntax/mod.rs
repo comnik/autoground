@@ -9,5 +9,5 @@ pub use ast::{
     Proposition, Reading, Refer, Require, Sense, Sentence, Support,
 };
 pub use markdown::{brief_source, extract_briefs, MarkdownError};
-pub use parse::{mentions_namespace, parse, ParseError};
+pub use parse::{mentions_namespace, parse, parse_dollar_witness, ParseError};
 pub use print::print_program;

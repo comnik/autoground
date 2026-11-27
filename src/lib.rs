@@ -11,8 +11,9 @@ pub mod universe;
 pub mod value;
 
 pub use compiler::{
-    compare_against, compile, display_path, link, scan_briefs, scan_namespaces, AgainstReport,
-    BriefFile, CompileError, Compiled, LoadError, Loaded,
+    compare_against, compare_against_with_bindings, compile, compile_with_bindings, display_path,
+    link, link_with_bindings, scan_briefs, scan_namespaces, AgainstReport, BriefFile, CompileError,
+    Compiled, LoadError, Loaded,
 };
 pub use log::Log;
 pub use syntax::{

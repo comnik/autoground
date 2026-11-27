@@ -534,6 +534,9 @@ fn lower_form(s: &Sexp) -> Result<(Form, Option<ClauseSpan>), ParseError> {
         Some(SexpKind::Symbol(head)) if head == "name" => {
             Ok((Form::Name(lower_name_decl(xs)?), None))
         }
+        Some(SexpKind::Symbol(head)) if head == "param" => {
+            Ok((Form::Param(lower_param_decl(xs)?), None))
+        }
         Some(SexpKind::Symbol(head)) if head == "sense" => {
             Ok((Form::Sense(lower_sense(xs)?), None))
         }
@@ -587,6 +590,13 @@ fn lower_name_decl(xs: &[Sexp]) -> Result<String, ParseError> {
         return Err(err_at(&xs[0], "`name` takes one name"));
     }
     declared_symbol(&xs[1], "name")
+}
+
+fn lower_param_decl(xs: &[Sexp]) -> Result<String, ParseError> {
+    if xs.len() != 2 {
+        return Err(err_at(&xs[0], "`param` takes one name"));
+    }
+    declared_symbol(&xs[1], "parameter")
 }
 
 fn lower_sense(xs: &[Sexp]) -> Result<Sense, ParseError> {
@@ -761,7 +771,7 @@ fn lower_formula(s: &Sexp) -> Result<(Formula, ClauseSpan), ParseError> {
         SexpKind::Symbol(head)
             if matches!(
                 head.as_str(),
-                "name" | "sense" | "define" | "certify" | "ground" | "ns" | "assume"
+                "name" | "param" | "sense" | "define" | "certify" | "ground" | "ns" | "assume"
             ) =>
         {
             Err(err_at(
@@ -977,7 +987,9 @@ fn lower_witness(s: &Sexp, xs: &[Sexp]) -> Result<(Formula, ClauseSpan), ParseEr
         match &item.kind {
             SexpKind::String(text) if !text.is_empty() => paths.push(text.clone()),
             SexpKind::String(_) => return Err(err_at(item, "a witness path is not empty")),
-            SexpKind::Symbol(text) if text == "$" => paths.push("$".to_string()),
+            SexpKind::Symbol(text) if parse_dollar_witness(text).is_some() => {
+                paths.push(text.clone())
+            }
             _ => return Err(err_at(item, "a witness path is a string")),
         }
     }
@@ -1237,10 +1249,44 @@ pub(crate) fn is_declared_name(spelling: &str) -> bool {
     is_clojure_identifier(spelling) && !is_reserved_word(spelling)
 }
 
+/// Parse a `$` witness reference:
+/// - `"$"` → `Some(("", None))` (unnamed default file)
+/// - `"$diff"` → `Some(("diff", None))` (named file binding)
+/// - `"$run/out.csv"` → `Some(("run", Some("out.csv")))` (named directory binding + relative path)
+pub fn parse_dollar_witness(text: &str) -> Option<(&str, Option<&str>)> {
+    if text == "$" {
+        return Some(("", None));
+    }
+    let rest = text.strip_prefix('$')?;
+    if rest.is_empty() || rest.starts_with('$') {
+        return None;
+    }
+    match rest.split_once('/') {
+        None => is_clojure_identifier(rest).then_some((rest, None)),
+        Some((head, tail)) => {
+            if !is_clojure_identifier(head) || tail.is_empty() || tail.contains('\\') {
+                return None;
+            }
+            let rel = std::path::Path::new(tail);
+            if rel.is_absolute() {
+                return None;
+            }
+            let valid = rel.components().all(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            });
+            valid.then_some((head, Some(tail)))
+        }
+    }
+}
+
 fn is_reserved_word(spelling: &str) -> bool {
     matches!(
         spelling,
         "name"
+            | "param"
             | "sense"
             | "define"
             | "certify"

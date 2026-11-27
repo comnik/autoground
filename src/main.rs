@@ -1,11 +1,12 @@
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use autoground::align::{lower_mermaid, mismatch, model_of};
-use autoground::check::{self, write_report, DEFAULT_BODY_BYTES};
-use autoground::compiler::{link_parts, Vocabulary};
+use autoground::check::{self, write_report, BoundWitnesses, DEFAULT_BODY_BYTES};
+use autoground::compiler::{link_parts, link_parts_with_bindings, Vocabulary};
 use autoground::log::{Log, DEFAULT_TRACE_DIR};
 use autoground::oracle::jev::DEFAULT_RUN_COST_CENTS;
 use autoground::oracle::{JevOracle, Oracle, Usage, UsageRecord};
@@ -13,8 +14,8 @@ use autoground::prepare;
 use autoground::report::json as report_json;
 use autoground::report::summary::{print_assumptions, print_file_line, print_run_summary};
 use autoground::{
-    brief_source, compare_against, compile, display_path, parse, scan_briefs, scan_namespaces,
-    Proposition,
+    brief_source, compare_against_with_bindings, compile, compile_with_bindings, display_path,
+    parse, scan_briefs, scan_namespaces, Proposition,
 };
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -77,6 +78,12 @@ enum Commands {
         /// Emit a JSON report to stdout.
         #[arg(long)]
         json: bool,
+        /// Bind a parameter or named `$` witness (`KEY=VALUE`).
+        #[arg(long = "bind", value_name = "KEY=VALUE")]
+        bind: Vec<String>,
+        /// JSON object file of parameter and witness bindings.
+        #[arg(long, value_name = "FILE")]
+        params: Option<PathBuf>,
     },
     /// Compare the names, senses, and statements of two briefs for consistency.
     ///
@@ -141,6 +148,8 @@ fn main() -> ExitCode {
             against,
             assumptions,
             json,
+            bind,
+            params,
         } => match check_cmd(
             &input,
             file.as_deref(),
@@ -149,6 +158,8 @@ fn main() -> ExitCode {
             against.as_deref(),
             assumptions.as_deref(),
             json,
+            &bind,
+            params.as_deref(),
         ) {
             Ok(code) => ExitCode::from(code),
             Err(err) => fail(err),
@@ -189,6 +200,8 @@ fn check_cmd(
     against: Option<&Path>,
     assumptions_path: Option<&Path>,
     json_out: bool,
+    bind_args: &[String],
+    params_path: Option<&Path>,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     if assumptions_path.is_some() && against.is_none() {
         return Err("`--assumptions` requires `--against`".into());
@@ -200,8 +213,12 @@ fn check_cmd(
         if against.is_some() {
             return Err("a directory check takes no `--against`".into());
         }
+        if !bind_args.is_empty() || params_path.is_some() {
+            return Err("a directory check takes no `--bind` or `--params`".into());
+        }
         return check_dir(input, budget_cents, out, json_out);
     }
+    let (bindings, explicit_keys) = parse_bindings(params_path, bind_args)?;
     let started = std::time::Instant::now();
     let base = brief_dir(input);
     let scan_root = namespace_root(&base);
@@ -234,7 +251,7 @@ fn check_cmd(
             })
             .collect();
         if onto_root != scan_root {
-            let mut seen: std::collections::HashSet<String> = files
+            let mut seen: HashSet<String> = files
                 .iter()
                 .filter_map(|f| f.program.namespace.as_ref().map(|ns| ns.name.clone()))
                 .collect();
@@ -255,13 +272,14 @@ fn check_cmd(
         let accepted_ref = accepted
             .as_ref()
             .map(|(prog, path)| (prog, path.as_deref()));
-        let compared = compare_against(
+        let compared = compare_against_with_bindings(
             &cert_program,
             cert_path.as_deref(),
             &onto_program,
             &onto_display,
             accepted_ref,
             &files,
+            Some(&bindings),
         )?;
         if compared.has_failures() {
             if json_out {
@@ -286,10 +304,25 @@ fn check_cmd(
             local_count,
         )
     } else {
-        let (src, program, compiled) = load_compiled(input, &scan_root)?;
+        let (src, program, compiled) = load_compiled_with_bindings(input, &scan_root, &bindings)?;
         let local_count = compiled.claims.len();
         (src, program, compiled.claims, compiled.assumptions, local_count)
     };
+    let named_dollars = check::cited_named_dollars(&claims);
+    let mut used_keys: HashSet<String> = program.params().map(str::to_string).collect();
+    used_keys.extend(named_dollars.iter().cloned());
+    for key in &explicit_keys {
+        if !used_keys.contains(key) {
+            return Err(format!("unused binding `{key}`").into());
+        }
+    }
+    let mut named_witnesses = HashMap::new();
+    for name in &named_dollars {
+        let Some(value) = bindings.get(name) else {
+            return Err(format!("`${name}` needs a binding").into());
+        };
+        named_witnesses.insert(name.clone(), PathBuf::from(value));
+    }
     let (bound, stdin_tmp) = match file {
         Some(path) if path == Path::new("-") => {
             if !check::cites_dollar(&claims) {
@@ -313,8 +346,12 @@ fn check_cmd(
         ),
         None => (None, None),
     };
+    let bound_witnesses = BoundWitnesses {
+        default: bound,
+        named: named_witnesses,
+    };
     let result = (|| -> Result<u8, Box<dyn std::error::Error>> {
-        match (check::cites_dollar(&claims), bound.is_some()) {
+        match (check::cites_dollar(&claims), bound_witnesses.default.is_some()) {
             (true, false) => return Err("`$` needs a file".into()),
             (false, true) => return Err("a file needs `(witness $)`".into()),
             _ => {}
@@ -329,7 +366,7 @@ fn check_cmd(
             local_claim_count,
             &assumptions,
             &base,
-            bound.as_ref(),
+            &bound_witnesses,
             &mut oracle,
             &log,
             started,
@@ -340,6 +377,42 @@ fn check_cmd(
         let _ = std::fs::remove_file(path);
     }
     result
+}
+
+fn parse_bindings(
+    params_path: Option<&Path>,
+    bind_args: &[String],
+) -> Result<(HashMap<String, String>, BTreeSet<String>), Box<dyn std::error::Error>> {
+    let mut bindings = HashMap::new();
+    if let Some(path) = params_path {
+        let text = std::fs::read_to_string(path)?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|err| format!("{}: {err}", path.display()))?;
+        let Some(map) = value.as_object() else {
+            return Err(format!("{}: expected a JSON object", path.display()).into());
+        };
+        for (key, val) in map {
+            let rendered = match val {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => continue,
+            };
+            bindings.insert(key.clone(), rendered);
+        }
+    }
+    let mut explicit = BTreeSet::new();
+    for raw in bind_args {
+        let Some((key, value)) = raw.split_once('=') else {
+            return Err(format!("invalid `--bind` `{raw}`: expected KEY=VALUE").into());
+        };
+        if key.is_empty() {
+            return Err("invalid `--bind`: key cannot be empty".into());
+        }
+        bindings.insert(key.to_string(), value.to_string());
+        explicit.insert(key.to_string());
+    }
+    Ok((bindings, explicit))
 }
 
 fn read_stdin_file() -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -394,13 +467,13 @@ fn finish_check<O: Oracle>(
     local_claim_count: usize,
     assumptions: &[String],
     base: &Path,
-    bound: Option<&check::BoundFile>,
+    bound: &BoundWitnesses,
     oracle: &mut O,
     log: &Log,
     started: std::time::Instant,
     json_out: bool,
 ) -> Result<u8, Box<dyn std::error::Error>> {
-    let report = check::check_bound(claims, base, DEFAULT_BODY_BYTES, bound, oracle)?;
+    let report = check::check_bound_with(claims, base, DEFAULT_BODY_BYTES, bound, oracle)?;
     let usage = oracle.usage();
     let flights = oracle.flights().to_vec();
     let flight_limit = oracle.flight_limit();
@@ -635,10 +708,13 @@ fn check_dir(
 fn prepare_brief(file: &autoground::BriefFile, scan_root: &Path) -> Result<ReadyBrief, String> {
     let input = file.absolute.to_string_lossy().into_owned();
     let base = brief_dir(&input);
-    match load_compiled(&input, scan_root) {
+    let empty = HashMap::new();
+    match load_compiled_with_bindings(&input, scan_root, &empty) {
         Ok((src, program, compiled)) => {
             if check::cites_dollar(&compiled.claims) {
                 Err("`$` needs a file".to_string())
+            } else if let Some(name) = check::cited_named_dollars(&compiled.claims).into_iter().next() {
+                Err(format!("`${name}` needs a binding"))
             } else {
                 Ok(ReadyBrief {
                     path: file.path.clone(),
@@ -787,13 +863,14 @@ fn align_source(input: &str) -> Result<String, Box<dyn std::error::Error>> {
     model_source(input)
 }
 
-fn load_compiled(
+fn load_compiled_with_bindings(
     input: &str,
     base: &Path,
+    bindings: &HashMap<String, String>,
 ) -> Result<(String, autoground::Program, autoground::Compiled), Box<dyn std::error::Error>> {
     let src = model_source(input)?;
     let program = parse(&src)?;
-    let (compiled, _) = compile_linked(&program, input, base)?;
+    let (compiled, _) = compile_linked_with_bindings(&program, input, base, Some(bindings))?;
     Ok((src, program, compiled))
 }
 
@@ -801,6 +878,15 @@ fn compile_linked(
     program: &autoground::Program,
     input: &str,
     base: &Path,
+) -> Result<(autoground::Compiled, Vocabulary), Box<dyn std::error::Error>> {
+    compile_linked_with_bindings(program, input, base, None)
+}
+
+fn compile_linked_with_bindings(
+    program: &autoground::Program,
+    input: &str,
+    base: &Path,
+    bindings: Option<&HashMap<String, String>>,
 ) -> Result<(autoground::Compiled, Vocabulary), Box<dyn std::error::Error>> {
     if program
         .namespace
@@ -810,9 +896,20 @@ fn compile_linked(
         let files = scan_namespaces(base)?;
         let entry = Path::new(input);
         let entry_path = entry.is_file().then(|| display_path(base, entry));
-        Ok(link_parts(program, entry_path.as_deref(), &files)?)
+        match bindings {
+            Some(map) => Ok(link_parts_with_bindings(
+                program,
+                entry_path.as_deref(),
+                &files,
+                map,
+            )?),
+            None => Ok(link_parts(program, entry_path.as_deref(), &files)?),
+        }
     } else {
-        Ok((compile(program)?, Vocabulary::none()))
+        match bindings {
+            Some(map) => Ok((compile_with_bindings(program, map)?, Vocabulary::none())),
+            None => Ok((compile(program)?, Vocabulary::none())),
+        }
     }
 }
 
@@ -915,6 +1012,35 @@ mod tests {
                 assert_eq!(against, Some(PathBuf::from("ontology.brief")));
                 assert_eq!(assumptions, Some(PathBuf::from("impl/assumptions.brief")));
                 assert!(json);
+            }
+            _ => panic!("check"),
+        }
+    }
+
+    #[test]
+    fn check_accepts_bind_and_params_flags() {
+        let cli = Cli::try_parse_from([
+            "autoground",
+            "check",
+            "decision.brief",
+            "--params",
+            "runs/2026-11-26/params.json",
+            "--bind",
+            "run=runs/2026-11-26",
+            "--bind",
+            "customer=Acme",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Check {
+                input,
+                params,
+                bind,
+                ..
+            } => {
+                assert_eq!(input, "decision.brief");
+                assert_eq!(params, Some(PathBuf::from("runs/2026-11-26/params.json")));
+                assert_eq!(bind, vec!["run=runs/2026-11-26", "customer=Acme"]);
             }
             _ => panic!("check"),
         }

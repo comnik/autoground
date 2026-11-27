@@ -2,16 +2,16 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::syntax::template::{apply, holes_word, names_word};
 use crate::syntax::{
-    Arg, At, Certify, CertifyHead, Define, Form, Formula, Ground, Ident, Program, Proposition,
-    Reading, Sense, Sentence, Support,
+    parse_dollar_witness, Arg, At, Certify, CertifyHead, Define, Form, Formula, Ground, Ident,
+    Program, Proposition, Reading, Sense, Sentence, Support,
 };
 
 mod compare;
 mod link;
 mod scan;
 
-pub use compare::{compare_against, AgainstReport};
-pub use link::{link, link_parts};
+pub use compare::{compare_against, compare_against_with_bindings, AgainstReport};
+pub use link::{link, link_parts, link_parts_with_bindings, link_with_bindings};
 pub use scan::{display_path, scan_briefs, scan_namespaces, BriefFile, LoadError, Loaded};
 
 /// Canonical identity of a sense across namespaces.
@@ -352,6 +352,21 @@ pub fn compile(program: &Program) -> Result<Compiled, CompileError> {
     compile_with(program, &Imports::none())
 }
 
+/// [`compile`], resolving every `(param ...)` declaration from `bindings`.
+pub fn compile_with_bindings(
+    program: &Program,
+    bindings: &HashMap<String, String>,
+) -> Result<Compiled, CompileError> {
+    if let Some(ns) = &program.namespace {
+        if let Some(require) = ns.requires.first() {
+            return Err(CompileError {
+                message: format!("namespace `{}` is not declared", require.namespace),
+            });
+        }
+    }
+    Ok(compile_module_with_bindings(program, &Imports::none(), Some(bindings))?.compiled)
+}
+
 pub(crate) fn compile_with(program: &Program, imports: &Imports) -> Result<Compiled, CompileError> {
     Ok(compile_module(program, imports)?.compiled)
 }
@@ -360,8 +375,17 @@ pub(crate) fn compile_module(
     program: &Program,
     imports: &Imports,
 ) -> Result<CompiledModule, CompileError> {
+    compile_module_with_bindings(program, imports, None)
+}
+
+pub(crate) fn compile_module_with_bindings(
+    program: &Program,
+    imports: &Imports,
+    bindings: Option<&HashMap<String, String>>,
+) -> Result<CompiledModule, CompileError> {
     let mut names = Vec::new();
     let mut name_seen = HashSet::new();
+    let mut param_values = HashMap::new();
     let mut senses = Vec::new();
     let mut sense_seen = HashSet::new();
 
@@ -374,6 +398,22 @@ pub(crate) fn compile_module(
                     });
                 }
                 names.push(name.clone());
+            }
+            Form::Param(param) => {
+                if !name_seen.insert(param.clone()) {
+                    return Err(CompileError {
+                        message: format!("duplicate name `{param}`"),
+                    });
+                }
+                if let Some(map) = bindings {
+                    let Some(value) = map.get(param) else {
+                        return Err(CompileError {
+                            message: format!("missing binding for parameter `{param}`"),
+                        });
+                    };
+                    param_values.insert(param.clone(), value.clone());
+                }
+                names.push(param.clone());
             }
             Form::Sense(sense) => {
                 if !sense_seen.insert(sense.name.clone()) {
@@ -433,6 +473,7 @@ pub(crate) fn compile_module(
 
     let mut ctx = Ctx {
         imports,
+        param_values,
         expansions: HashMap::new(),
         scopes: vec![file_scope(&program.forms, imports)],
         terms: BTreeSet::new(),
@@ -745,7 +786,7 @@ fn form_has_claim_or_assume(form: &Form) -> bool {
         Form::Assume(_) | Form::Certify(_) | Form::Ground(_) => true,
         Form::Detail(body) => contains_claim_or_assume(body),
         Form::Formula(formula) => formula_has_claim(formula),
-        Form::Name(_) | Form::Sense(_) | Form::Define(_) => false,
+        Form::Name(_) | Form::Param(_) | Form::Sense(_) | Form::Define(_) => false,
     }
 }
 
@@ -788,6 +829,7 @@ struct Spelling {
 
 struct Ctx<'a> {
     imports: &'a Imports,
+    param_values: HashMap<String, String>,
     /// Shown sentence, then the sentence the judge would be asked.
     expansions: HashMap<String, String>,
     /// Scopes from the outside in. The file is index 0.
@@ -1559,7 +1601,8 @@ fn collect_local_heads(
                 collect_claimed_heads(&certify.support, names, senses, ctx)?;
             }
             Form::Ground(ground) => collect_claimed_heads(&ground.support, names, senses, ctx)?,
-            Form::Name(_) | Form::Sense(_) | Form::Define(_) | Form::Detail(_) => {}
+            Form::Name(_) | Form::Param(_) | Form::Sense(_) | Form::Define(_) | Form::Detail(_) => {
+            }
         }
     }
     Ok(())
@@ -1612,7 +1655,7 @@ fn resolve_forms(
     let mut claims = Vec::new();
     for form in forms {
         match form {
-            Form::Name(_) | Form::Sense(_) | Form::Define(_) => {}
+            Form::Name(_) | Form::Param(_) | Form::Sense(_) | Form::Define(_) => {}
             Form::Assume(sentence) => {
                 let text = require_raw_sentence(
                     sentence,
@@ -1965,14 +2008,22 @@ fn format_ground_head(sense: &Ident, params: &[String]) -> String {
     }
 }
 
+fn display_witness_path(path: &str) -> &str {
+    match parse_dollar_witness(path) {
+        Some((_, Some(rel))) => rel,
+        _ => path,
+    }
+}
+
 fn format_witness_list(paths: &[String]) -> String {
     match paths {
         [] => String::new(),
-        [only] => only.clone(),
-        [a, b] => format!("{a} and {b}"),
+        [only] => display_witness_path(only).to_string(),
+        [a, b] => format!("{} and {}", display_witness_path(a), display_witness_path(b)),
         many => {
             let (last, init) = many.split_last().expect("non-empty");
-            format!("{}, and {last}", init.join(", "))
+            let head: Vec<&str> = init.iter().map(|p| display_witness_path(p)).collect();
+            format!("{}, and {}", head.join(", "), display_witness_path(last))
         }
     }
 }
@@ -2885,7 +2936,7 @@ fn witness_paths(paths: &[String]) -> Result<Vec<String>, CompileError> {
 fn spec_paths(paths: &[String]) -> Result<Vec<String>, CompileError> {
     let mut seen = HashSet::new();
     for path in paths {
-        if path == "$" || !is_brief_path(path) {
+        if path.starts_with('$') || !is_brief_path(path) {
             return Err(CompileError {
                 message: format!("`{path}` is not a path relative to the brief"),
             });
@@ -2911,6 +2962,9 @@ fn merge_witness_paths(spec: &[String], support: &[String]) -> Vec<String> {
 
 /// A witness path is relative to the brief file. `..` is a parent of that file.
 fn is_brief_path(path: &str) -> bool {
+    if parse_dollar_witness(path).is_some() {
+        return true;
+    }
     if path.is_empty() || path.starts_with('/') || path.contains('\\') {
         return false;
     }
@@ -2947,6 +3001,11 @@ pub fn extend_scope(
                         message: format!("`{name}` is declared as both a name and a sense"),
                     });
                 }
+            }
+            Form::Param(_) => {
+                return Err(CompileError {
+                    message: "`param` cannot appear inside a `detail`".into(),
+                });
             }
             Form::Sense(sense) => {
                 if senses.contains_key(&sense.name) {
@@ -2993,6 +3052,11 @@ fn extend_scope_with_keys(
                         message: format!("`{name}` is declared as both a name and a sense"),
                     });
                 }
+            }
+            Form::Param(_) => {
+                return Err(CompileError {
+                    message: "`param` cannot appear inside a `detail`".into(),
+                });
             }
             Form::Sense(sense) => {
                 if senses.contains_key(&sense.name) {
@@ -3054,6 +3118,14 @@ fn resolve_arg(
         }),
         Arg::Name(ident) => {
             let name = resolve_name(ident, names, ctx.imports)?;
+            if ident.qualifier.is_none() {
+                if let Some(value) = ctx.param_values.get(&name) {
+                    return Ok(Spelling {
+                        shown: value.clone(),
+                        grounded: value.clone(),
+                    });
+                }
+            }
             Ok(Spelling {
                 shown: name.clone(),
                 grounded: name,
@@ -4138,6 +4210,69 @@ A nullary sense reads either as a noun phrase or as a sentence, not both."
                 .message
                 .contains("must be certified or grounded"),
             "{ungrounded}"
+        );
+    }
+
+    #[test]
+    fn param_substitution_and_named_dollar_witnesses() {
+        let program = parse(
+            r#"
+(param customer)
+(param run_date)
+(sense active "{c} is active")
+(define (active c) ("{c} has an order" c))
+(assume ("snapshot taken on {d}" run_date))
+(ground (active c)
+  (witness $run/out.csv)
+  (and
+    ("snapshot taken on {d}" run_date)
+    (claim "query writes out.csv" (witness "query.sql"))))
+(claim ("{c} qualifies on {d}" customer run_date)
+  (and (active customer) ("snapshot taken on {d}" run_date)))
+"#,
+        )
+        .unwrap();
+
+        // Bare compile leaves params symbolic (for align / static inspection).
+        let symbolic = compile(&program).unwrap();
+        assert_eq!(symbolic.assumptions, vec!["snapshot taken on run_date"]);
+
+        // compile_with_bindings errors on missing params and substitutes when bound.
+        let missing = compile_with_bindings(
+            &program,
+            &HashMap::from([("customer".into(), "Acme".into())]),
+        )
+        .unwrap_err();
+        assert!(
+            missing.message.contains("missing binding for parameter `run_date`"),
+            "{missing}"
+        );
+
+        let bound = compile_with_bindings(
+            &program,
+            &HashMap::from([
+                ("customer".into(), "Acme".into()),
+                ("run_date".into(), "2026-11-26".into()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(bound.assumptions, vec!["snapshot taken on 2026-11-26"]);
+        let Proposition::Cert { label, targets, .. } = &bound.claims[1] else {
+            panic!("expected ground Cert");
+        };
+        assert_eq!(label, "ground (active c) via out.csv");
+        assert!(targets[0].text.contains("if out.csv supports"), "{targets:?}");
+        let Proposition::Claim { sentence, .. } = &bound.claims[2] else {
+            panic!("expected Claim");
+        };
+        assert_eq!(sentence.text, "Acme qualifies on 2026-11-26");
+
+        // `param` inside a `detail` is rejected.
+        let in_detail = compile(&parse("(detail (param x) (assume \"x\"))\n").unwrap())
+            .unwrap_err();
+        assert!(
+            in_detail.message.contains("`param` cannot appear inside a `detail`"),
+            "{in_detail}"
         );
     }
 }

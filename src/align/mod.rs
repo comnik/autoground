@@ -75,7 +75,7 @@ fn declarations(
 ) {
     for form in forms {
         match form {
-            Form::Name(name) => {
+            Form::Name(name) | Form::Param(name) => {
                 names.insert(name.clone());
             }
             Form::Sense(sense) => {

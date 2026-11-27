@@ -18,14 +18,14 @@
 
 pub mod strategy;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value as Json};
 
 use crate::oracle::image::{image_asset, image_extension, Asset, ImageError, MAX_IMAGE_BYTES};
 use crate::oracle::{Answer, Classification, Oracle, OracleError, Ticket};
-use crate::syntax::{Proposition, Sentence, Support};
+use crate::syntax::{parse_dollar_witness, Proposition, Sentence, Support};
 use crate::universe::{Filesystem, GivenFile, Universe, UniverseError};
 use crate::value::Value;
 
@@ -130,10 +130,11 @@ impl From<OracleError> for CheckError {
     }
 }
 
-/// Files check opens. `tree` is the brief's directory. `given` is `$`.
+/// Files check opens. `tree` is the brief's directory. `given` is `$`. `named` maps `$name`.
 struct Sources<'a> {
     tree: &'a Filesystem,
     given: Option<&'a GivenFile>,
+    named: &'a HashMap<String, PathBuf>,
 }
 
 /// The file every `(witness $)` reads.
@@ -143,6 +144,13 @@ pub struct BoundFile {
     pub cite: String,
     /// Opened as given. An absolute path is this file, not a missing witness.
     pub path: PathBuf,
+}
+
+/// Runtime witness bindings for `$`, `$name`, and `$name/rel` paths.
+#[derive(Debug, Clone, Default)]
+pub struct BoundWitnesses {
+    pub default: Option<BoundFile>,
+    pub named: HashMap<String, PathBuf>,
 }
 
 struct PreparedCert {
@@ -234,6 +242,63 @@ fn proposition_cites_dollar(proposition: &Proposition) -> bool {
     }
 }
 
+/// Named `$name` witness identifiers cited anywhere in `claims` (excluding bare `$`).
+pub fn cited_named_dollars(claims: &[Proposition]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for claim in claims {
+        collect_named_dollars(claim, &mut out);
+    }
+    out
+}
+
+fn collect_named_dollars(proposition: &Proposition, out: &mut BTreeSet<String>) {
+    let record = |paths: &[String], out: &mut BTreeSet<String>| {
+        for path in paths {
+            if let Some((name, _)) = parse_dollar_witness(path) {
+                if !name.is_empty() {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+    };
+    match proposition {
+        Proposition::And(xs) | Proposition::Or(xs) | Proposition::Scope { body: xs } => {
+            for x in xs {
+                collect_named_dollars(x, out);
+            }
+        }
+        Proposition::Not(inner) | Proposition::Defined { body: inner, .. } => {
+            collect_named_dollars(inner, out);
+        }
+        Proposition::Claim { support, .. } => match support {
+            Support::Witness { paths } => record(paths, out),
+            Support::Sentence(inner) => collect_named_dollars(inner, out),
+        },
+        Proposition::Cert {
+            support, imported, ..
+        } => {
+            for item in imported {
+                collect_named_dollars(item, out);
+            }
+            match support {
+                Support::Witness { paths } => record(paths, out),
+                Support::Sentence(inner) => collect_named_dollars(inner, out),
+            }
+        }
+        Proposition::Grounded {
+            witness,
+            certificate,
+            ..
+        } => {
+            record(witness, out);
+            for item in certificate {
+                collect_named_dollars(item, out);
+            }
+        }
+        Proposition::Sentence(_) | Proposition::Assume(_) => {}
+    }
+}
+
 /// Enqueue every ticket for `claims`. Does not wait.
 ///
 /// A brief that cites `$` needs `bound`. A `bound` file needs a brief that cites `$`.
@@ -245,19 +310,43 @@ pub fn submit<O: Oracle>(
     bound: Option<&BoundFile>,
     oracle: &mut O,
 ) -> Result<Prepared, CheckError> {
-    match (cites_dollar(claims), bound) {
+    let bound = BoundWitnesses {
+        default: bound.cloned(),
+        named: HashMap::new(),
+    };
+    submit_with(claims, base, budget, &bound, oracle)
+}
+
+/// [`submit`], with bindings for `$`, `$name`, and `$name/rel` witnesses.
+pub fn submit_with<O: Oracle>(
+    claims: &[Proposition],
+    base: &Path,
+    budget: usize,
+    bound: &BoundWitnesses,
+    oracle: &mut O,
+) -> Result<Prepared, CheckError> {
+    match (cites_dollar(claims), &bound.default) {
         (true, None) => return Err(CheckError::Bind("`$` needs a file".into())),
         (false, Some(_)) => {
             return Err(CheckError::Bind("a file needs `(witness $)`".into()));
         }
         _ => {}
     }
+    for name in cited_named_dollars(claims) {
+        if !bound.named.contains_key(&name) {
+            return Err(CheckError::Bind(format!("`${name}` needs a binding")));
+        }
+    }
     let defs = defined_heads(claims);
     let tree = Filesystem::at(base);
-    let given = bound.map(|file| GivenFile::new(file.path.clone()));
+    let given = bound
+        .default
+        .as_ref()
+        .map(|file| GivenFile::new(file.path.clone()));
     let sources = Sources {
         tree: &tree,
         given: given.as_ref(),
+        named: &bound.named,
     };
     let mut imported_certs = Vec::new();
     let mut seen_certs = HashSet::new();
@@ -313,7 +402,22 @@ pub fn check_bound<O: Oracle>(
     bound: Option<&BoundFile>,
     oracle: &mut O,
 ) -> Result<Report, CheckError> {
-    let prepared = submit(claims, base, budget, bound, oracle)?;
+    let bound = BoundWitnesses {
+        default: bound.cloned(),
+        named: HashMap::new(),
+    };
+    check_bound_with(claims, base, budget, &bound, oracle)
+}
+
+/// [`check`], with bindings for `$`, `$name`, and `$name/rel` witnesses.
+pub fn check_bound_with<O: Oracle>(
+    claims: &[Proposition],
+    base: &Path,
+    budget: usize,
+    bound: &BoundWitnesses,
+    oracle: &mut O,
+) -> Result<Report, CheckError> {
+    let prepared = submit_with(claims, base, budget, bound, oracle)?;
     let answers = oracle.wait_many(prepared.tickets());
     prepared.settle(&answers)
 }
@@ -475,7 +579,7 @@ fn prepare<O: Oracle>(
     proposition: &Proposition,
     defs: &HashSet<String>,
     sources: &Sources<'_>,
-    bound: Option<&BoundFile>,
+    bound: &BoundWitnesses,
     budget: usize,
     oracle: &mut O,
     imported_certs: &mut Vec<PreparedCert>,
@@ -807,7 +911,7 @@ fn prepare_bool<O: Oracle>(
     xs: &[Proposition],
     defs: &HashSet<String>,
     sources: &Sources<'_>,
-    bound: Option<&BoundFile>,
+    bound: &BoundWitnesses,
     budget: usize,
     oracle: &mut O,
     imported_certs: &mut Vec<PreparedCert>,
@@ -843,7 +947,7 @@ fn prepare_witness<O: Oracle>(
     sentence: &Sentence,
     paths: &[String],
     sources: &Sources<'_>,
-    bound: Option<&BoundFile>,
+    bound: &BoundWitnesses,
     budget: usize,
     oracle: &mut O,
 ) -> Result<Work, CheckError> {
@@ -859,7 +963,11 @@ fn prepare_witness<O: Oracle>(
         asked: Vec::new(),
         kind: Kind::Leaf,
     };
-    if paths.iter().any(|path| is_brief_file(path)) {
+    if paths
+        .iter()
+        .zip(&cites)
+        .any(|(path, cite)| is_brief_file(path) || is_brief_file(cite))
+    {
         work.failure = Some(Failure::BriefWitness);
         return Ok(work);
     }
@@ -1160,6 +1268,8 @@ fn statement(proposition: &Proposition) -> String {
 enum Origin {
     Tree { id: String },
     Bound { opened: String },
+    NamedFile { path: PathBuf },
+    NamedDir { root: PathBuf, id: String },
 }
 
 impl Origin {
@@ -1167,17 +1277,26 @@ impl Origin {
         match self {
             Origin::Tree { id } => id.clone(),
             Origin::Bound { opened } => opened.clone(),
+            Origin::NamedFile { path } => path.display().to_string(),
+            Origin::NamedDir { id, .. } => id.clone(),
         }
     }
 }
 
-fn cite_path(path: &str, bound: Option<&BoundFile>) -> String {
-    if path == "$" {
-        bound
+fn cite_path(path: &str, bound: &BoundWitnesses) -> String {
+    match parse_dollar_witness(path) {
+        Some(("", None)) => bound
+            .default
+            .as_ref()
             .map(|bound| bound.cite.clone())
-            .unwrap_or_else(|| "$".to_string())
-    } else {
-        path.to_string()
+            .unwrap_or_else(|| "$".to_string()),
+        Some((name, None)) => bound
+            .named
+            .get(name)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| path.to_string()),
+        Some((_, Some(rel))) => rel.to_string(),
+        None => path.to_string(),
     }
 }
 
@@ -1186,24 +1305,52 @@ fn locate(
     pin: &str,
     cite: &str,
 ) -> Result<Option<(u64, Origin)>, CheckError> {
-    if pin == "$" {
-        let Some(given) = sources.given else {
-            return Ok(None);
-        };
-        let opened = given.path().display().to_string();
-        return match open_err(cite, given.stat(pin))? {
-            Some(info) => Ok(Some((info.len, Origin::Bound { opened }))),
+    match parse_dollar_witness(pin) {
+        Some(("", None)) => {
+            let Some(given) = sources.given else {
+                return Ok(None);
+            };
+            let opened = given.path().display().to_string();
+            match open_err(cite, given.stat(pin))? {
+                Some(info) => Ok(Some((info.len, Origin::Bound { opened }))),
+                None => Ok(None),
+            }
+        }
+        Some((name, None)) => {
+            let Some(path) = sources.named.get(name) else {
+                return Ok(None);
+            };
+            let given = GivenFile::new(path.clone());
+            match open_err(cite, given.stat(pin))? {
+                Some(info) => Ok(Some((info.len, Origin::NamedFile { path: path.clone() }))),
+                None => Ok(None),
+            }
+        }
+        Some((name, Some(rel))) => {
+            let Some(root) = sources.named.get(name) else {
+                return Ok(None);
+            };
+            let fs = Filesystem::at(root);
+            match open_err(cite, fs.stat(rel))? {
+                Some(info) => Ok(Some((
+                    info.len,
+                    Origin::NamedDir {
+                        root: root.clone(),
+                        id: rel.to_string(),
+                    },
+                ))),
+                None => Ok(None),
+            }
+        }
+        None => match open_err(cite, sources.tree.stat(pin))? {
+            Some(info) => Ok(Some((
+                info.len,
+                Origin::Tree {
+                    id: pin.to_string(),
+                },
+            ))),
             None => Ok(None),
-        };
-    }
-    match open_err(cite, sources.tree.stat(pin))? {
-        Some(info) => Ok(Some((
-            info.len,
-            Origin::Tree {
-                id: pin.to_string(),
-            },
-        ))),
-        None => Ok(None),
+        },
     }
 }
 
@@ -1223,6 +1370,8 @@ fn read_origin(sources: &Sources<'_>, origin: &Origin, cite: &str) -> Result<Vec
             };
             given.read("$")
         }
+        Origin::NamedFile { path } => GivenFile::new(path.clone()).read("$"),
+        Origin::NamedDir { root, id } => Filesystem::at(root).read(id),
     };
     open_err(cite, result)
 }
@@ -3049,6 +3198,81 @@ mod tests {
                 cert: "certify:acme.ibor.impl:acme.ibor/canceled".into(),
             })
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn named_dollar_witnesses_resolve_file_and_dir_and_reject_missing_or_brief() {
+        let dir = scratch("named-dollars");
+        let run_dir = dir.join("run-1");
+        fs::create_dir_all(&run_dir).unwrap();
+        let diff_file = dir.join("patch.diff");
+        fs::write(&diff_file, "+hello\n").unwrap();
+        fs::write(run_dir.join("out.csv"), "customer_id\nAcme\n").unwrap();
+        let brief_file = dir.join("model.brief");
+        fs::write(&brief_file, "(assume \"x\")\n").unwrap();
+
+        let program = parse(
+            r#"
+(param customer)
+(claim ("{c} is in out.csv" customer) (witness $run/out.csv))
+(claim "diff adds hello" (witness $diff))
+"#,
+        )
+        .unwrap();
+        let bindings = HashMap::from([("customer".to_string(), "Acme".to_string())]);
+        let compiled = crate::compile_with_bindings(&program, &bindings).unwrap();
+
+        // Missing `$run` / `$diff` binding fails before submitting any oracle calls.
+        let mut oracle = Rec::new(entailed);
+        let err = check_bound_with(
+            &compiled.claims,
+            &dir,
+            DEFAULT_BODY_BYTES,
+            &BoundWitnesses::default(),
+            &mut oracle,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CheckError::Bind(_)), "{err:?}");
+        assert!(oracle.seen.is_empty());
+
+        // Bound file and bound directory both discharge; dir subpath cites only `out.csv`.
+        let bound = BoundWitnesses {
+            default: None,
+            named: HashMap::from([
+                ("run".to_string(), run_dir.clone()),
+                ("diff".to_string(), diff_file.clone()),
+            ]),
+        };
+        let mut oracle = Rec::new(entailed);
+        let report =
+            check_bound_with(&compiled.claims, &dir, DEFAULT_BODY_BYTES, &bound, &mut oracle)
+                .unwrap();
+        assert_eq!(report.claims[0].text, "Acme is in out.csv");
+        assert_eq!(report.claims[0].value, Value::True);
+        assert_eq!(report.claims[0].cites, vec!["out.csv"]);
+        assert_eq!(report.claims[1].value, Value::True);
+        assert_eq!(oracle.seen[0].state["path"], serde_json::json!("out.csv"));
+
+        // Binding `$diff` to a `.brief` file is rejected as a brief witness.
+        let bad_bound = BoundWitnesses {
+            default: None,
+            named: HashMap::from([
+                ("run".to_string(), run_dir),
+                ("diff".to_string(), brief_file),
+            ]),
+        };
+        let mut oracle = Rec::new(entailed);
+        let report = check_bound_with(
+            &compiled.claims,
+            &dir,
+            DEFAULT_BODY_BYTES,
+            &bad_bound,
+            &mut oracle,
+        )
+        .unwrap();
+        assert_eq!(report.claims[1].failure, Some(Failure::BriefWitness));
 
         let _ = fs::remove_dir_all(&dir);
     }

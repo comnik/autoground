@@ -247,10 +247,10 @@ pub struct Ground {
     pub at: At,
 }
 
-/// A top-level form, or a form inside a detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Form {
     Name(String),
+    Param(String),
     Sense(Sense),
     Define(Define),
     Certify(Certify),
@@ -260,30 +260,22 @@ pub enum Form {
     Formula(Formula),
 }
 
-/// Byte range of a formula, with one child per `and` / `or` / `not` operand.
-///
-/// An applied sentence has no children. Positions are in one source text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClauseSpan {
     pub span: std::ops::Range<usize>,
     pub children: Vec<ClauseSpan>,
 }
 
-/// A namespace, then names, senses, and claims, in source order.
 #[derive(Debug, Clone)]
 pub struct Program {
     pub namespace: Option<Ns>,
     pub forms: Vec<Form>,
-    /// Byte range of each form in the source, parallel to [`Self::forms`].
-    /// The `ns` form has no span here.
     pub spans: Vec<std::ops::Range<usize>>,
-    /// Clause tree of each claim, in claim order.
     pub clauses: Vec<ClauseSpan>,
 }
 
 impl PartialEq for Program {
     fn eq(&self, other: &Self) -> bool {
-        // Spans are positions in one source text, not part of the model.
         self.namespace == other.namespace && self.forms == other.forms
     }
 }
@@ -294,43 +286,31 @@ impl Program {
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.forms.iter().filter_map(|form| match form {
             Form::Name(name) => Some(name.as_str()),
-            Form::Sense(_)
-            | Form::Define(_)
-            | Form::Certify(_)
-            | Form::Ground(_)
-            | Form::Assume(_)
-            | Form::Detail(_)
-            | Form::Formula(_) => None,
+            _ => None,
+        })
+    }
+
+    pub fn params(&self) -> impl Iterator<Item = &str> {
+        self.forms.iter().filter_map(|form| match form {
+            Form::Param(name) => Some(name.as_str()),
+            _ => None,
         })
     }
 
     pub fn senses(&self) -> impl Iterator<Item = &Sense> {
         self.forms.iter().filter_map(|form| match form {
             Form::Sense(sense) => Some(sense),
-            Form::Name(_)
-            | Form::Define(_)
-            | Form::Certify(_)
-            | Form::Ground(_)
-            | Form::Assume(_)
-            | Form::Detail(_)
-            | Form::Formula(_) => None,
+            _ => None,
         })
     }
 
     pub fn claims(&self) -> impl Iterator<Item = &Formula> {
         self.forms.iter().filter_map(|form| match form {
             Form::Formula(formula) => Some(formula),
-            Form::Name(_)
-            | Form::Sense(_)
-            | Form::Define(_)
-            | Form::Certify(_)
-            | Form::Ground(_)
-            | Form::Assume(_)
-            | Form::Detail(_) => None,
+            _ => None,
         })
     }
 
-    /// Byte range of each claim, in claim order.
     pub fn claim_spans(&self) -> Vec<std::ops::Range<usize>> {
         self.forms
             .iter()
@@ -341,7 +321,7 @@ impl Program {
                 | Form::Detail(_)
                 | Form::Certify(_)
                 | Form::Ground(_) => Some(span.clone()),
-                Form::Name(_) | Form::Sense(_) | Form::Define(_) => None,
+                Form::Name(_) | Form::Param(_) | Form::Sense(_) | Form::Define(_) => None,
             })
             .collect()
     }

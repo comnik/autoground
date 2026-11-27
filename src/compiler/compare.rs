@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::syntax::{Program, Proposition};
 
-use super::link::{build_index, dependency_order, environment, link, link_module};
+use super::link::{build_index, dependency_order, environment, link, link_module_with_bindings};
 use super::scan::Loaded;
 use super::{compile_module, CompileError, Compiled, CompiledModule, SenseKey};
 
@@ -52,6 +52,27 @@ pub fn compare_against(
     accepted_assumptions: Option<(&Program, Option<&str>)>,
     scanned_files: &[Loaded],
 ) -> Result<AgainstReport, CompileError> {
+    compare_against_with_bindings(
+        cert,
+        cert_path,
+        ontology,
+        ontology_path,
+        accepted_assumptions,
+        scanned_files,
+        None,
+    )
+}
+
+/// [`compare_against`], resolving `(param ...)` declarations in `cert` when `bindings` is given.
+pub fn compare_against_with_bindings(
+    cert: &Program,
+    cert_path: Option<&str>,
+    ontology: &Program,
+    ontology_path: &str,
+    accepted_assumptions: Option<(&Program, Option<&str>)>,
+    scanned_files: &[Loaded],
+    bindings: Option<&HashMap<String, String>>,
+) -> Result<AgainstReport, CompileError> {
     let Some(onto_ns) = &ontology.namespace else {
         return Err(CompileError {
             message: "`--against` requires a namespaced ontology brief".into(),
@@ -83,7 +104,8 @@ pub fn compare_against(
         });
     }
 
-    let (cert_module, cert_imports) = link_module(cert, cert_path, &trusted_files)?;
+    let (cert_module, cert_imports) =
+        link_module_with_bindings(cert, cert_path, &trusted_files, bindings)?;
 
     let mut extra_claims = Vec::new();
     let mut seen_extra_certs = HashSet::new();

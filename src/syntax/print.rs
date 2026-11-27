@@ -59,6 +59,11 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
             out.push_str(name);
             out.push(')');
         }
+        Form::Param(name) => {
+            out.push_str("(param ");
+            out.push_str(name);
+            out.push(')');
+        }
         Form::Sense(sense) => {
             out.push_str("(sense ");
             out.push_str(&sense.name);
@@ -121,8 +126,8 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
             out.push_str("(witness");
             for path in &ground.witness {
                 out.push(' ');
-                if path == "$" {
-                    out.push('$');
+                if path.starts_with('$') {
+                    out.push_str(path);
                 } else {
                     out.push_str(&quote_const(path));
                 }
@@ -198,8 +203,8 @@ fn write_formula(formula: &Formula, indent: usize, out: &mut String) {
             out.push_str("(witness");
             for path in paths {
                 out.push(' ');
-                if path == "$" {
-                    out.push('$');
+                if path.starts_with('$') {
+                    out.push_str(path);
                 } else {
                     out.push_str(&quote_const(path));
                 }
@@ -399,6 +404,21 @@ mod tests {
 "#;
         let program = parse(src).unwrap();
         let printed = print_program(&program);
+        let again = parse(&printed).unwrap();
+        assert_eq!(program, again);
+    }
+
+    #[test]
+    fn round_trip_keeps_param_and_named_dollar_witnesses() {
+        let src = r#"(param customer)
+(param run_date)
+(claim ("{c} qualifies" customer)
+  (witness $diff $run/out.csv))
+"#;
+        let program = parse(src).unwrap();
+        let printed = print_program(&program);
+        assert!(printed.contains("(param customer)"), "{printed}");
+        assert!(printed.contains("(witness $diff $run/out.csv)"), "{printed}");
         let again = parse(&printed).unwrap();
         assert_eq!(program, again);
     }

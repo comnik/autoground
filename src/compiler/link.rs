@@ -5,8 +5,9 @@ use crate::syntax::{Program, Proposition, Refer, Sense, Sentence, Support};
 
 use super::scan::Loaded;
 use super::{
-    compile_module, CompileError, Compiled, CompiledModule, DefinedBody, ExportedCertify,
-    ExportedGround, Imports, Opened, ResolvedConstraint, ResolvedDefine, SenseKey,
+    compile_module, compile_module_with_bindings, CompileError, Compiled, CompiledModule,
+    DefinedBody, ExportedCertify, ExportedGround, Imports, Opened, ResolvedConstraint,
+    ResolvedDefine, SenseKey,
 };
 
 pub(crate) struct Item<'a> {
@@ -34,6 +35,16 @@ pub fn link(
     Ok(link_parts(entry, entry_path, files)?.0)
 }
 
+/// [`link`], resolving every `(param ...)` in `entry` from `bindings`.
+pub fn link_with_bindings(
+    entry: &Program,
+    entry_path: Option<&str>,
+    files: &[Loaded],
+    bindings: &HashMap<String, String>,
+) -> Result<Compiled, CompileError> {
+    Ok(link_parts_with_bindings(entry, entry_path, files, bindings)?.0)
+}
+
 /// [`link`], plus the vocabulary the entry can see through its requires.
 pub fn link_parts(
     entry: &Program,
@@ -45,10 +56,31 @@ pub fn link_parts(
     Ok((module.compiled, vocab))
 }
 
+/// [`link_parts`], resolving every `(param ...)` in `entry` from `bindings`.
+pub fn link_parts_with_bindings(
+    entry: &Program,
+    entry_path: Option<&str>,
+    files: &[Loaded],
+    bindings: &HashMap<String, String>,
+) -> Result<(Compiled, super::Vocabulary), CompileError> {
+    let (module, imports) = link_module_with_bindings(entry, entry_path, files, Some(bindings))?;
+    let vocab = super::Vocabulary::from_imports(&imports);
+    Ok((module.compiled, vocab))
+}
+
 pub(crate) fn link_module(
     entry: &Program,
     entry_path: Option<&str>,
     files: &[Loaded],
+) -> Result<(CompiledModule, Imports), CompileError> {
+    link_module_with_bindings(entry, entry_path, files, None)
+}
+
+pub(crate) fn link_module_with_bindings(
+    entry: &Program,
+    entry_path: Option<&str>,
+    files: &[Loaded],
+    bindings: Option<&HashMap<String, String>>,
 ) -> Result<(CompiledModule, Imports), CompileError> {
     let index = build_index(entry, entry_path, files)?;
     let order = dependency_order(entry, &index)?;
@@ -63,7 +95,7 @@ pub(crate) fn link_module(
     }
     let target_path = entry_path.unwrap_or("");
     let imports = environment(entry, target_path, &index, &modules)?;
-    let module = compile_module(entry, &imports)?;
+    let module = compile_module_with_bindings(entry, &imports, bindings)?;
     Ok((module, imports))
 }
 
@@ -173,7 +205,8 @@ pub(crate) fn environment(
         .as_ref()
         .map(|ns| ns.requires.as_slice())
         .unwrap_or(&[]);
-    let names_here: HashSet<String> = program.names().map(|name| name.to_string()).collect();
+    let mut names_here: HashSet<String> = program.names().map(|name| name.to_string()).collect();
+    names_here.extend(program.params().map(|name| name.to_string()));
     let senses_here: HashMap<String, Sense> = program
         .senses()
         .map(|sense| (sense.name.clone(), sense.clone()))
@@ -661,8 +694,8 @@ fn rebase_support(support: &Support, from_file: &str, to_file: &str) -> Support 
 }
 
 fn rebase_path(witness: &str, from_file: &str, to_file: &str) -> String {
-    if witness == "$" {
-        return "$".to_string();
+    if witness.starts_with('$') {
+        return witness.to_string();
     }
     let from_dir = dir_components(from_file);
     let to_dir = dir_components(to_file);
