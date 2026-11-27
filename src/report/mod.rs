@@ -1,3 +1,4 @@
+pub mod json;
 pub mod run;
 pub mod summary;
 

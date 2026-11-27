@@ -10,6 +10,7 @@ use autoground::log::{Log, DEFAULT_TRACE_DIR};
 use autoground::oracle::jev::DEFAULT_RUN_COST_CENTS;
 use autoground::oracle::{JevOracle, Oracle, Usage, UsageRecord};
 use autoground::prepare;
+use autoground::report::json as report_json;
 use autoground::report::summary::{print_assumptions, print_file_line, print_run_summary};
 use autoground::{
     brief_source, compare_against, compile, display_path, parse, scan_briefs, scan_namespaces,
@@ -73,6 +74,9 @@ enum Commands {
         /// Brief of accepted assumptions allowed when checking --against an ontology.
         #[arg(long, value_name = "FILE")]
         assumptions: Option<PathBuf>,
+        /// Emit a JSON report to stdout.
+        #[arg(long)]
+        json: bool,
     },
     /// Compare the names, senses, and statements of two briefs for consistency.
     ///
@@ -136,6 +140,7 @@ fn main() -> ExitCode {
             out,
             against,
             assumptions,
+            json,
         } => match check_cmd(
             &input,
             file.as_deref(),
@@ -143,6 +148,7 @@ fn main() -> ExitCode {
             out.as_deref(),
             against.as_deref(),
             assumptions.as_deref(),
+            json,
         ) {
             Ok(code) => ExitCode::from(code),
             Err(err) => fail(err),
@@ -174,6 +180,7 @@ fn prepare_cmd(kind: PrepareKind) -> Result<u8, Box<dyn std::error::Error>> {
     Ok(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_cmd(
     input: &str,
     file: Option<&Path>,
@@ -181,6 +188,7 @@ fn check_cmd(
     out: Option<&Path>,
     against: Option<&Path>,
     assumptions_path: Option<&Path>,
+    json_out: bool,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     if assumptions_path.is_some() && against.is_none() {
         return Err("`--assumptions` requires `--against`".into());
@@ -192,7 +200,7 @@ fn check_cmd(
         if against.is_some() {
             return Err("a directory check takes no `--against`".into());
         }
-        return check_dir(input, budget_cents, out);
+        return check_dir(input, budget_cents, out, json_out);
     }
     let started = std::time::Instant::now();
     let base = brief_dir(input);
@@ -256,7 +264,15 @@ fn check_cmd(
             &files,
         )?;
         if compared.has_failures() {
-            print!("{}", compared.format_failures());
+            if json_out {
+                let doc = report_json::against_failure(
+                    &compared.missing_certifies,
+                    &compared.unaccepted_assumptions,
+                );
+                println!("{}", serde_json::to_string_pretty(&doc)?);
+            } else {
+                print!("{}", compared.format_failures());
+            }
             return Ok(1);
         }
         let local_count = compared.compiled.claims.len();
@@ -317,6 +333,7 @@ fn check_cmd(
             &mut oracle,
             &log,
             started,
+            json_out,
         )
     })();
     if let Some(path) = stdin_tmp {
@@ -381,6 +398,7 @@ fn finish_check<O: Oracle>(
     oracle: &mut O,
     log: &Log,
     started: std::time::Instant,
+    json_out: bool,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let report = check::check_bound(claims, base, DEFAULT_BODY_BYTES, bound, oracle)?;
     let usage = oracle.usage();
@@ -390,32 +408,46 @@ fn finish_check<O: Oracle>(
         claims: report.claims[..local_claim_count].to_vec(),
     };
     record_check(log, src, program, &local_report, &usage, None)?;
-    print_report(src, program, &local_report)?;
-    if report.claims.len() > local_claim_count {
-        let extra_failed: Vec<_> = report.claims[local_claim_count..]
-            .iter()
-            .filter(|claim| claim.value != autoground::Value::True)
-            .cloned()
-            .collect();
-        if !extra_failed.is_empty() {
-            print!("{}", write_report(&check::Report { claims: extra_failed }));
+    if json_out {
+        let doc = report_json::check_report(
+            src,
+            program,
+            &report,
+            local_claim_count,
+            assumptions,
+            &usage,
+            started.elapsed(),
+            log.path(),
+        );
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    } else {
+        print_report(src, program, &local_report)?;
+        if report.claims.len() > local_claim_count {
+            let extra_failed: Vec<_> = report.claims[local_claim_count..]
+                .iter()
+                .filter(|claim| claim.value != autoground::Value::True)
+                .cloned()
+                .collect();
+            if !extra_failed.is_empty() {
+                print!("{}", write_report(&check::Report { claims: extra_failed }));
+            }
         }
+        let true_count = report
+            .claims
+            .iter()
+            .filter(|claim| claim.value == autoground::Value::True)
+            .count();
+        print_run_summary(
+            &usage,
+            &flights,
+            flight_limit,
+            true_count,
+            report.claims.len(),
+            started.elapsed(),
+            log.path(),
+            assumptions,
+        )?;
     }
-    let true_count = report
-        .claims
-        .iter()
-        .filter(|claim| claim.value == autoground::Value::True)
-        .count();
-    print_run_summary(
-        &usage,
-        &flights,
-        flight_limit,
-        true_count,
-        report.claims.len(),
-        started.elapsed(),
-        log.path(),
-        assumptions,
-    )?;
     let discharged = report
         .claims
         .iter()
@@ -440,11 +472,17 @@ fn check_dir(
     input: &str,
     budget_cents: u64,
     out: Option<&Path>,
+    json_out: bool,
 ) -> Result<u8, Box<dyn std::error::Error>> {
     let started = std::time::Instant::now();
     let files = scan_briefs(Path::new(input))?;
     if files.is_empty() {
-        println!("no briefs");
+        if json_out {
+            let doc = report_json::dir_report(&[], None, started.elapsed(), None);
+            println!("{}", serde_json::to_string_pretty(&doc)?);
+        } else {
+            println!("no briefs");
+        }
         return Ok(0);
     }
     let scan_root = namespace_root(Path::new(input));
@@ -462,7 +500,24 @@ fn check_dir(
         .iter()
         .all(|item| matches!(item, PreparedBrief::Failed { .. }))
     {
-        print_prepare_errors(&prepared)?;
+        if json_out {
+            let entries: Vec<_> = prepared
+                .into_iter()
+                .filter_map(|item| match item {
+                    PreparedBrief::Failed { path, message } => {
+                        Some(report_json::DirEntry::Failed {
+                            path,
+                            error: message,
+                        })
+                    }
+                    PreparedBrief::Ready(_) => None,
+                })
+                .collect();
+            let doc = report_json::dir_report(&entries, None, started.elapsed(), None);
+            println!("{}", serde_json::to_string_pretty(&doc)?);
+        } else {
+            print_prepare_errors(&prepared)?;
+        }
         return Ok(3);
     }
 
@@ -470,7 +525,9 @@ fn check_dir(
     let mut oracle = match JevOracle::from_env(log.clone()) {
         Ok(oracle) => oracle,
         Err(err) => {
-            print_prepare_errors(&prepared)?;
+            if !json_out {
+                print_prepare_errors(&prepared)?;
+            }
             return Err(err.into());
         }
     };
@@ -480,11 +537,19 @@ fn check_dir(
     let mut all_true = true;
     let mut true_count = 0usize;
     let mut total = 0usize;
+    let mut json_entries = Vec::new();
     for item in prepared {
         match item {
             PreparedBrief::Failed { path, message } => {
                 compile_failed = true;
-                print_brief_failure(&path, &message)?;
+                if json_out {
+                    json_entries.push(report_json::DirEntry::Failed {
+                        path,
+                        error: message,
+                    });
+                } else {
+                    print_brief_failure(&path, &message)?;
+                }
             }
             PreparedBrief::Ready(ready) => {
                 let report = check::check_bound(
@@ -501,11 +566,7 @@ fn check_dir(
                     .count();
                 let claim_count = report.claims.len();
                 let passed = validated == claim_count;
-                print_file_line(passed, &ready.path, Some((validated, claim_count)))?;
                 if !passed {
-                    print_report(&ready.src, &ready.program, &report)?;
-                    print_assumptions(&ready.compiled.assumptions)?;
-                    println!();
                     all_true = false;
                 }
                 let usage = oracle.usage();
@@ -517,6 +578,22 @@ fn check_dir(
                     &usage,
                     Some(&ready.path),
                 )?;
+                if json_out {
+                    json_entries.push(report_json::DirEntry::Checked {
+                        path: ready.path,
+                        src: ready.src,
+                        program: ready.program,
+                        report,
+                        assumptions: ready.compiled.assumptions,
+                    });
+                } else {
+                    print_file_line(passed, &ready.path, Some((validated, claim_count)))?;
+                    if !passed {
+                        print_report(&ready.src, &ready.program, &report)?;
+                        print_assumptions(&ready.compiled.assumptions)?;
+                        println!();
+                    }
+                }
                 true_count += validated;
                 total += claim_count;
             }
@@ -526,16 +603,26 @@ fn check_dir(
     let usage = oracle.usage();
     let flights = oracle.flights().to_vec();
     let flight_limit = oracle.flight_limit();
-    print_run_summary(
-        &usage,
-        &flights,
-        flight_limit,
-        true_count,
-        total,
-        started.elapsed(),
-        log.path(),
-        &[],
-    )?;
+    if json_out {
+        let doc = report_json::dir_report(
+            &json_entries,
+            Some(&usage),
+            started.elapsed(),
+            Some(log.path()),
+        );
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    } else {
+        print_run_summary(
+            &usage,
+            &flights,
+            flight_limit,
+            true_count,
+            total,
+            started.elapsed(),
+            log.path(),
+            &[],
+        )?;
+    }
     if compile_failed {
         Ok(3)
     } else if all_true {
@@ -813,6 +900,7 @@ mod tests {
             "ontology.brief",
             "--assumptions",
             "impl/assumptions.brief",
+            "--json",
         ])
         .unwrap();
         match cli.command {
@@ -820,11 +908,13 @@ mod tests {
                 input,
                 against,
                 assumptions,
+                json,
                 ..
             } => {
                 assert_eq!(input, "impl/certificate.brief");
                 assert_eq!(against, Some(PathBuf::from("ontology.brief")));
                 assert_eq!(assumptions, Some(PathBuf::from("impl/assumptions.brief")));
+                assert!(json);
             }
             _ => panic!("check"),
         }
