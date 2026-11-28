@@ -601,6 +601,7 @@ fn rebase_ground(ground: &ExportedGround, from_file: &str, to_file: &str) -> Exp
             .iter()
             .map(|p| rebase_path(p, from_file, to_file))
             .collect(),
+        mode: ground.mode,
         certificate: ground
             .certificate
             .iter()
@@ -658,6 +659,7 @@ fn rebase_prop(prop: &Proposition, from_file: &str, to_file: &str) -> Propositio
             cert_id,
             certificate,
             witness,
+            mode,
         } => Proposition::Grounded {
             sentence: sentence.clone(),
             cert_id: cert_id.clone(),
@@ -669,6 +671,7 @@ fn rebase_prop(prop: &Proposition, from_file: &str, to_file: &str) -> Propositio
                 .iter()
                 .map(|p| rebase_path(p, from_file, to_file))
                 .collect(),
+            mode: *mode,
         },
         Proposition::Scope { body } => Proposition::Scope {
             body: body

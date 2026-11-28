@@ -115,15 +115,13 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
             out.push(')');
         }
         Form::Ground(ground) => {
+            let op = match ground.mode {
+                super::ast::GroundMode::Positive | super::ast::GroundMode::Negative => "implies",
+                super::ast::GroundMode::Iff => "iff",
+            };
             out.push_str("(ground (");
-            push_ident(&ground.sense, out);
-            for param in &ground.params {
-                out.push(' ');
-                out.push_str(param);
-            }
-            out.push_str(")\n");
-            write_indent(indent + 1, out);
-            out.push_str("(witness");
+            out.push_str(op);
+            out.push_str(" (witness");
             for path in &ground.witness {
                 out.push(' ');
                 if path.starts_with('$') {
@@ -131,6 +129,20 @@ fn print_form(form: &Form, indent: usize, out: &mut String) {
                 } else {
                     out.push_str(&quote_const(path));
                 }
+            }
+            out.push_str(") ");
+            if matches!(ground.mode, super::ast::GroundMode::Negative) {
+                out.push_str("(not ");
+            }
+            out.push('(');
+            push_ident(&ground.sense, out);
+            for param in &ground.params {
+                out.push(' ');
+                out.push_str(param);
+            }
+            out.push(')');
+            if matches!(ground.mode, super::ast::GroundMode::Negative) {
+                out.push(')');
             }
             out.push_str(")\n");
             write_indent(indent + 1, out);
@@ -419,6 +431,24 @@ mod tests {
         let printed = print_program(&program);
         assert!(printed.contains("(param customer)"), "{printed}");
         assert!(printed.contains("(witness $diff $run/out.csv)"), "{printed}");
+        let again = parse(&printed).unwrap();
+        assert_eq!(program, again);
+    }
+
+    #[test]
+    fn round_trip_keeps_ground_modes() {
+        let src = r#"(ground (implies (witness $run/out.csv) (high_value_customer c))
+  (witness "query.sql"))
+(ground (implies (witness $run/anchors.json) (not (changes_trait t)))
+  (witness "anchors.py"))
+(ground (iff (witness $run/surface.json) (changes_trait t))
+  (witness "extract.py"))
+"#;
+        let program = parse(src).unwrap();
+        let printed = print_program(&program);
+        assert!(printed.contains("(ground (implies (witness $run/out.csv) (high_value_customer c))"), "{printed}");
+        assert!(printed.contains("(ground (implies (witness $run/anchors.json) (not (changes_trait t)))"), "{printed}");
+        assert!(printed.contains("(ground (iff (witness $run/surface.json) (changes_trait t))"), "{printed}");
         let again = parse(&printed).unwrap();
         assert_eq!(program, again);
     }

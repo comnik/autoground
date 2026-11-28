@@ -2,8 +2,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::syntax::template::{apply, holes_word, names_word};
 use crate::syntax::{
-    parse_dollar_witness, Arg, At, Certify, CertifyHead, Define, Form, Formula, Ground, Ident,
-    Program, Proposition, Reading, Sense, Sentence, Support,
+    parse_dollar_witness, Arg, At, Certify, CertifyHead, Define, Form, Formula, Ground, GroundMode,
+    Ident, Program, Proposition, Reading, Sense, Sentence, Support,
 };
 
 mod compare;
@@ -98,6 +98,7 @@ pub(crate) struct CertifyRule {
 pub(crate) struct ExportedGround {
     pub(crate) cert_id: String,
     pub(crate) witness: Vec<String>,
+    pub(crate) mode: GroundMode,
     pub(crate) certificate: Vec<Proposition>,
     pub(crate) assumptions: Vec<String>,
 }
@@ -106,6 +107,7 @@ pub(crate) struct ExportedGround {
 pub(crate) struct GroundRule {
     pub(crate) cert_id: String,
     pub(crate) witness: Vec<String>,
+    pub(crate) mode: GroundMode,
     /// Empty for a ground declared in the same file (its `Cert` is already in `claims`).
     pub(crate) certificate: Vec<Proposition>,
     pub(crate) assumptions: Vec<String>,
@@ -513,6 +515,7 @@ pub(crate) fn compile_module_with_bindings(
                     GroundRule {
                         cert_id: exp.cert_id.clone(),
                         witness: exp.witness.clone(),
+                        mode: exp.mode,
                         certificate: exp.certificate.clone(),
                         assumptions: exp.assumptions.clone(),
                     },
@@ -1506,7 +1509,7 @@ fn collect_grounds(
     scope_prefix: &str,
     grounds: &mut HashMap<SenseKey, GroundRule>,
     ctx: &mut Ctx<'_>,
-) -> Result<Vec<(SenseKey, String, Vec<String>)>, CompileError> {
+) -> Result<Vec<(SenseKey, String, Vec<String>, GroundMode)>, CompileError> {
     let mut local = Vec::new();
     let mut local_seen = HashSet::new();
     for form in forms {
@@ -1548,11 +1551,12 @@ fn collect_grounds(
             GroundRule {
                 cert_id: cert_id.clone(),
                 witness: witness.clone(),
+                mode: ground.mode,
                 certificate: Vec::new(),
                 assumptions: Vec::new(),
             },
         );
-        local.push((key, cert_id, witness));
+        local.push((key, cert_id, witness, ground.mode));
     }
     Ok(local)
 }
@@ -1887,31 +1891,53 @@ fn resolve_ground(
     let head = apply(&sense.template, &ground.params)
         .map_err(|message| CompileError { message })?;
     let witness_display = format_witness_list(&witness);
-    let label = format!(
-        "ground ({}) via {witness_display}",
-        format_ground_head(&ground.sense, &ground.params)
-    );
+    let head_str = format_ground_head(&ground.sense, &ground.params);
+    let label = match ground.mode {
+        GroundMode::Positive => format!("ground ({head_str}) via {witness_display}"),
+        GroundMode::Negative => format!("ground (not ({head_str})) via {witness_display}"),
+        GroundMode::Iff => format!("ground ({head_str}) iff {witness_display}"),
+    };
     let has_certify = defs.certifies.contains_key(&key);
     let (targets, requires, imported) = if has_certify {
         let (requires, imported) = collect_cert_prereqs(std::slice::from_ref(&key), defs, ctx);
-        (
-            vec![synthesize_provenance_target(
+        let mut targets = Vec::new();
+        if matches!(ground.mode, GroundMode::Positive | GroundMode::Iff) {
+            targets.push(synthesize_provenance_target(
                 &ground.params,
                 &head,
                 &witness_display,
-            )],
-            requires,
-            imported,
-        )
+            ));
+        }
+        if matches!(ground.mode, GroundMode::Negative | GroundMode::Iff) {
+            targets.push(synthesize_neg_provenance_target(
+                &ground.params,
+                &head,
+                &witness_display,
+            ));
+        }
+        (targets, requires, imported)
     } else {
         let mut deps = Vec::new();
         collect_define_deps(&def.body, &mut deps);
         let (requires, imported) = collect_cert_prereqs(&deps, defs, ctx);
-        (
-            synthesize_targets(&ground.params, &head, &witness_display, &def.body)?,
-            requires,
-            imported,
-        )
+        let mut targets = Vec::new();
+        if matches!(ground.mode, GroundMode::Positive | GroundMode::Iff) {
+            targets.extend(synthesize_targets(
+                &ground.params,
+                &head,
+                &witness_display,
+                &def.body,
+            )?);
+        }
+        if matches!(ground.mode, GroundMode::Negative | GroundMode::Iff) {
+            targets.push(synthesize_neg_target(
+                &ground.params,
+                &head,
+                &witness_display,
+                &def.body,
+            )?);
+        }
+        (targets, requires, imported)
     };
     let support = match &ground.support {
         Formula::Witness { paths } => {
@@ -1998,6 +2024,72 @@ fn synthesize_provenance_target(params: &[String], head: &str, witness: &str) ->
         grounded: text.clone(),
         text,
     }
+}
+
+fn synthesize_neg_provenance_target(params: &[String], head: &str, witness: &str) -> Sentence {
+    let prefix = format_neg_quantifier_prefix(params, head, witness);
+    let head = head.trim_end_matches('.');
+    let text = format!("{prefix}it is not the case that {head}.");
+    Sentence {
+        grounded: text.clone(),
+        text,
+    }
+}
+
+fn format_neg_quantifier_prefix(params: &[String], head: &str, witness: &str) -> String {
+    let head = head.trim_end_matches('.');
+    match params {
+        [] => format!("If {witness} contradicts that {head}, then "),
+        [only] => format!("For all {only}, if {witness} contradicts that {head}, then "),
+        [a, b] => format!("For all {a} and {b}, if {witness} contradicts that {head}, then "),
+        many => {
+            let (last, init) = many.split_last().expect("non-empty");
+            format!(
+                "For all {}, and {last}, if {witness} contradicts that {head}, then ",
+                init.join(", ")
+            )
+        }
+    }
+}
+
+fn synthesize_neg_target(
+    params: &[String],
+    head: &str,
+    witness: &str,
+    body: &DefinedBody,
+) -> Result<Sentence, CompileError> {
+    let prefix = format_neg_quantifier_prefix(params, head, witness);
+    if let DefinedBody::Spec { labels, .. } = body {
+        let spec_list = format_witness_list(labels);
+        let rhs = match params {
+            [] => format!("the specification in {spec_list} holds"),
+            [only] => format!("{only} satisfies the specification in {spec_list}"),
+            many => format!(
+                "{} satisfy the specification in {spec_list}",
+                format_witness_list(many)
+            ),
+        };
+        let text = format!("{prefix}it is not the case that {rhs}.");
+        return Ok(Sentence {
+            grounded: text.clone(),
+            text,
+        });
+    }
+    let param_spellings: Vec<Spelling> = params
+        .iter()
+        .map(|p| Spelling {
+            shown: p.clone(),
+            grounded: p.clone(),
+        })
+        .collect();
+    let shown = render_defined_body(body, &param_spellings, false, true)?;
+    let grounded = render_defined_body(body, &param_spellings, true, true)?;
+    let shown = shown.trim_end_matches('.');
+    let grounded = grounded.trim_end_matches('.');
+    Ok(Sentence {
+        text: format!("{prefix}it is not the case that {shown}."),
+        grounded: format!("{prefix}it is not the case that {grounded}."),
+    })
 }
 
 fn format_ground_head(sense: &Ident, params: &[String]) -> String {
@@ -2385,6 +2477,7 @@ fn resolve_applied_sentence(
                 cert_id: ground.cert_id.clone(),
                 certificate: ground.certificate.clone(),
                 witness: ground.witness.clone(),
+                mode: ground.mode,
             });
         }
         if let Some(def) = defs.rules.get(key) {
@@ -2632,7 +2725,7 @@ fn export_fact_certifies(
 }
 
 fn export_grounds(
-    local_grounds: &[(SenseKey, String, Vec<String>)],
+    local_grounds: &[(SenseKey, String, Vec<String>, GroundMode)],
     claims: &[Proposition],
 ) -> HashMap<SenseKey, ExportedGround> {
     if local_grounds.is_empty() {
@@ -2643,7 +2736,7 @@ fn export_grounds(
     collect_exportable_props(claims, &mut local_defs, &mut local_certs);
 
     let mut exported = HashMap::new();
-    for (sense_key, cert_id, witness) in local_grounds {
+    for (sense_key, cert_id, witness, mode) in local_grounds {
         let Some((bundled, assumptions)) = bundle_cert(cert_id, &local_defs, &local_certs) else {
             continue;
         };
@@ -2652,6 +2745,7 @@ fn export_grounds(
             ExportedGround {
                 cert_id: cert_id.clone(),
                 witness: witness.clone(),
+                mode: *mode,
                 certificate: bundled,
                 assumptions,
             },
@@ -4273,6 +4367,42 @@ A nullary sense reads either as a noun phrase or as a sentence, not both."
         assert!(
             in_detail.message.contains("`param` cannot appear inside a `detail`"),
             "{in_detail}"
+        );
+    }
+
+    #[test]
+    fn ground_implies_not_and_iff_synthesize_matching_targets() {
+        let src = r#"
+(name Oracle)
+(sense changes_trait "this diff changes the {t} trait")
+(sense active "{c} is active")
+(define (changes_trait t) ("{t} signature changed" t))
+(define (active c) (and ("{c} exists" c) ("{c} paid" c)))
+(ground (implies (witness $run/anchors.json) (not (changes_trait t)))
+  (witness "anchors.py"))
+(ground (iff (witness $run/out.csv) (active c))
+  (witness "query.sql"))
+(and (changes_trait Oracle) (active Oracle))
+"#;
+        let compiled = compile(&parse(src).unwrap()).unwrap();
+        let Proposition::Cert { targets: neg_targets, .. } = &compiled.claims[0] else {
+            panic!("expected negative ground Cert");
+        };
+        assert_eq!(neg_targets.len(), 1);
+        assert_eq!(
+            neg_targets[0].text,
+            "For all t, if anchors.json contradicts that this diff changes the t trait, then it is not the case that t signature changed."
+        );
+
+        let Proposition::Cert { targets: iff_targets, .. } = &compiled.claims[1] else {
+            panic!("expected iff ground Cert");
+        };
+        assert_eq!(iff_targets.len(), 3);
+        assert!(iff_targets[0].text.contains("if out.csv supports"), "{iff_targets:?}");
+        assert!(iff_targets[1].text.contains("if out.csv supports"), "{iff_targets:?}");
+        assert_eq!(
+            iff_targets[2].text,
+            "For all c, if out.csv contradicts that c is active, then it is not the case that (c exists and c paid)."
         );
     }
 }

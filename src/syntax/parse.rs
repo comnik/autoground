@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use super::ast::{
-    Arg, At, Certify, CertifyHead, ClauseSpan, Define, Form, Formula, Ground, Ident, Ns, Program,
-    Reading, Refer, Require, Sense,
+    Arg, At, Certify, CertifyHead, ClauseSpan, Define, Form, Formula, Ground, GroundMode, Ident,
+    Ns, Program, Reading, Refer, Require, Sense,
 };
 use super::template::hole_names;
 
@@ -705,24 +705,31 @@ fn lower_certify(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError
 }
 
 fn lower_ground(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError> {
-    if xs.len() != 4 {
-        return Err(err_at(
-            &xs[0],
-            "`ground` takes a sense head, a witness, and a support",
-        ));
-    }
-    let (sense, params) = lower_sense_head(&xs[1], "`ground`")?;
-    let (witness_formula, _) = lower_formula(&xs[2])?;
-    let Formula::Witness { paths } = witness_formula else {
-        return Err(err_at(&xs[2], "`ground` takes a `(witness ...)`"));
+    let (sense, params, paths, mode, support_sexp) = match xs.len() {
+        3 => {
+            let (sense, params, paths, mode) = lower_ground_contract(&xs[1])?;
+            (sense, params, paths, mode, &xs[2])
+        }
+        4 => {
+            let (sense, params) = lower_sense_head(&xs[1], "`ground`")?;
+            let paths = lower_ground_witness(&xs[2])?;
+            (sense, params, paths, GroundMode::Positive, &xs[3])
+        }
+        _ => {
+            return Err(err_at(
+                &xs[0],
+                "`ground` takes `(implies (witness ...) (sense ...))` or `(iff (witness ...) (sense ...))` and a support",
+            ));
+        }
     };
-    let (support, support_clause) = lower_formula(&xs[3])?;
+    let (support, support_clause) = lower_formula(support_sexp)?;
     Ok((
         Form::Ground(Ground {
             sense,
             params,
             witness: paths,
             support,
+            mode,
             at: at_of(s),
         }),
         ClauseSpan {
@@ -730,6 +737,57 @@ fn lower_ground(s: &Sexp, xs: &[Sexp]) -> Result<(Form, ClauseSpan), ParseError>
             children: vec![support_clause],
         },
     ))
+}
+
+fn lower_ground_contract(
+    s: &Sexp,
+) -> Result<(Ident, Vec<String>, Vec<String>, GroundMode), ParseError> {
+    let items = match &s.kind {
+        SexpKind::List(items) if items.len() == 3 => items,
+        _ => {
+            return Err(err_at(
+                s,
+                "`ground` contract must be `(implies (witness ...) ...)` or `(iff (witness ...) ...)`",
+            ));
+        }
+    };
+    let kw = expect_symbol(
+        &items[0],
+        "`ground` contract must start with `implies` or `iff`",
+    )?;
+    let paths = lower_ground_witness(&items[1])?;
+    match kw.as_str() {
+        "implies" => {
+            if let SexpKind::List(not_items) = &items[2].kind {
+                if matches!(not_items.first().map(|x| &x.kind), Some(SexpKind::Symbol(h)) if h == "not")
+                {
+                    if not_items.len() != 2 {
+                        return Err(err_at(&not_items[0], "`not` takes one sense application"));
+                    }
+                    let (sense, params) = lower_sense_head(&not_items[1], "`ground`")?;
+                    return Ok((sense, params, paths, GroundMode::Negative));
+                }
+            }
+            let (sense, params) = lower_sense_head(&items[2], "`ground`")?;
+            Ok((sense, params, paths, GroundMode::Positive))
+        }
+        "iff" | "equivalent" => {
+            let (sense, params) = lower_sense_head(&items[2], "`ground`")?;
+            Ok((sense, params, paths, GroundMode::Iff))
+        }
+        _ => Err(err_at(
+            &items[0],
+            "`ground` contract must start with `implies` or `iff`",
+        )),
+    }
+}
+
+fn lower_ground_witness(s: &Sexp) -> Result<Vec<String>, ParseError> {
+    let (witness_formula, _) = lower_formula(s)?;
+    let Formula::Witness { paths } = witness_formula else {
+        return Err(err_at(s, "`ground` takes a `(witness ...)`"));
+    };
+    Ok(paths)
 }
 
 fn lower_sense_head(s: &Sexp, form: &str) -> Result<(Ident, Vec<String>), ParseError> {

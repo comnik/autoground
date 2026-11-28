@@ -196,6 +196,7 @@ pub enum Proposition {
         cert_id: String,
         certificate: Vec<Proposition>,
         witness: Vec<String>,
+        mode: GroundMode,
     },
     /// A sentence taken as true, with no evidence.
     Assume(Sentence),
@@ -238,12 +239,20 @@ pub struct Certify {
     pub at: At,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroundMode {
+    Positive,
+    Negative,
+    Iff,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ground {
     pub sense: Ident,
     pub params: Vec<String>,
     pub witness: Vec<String>,
     pub support: Formula,
+    pub mode: GroundMode,
     pub at: At,
 }
 

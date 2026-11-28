@@ -25,7 +25,7 @@ use serde_json::{json, Value as Json};
 
 use crate::oracle::image::{image_asset, image_extension, Asset, ImageError, MAX_IMAGE_BYTES};
 use crate::oracle::{Answer, Classification, Oracle, OracleError, Ticket};
-use crate::syntax::{parse_dollar_witness, Proposition, Sentence, Support};
+use crate::syntax::{parse_dollar_witness, GroundMode, Proposition, Sentence, Support};
 use crate::universe::{Filesystem, GivenFile, Universe, UniverseError};
 use crate::value::Value;
 
@@ -542,6 +542,7 @@ struct Work {
     text: String,
     cert_id: Option<String>,
     requires: Vec<String>,
+    ground_mode: Option<GroundMode>,
     failure: Option<Failure>,
     cites: Vec<String>,
     children: Vec<Work>,
@@ -592,6 +593,7 @@ fn prepare<O: Oracle>(
                 text: sentence.text.clone(),
                 cert_id: None,
                 requires: Vec::new(),
+                ground_mode: None,
                 failure: if defined {
                     None
                 } else {
@@ -619,6 +621,7 @@ fn prepare<O: Oracle>(
                 text: sentence.text.clone(),
                 cert_id: None,
                 requires: Vec::new(),
+                ground_mode: None,
                 failure: None,
                 cites: Vec::new(),
                 children: vec![child],
@@ -652,6 +655,7 @@ fn prepare<O: Oracle>(
                     text: sentence.text.clone(),
                     cert_id: None,
                     requires: Vec::new(),
+                    ground_mode: None,
                     failure: None,
                     cites: Vec::new(),
                     children: vec![child],
@@ -704,6 +708,7 @@ fn prepare<O: Oracle>(
                         text: label.clone(),
                         cert_id: Some(cert_id.clone()),
                         requires: requires.clone(),
+                        ground_mode: None,
                         failure: None,
                         cites: Vec::new(),
                         children,
@@ -739,6 +744,7 @@ fn prepare<O: Oracle>(
                             text: IMPLICATION_TEXT.to_string(),
                             cert_id: None,
                             requires: Vec::new(),
+                            ground_mode: None,
                             failure: None,
                             cites: Vec::new(),
                             children: steps,
@@ -751,6 +757,7 @@ fn prepare<O: Oracle>(
                         text: label.clone(),
                         cert_id: Some(cert_id.clone()),
                         requires: requires.clone(),
+                        ground_mode: None,
                         failure: None,
                         cites: Vec::new(),
                         children: vec![child],
@@ -766,6 +773,7 @@ fn prepare<O: Oracle>(
             cert_id,
             certificate,
             witness,
+            mode,
         } => {
             if !certificate.is_empty() && seen_certs.insert(cert_id.clone()) {
                 let cert_defs = defined_heads(certificate);
@@ -797,6 +805,7 @@ fn prepare<O: Oracle>(
                 text: cert_id.clone(),
                 cert_id: Some(cert_id.clone()),
                 requires: Vec::new(),
+                ground_mode: None,
                 failure: None,
                 cites: Vec::new(),
                 children: Vec::new(),
@@ -809,6 +818,7 @@ fn prepare<O: Oracle>(
                 text: sentence.text.clone(),
                 cert_id: None,
                 requires: Vec::new(),
+                ground_mode: Some(*mode),
                 failure: None,
                 cites: Vec::new(),
                 children: vec![cert_use, witness_work],
@@ -821,6 +831,7 @@ fn prepare<O: Oracle>(
             text: sentence.text.clone(),
             cert_id: None,
             requires: Vec::new(),
+            ground_mode: None,
             failure: None,
             cites: Vec::new(),
             children: Vec::new(),
@@ -846,6 +857,7 @@ fn prepare<O: Oracle>(
                 text: "detail".to_string(),
                 cert_id: None,
                 requires: Vec::new(),
+                ground_mode: None,
                 failure: None,
                 cites: Vec::new(),
                 children,
@@ -893,6 +905,7 @@ fn prepare<O: Oracle>(
                 text: "not".to_string(),
                 cert_id: None,
                 requires: Vec::new(),
+                ground_mode: None,
                 failure: None,
                 cites: Vec::new(),
                 children: vec![child],
@@ -934,6 +947,7 @@ fn prepare_bool<O: Oracle>(
         text: text.to_string(),
         cert_id: None,
         requires: Vec::new(),
+        ground_mode: None,
         failure: None,
         cites: Vec::new(),
         children,
@@ -956,6 +970,7 @@ fn prepare_witness<O: Oracle>(
         text: sentence.text.clone(),
         cert_id: None,
         requires: Vec::new(),
+        ground_mode: None,
         failure: None,
         cites: cites.clone(),
         children: Vec::new(),
@@ -1179,6 +1194,7 @@ fn prepare_implication<O: Oracle>(
         text: label.to_string(),
         cert_id: None,
         requires: Vec::new(),
+        ground_mode: None,
         failure: Some(Failure::NotEntailed),
         cites: Vec::new(),
         children: Vec::new(),
@@ -1404,6 +1420,7 @@ struct Judged {
     text: String,
     cert_id: Option<String>,
     requires: Vec<String>,
+    ground_mode: Option<GroundMode>,
     kind: Kind,
     children: Vec<Judged>,
     implication: Option<Box<Judged>>,
@@ -1445,6 +1462,7 @@ fn settle(
         text: work.text,
         cert_id: work.cert_id,
         requires: work.requires,
+        ground_mode: work.ground_mode,
         kind: work.kind,
         children,
         implication,
@@ -1602,10 +1620,25 @@ fn eval_value(node: &Judged, lemmas: &HashMap<String, Value>) -> Value {
                 .get(1)
                 .map(|child| eval_value(child, lemmas))
                 .unwrap_or(Value::Unknown);
-            if cert == Value::True && wit == Value::True {
-                Value::True
-            } else {
-                Value::Unknown
+            if cert != Value::True {
+                return Value::Unknown;
+            }
+            match node.ground_mode.unwrap_or(GroundMode::Positive) {
+                GroundMode::Positive => {
+                    if wit == Value::True {
+                        Value::True
+                    } else {
+                        Value::Unknown
+                    }
+                }
+                GroundMode::Negative => {
+                    if wit == Value::False {
+                        Value::False
+                    } else {
+                        Value::Unknown
+                    }
+                }
+                GroundMode::Iff => wit,
             }
         }
     }
@@ -3273,6 +3306,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.claims[1].failure, Some(Failure::BriefWitness));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ground_mode_controls_false_and_true_propagation() {
+        let dir = scratch("ground-modes");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("collector.py"), "ok\n").unwrap();
+        fs::write(dir.join("witness.json"), "{}\n").unwrap();
+
+        let src = |contract: &str| {
+            format!(
+                r#"
+(name Oracle)
+(sense changes_trait "this diff changes the {{t}} trait")
+(define (changes_trait t) ("{{t}} signature changed" t))
+(ground {contract} (witness "collector.py"))
+(or (changes_trait Oracle))
+"#
+            )
+        };
+
+        // Helper: cert passes (entailed), witness returns `wit_choice`.
+        let eval_with = |contract: &str, wit_choice: fn(&Classification) -> Answer| -> Value {
+            let compiled = crate::compile(&parse(&src(contract)).unwrap()).unwrap();
+            let mut oracle = Rec::new(wit_choice);
+            let report = check(&compiled.claims, &dir, DEFAULT_BODY_BYTES, &mut oracle).unwrap();
+            report.claims[1].value
+        };
+
+        let cert_ok_wit_false = |req: &Classification| {
+            if req.state["path"] == "collector.py" {
+                choice("entailed", 0.95)
+            } else {
+                choice("contradicted", 0.95)
+            }
+        };
+        let cert_ok_wit_true = |_: &Classification| choice("entailed", 0.95);
+        let cert_fail_wit_false = |req: &Classification| {
+            if req.state["path"] == "collector.py" {
+                choice("neutral", 0.50)
+            } else {
+                choice("contradicted", 0.95)
+            }
+        };
+
+        // Positive (implies): True -> True, False -> Unknown.
+        let pos = "(implies (witness \"witness.json\") (changes_trait t))";
+        assert_eq!(eval_with(pos, cert_ok_wit_true), Value::True);
+        assert_eq!(eval_with(pos, cert_ok_wit_false), Value::Unknown);
+
+        // Negative (implies not): False -> False, True -> Unknown.
+        let neg = "(implies (witness \"witness.json\") (not (changes_trait t)))";
+        assert_eq!(eval_with(neg, cert_ok_wit_false), Value::False);
+        assert_eq!(eval_with(neg, cert_ok_wit_true), Value::Unknown);
+
+        // Iff: True -> True, False -> False, failed cert -> Unknown.
+        let iff = "(iff (witness \"witness.json\") (changes_trait t))";
+        assert_eq!(eval_with(iff, cert_ok_wit_true), Value::True);
+        assert_eq!(eval_with(iff, cert_ok_wit_false), Value::False);
+        assert_eq!(eval_with(iff, cert_fail_wit_false), Value::Unknown);
 
         let _ = fs::remove_dir_all(&dir);
     }
