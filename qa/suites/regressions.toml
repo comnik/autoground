@@ -340,3 +340,51 @@ id = "reg-forall-bare-csv-listed-control"
 proposition = "out.csv lists Acme."
 expected = "entailed"
 tags = ["control"]
+
+# ---------------------------------------------------------------------------
+# 7. Closed-world JSON over-contradiction & empty-list scope leak
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "reg-cwa-json-open-world"
+kind = "document"
+path = "runs/pr-42/surface.json"
+tags = ["regression", "cwa-flip", "closed-world"]
+body = """
+{
+  "modified_traits": ["Universe"]
+}
+"""
+
+[[group.probes]]
+id = "reg-cwa-json-open-oracle-neutral"
+proposition = "This diff modifies the Oracle trait."
+expected = "neutral"
+tags = ["closed-world"]
+notes = "Without an explicit completeness statement, Jev still treated the JSON list as closed-world (raw=contradicted, conf=0.96)."
+
+[[group.probes]]
+id = "reg-cwa-json-open-universe-control"
+proposition = "This diff modifies the Universe trait."
+expected = "entailed"
+tags = ["control"]
+
+[[group]]
+id = "reg-cwa-json-empty-scope-leak"
+kind = "document"
+path = "runs/pr-43/surface.json"
+tags = ["regression", "cwa-flip", "closed-world"]
+body = """
+{
+  "complete": true,
+  "description": "Exhaustive list of all traits modified by this git diff. Any trait not listed in modified_traits was not modified by this git diff.",
+  "modified_traits": []
+}
+"""
+
+[[group.probes]]
+id = "reg-cwa-json-empty-out-of-scope"
+proposition = "This diff changes a public boundary type."
+expected = "neutral"
+tags = ["closed-world", "near-miss"]
+notes = "Completeness applies only to modified_traits; empty list leaked across scope to contradicted at conf=0.86."

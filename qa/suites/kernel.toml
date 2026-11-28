@@ -1145,3 +1145,290 @@ id = "wit-bin-globex-owns-202"
 proposition = "Globex owns acct_202."
 expected = "entailed"
 tags = ["plain", "positive"]
+
+# ---------------------------------------------------------------------------
+# 18. Closed-world completeness & two-sided ground flip (`cwa-flip`)
+# ---------------------------------------------------------------------------
+
+[[group]]
+id = "cwa-doc-sql-complete-collector"
+kind = "document"
+path = "generators/high_value_customer/run.py"
+tags = ["synthetic", "cwa-flip", "forall"]
+body = """
+import csv
+
+QUERY = '''
+SELECT c.id AS customer_id, 'high_value_customer' AS classification
+FROM customers c
+WHERE c.suspended = FALSE
+  AND c.lifetime_sales_usd > 25000000
+'''
+
+def run(conn):
+    rows = conn.execute(QUERY).fetchall()
+    with open("out.csv", "w", newline="") as f:
+        f.write("# Exhaustive list of all high-value customers; any customer not listed is not a high-value customer.\\n")
+        writer = csv.writer(f)
+        writer.writerow(["customer_id", "classification"])
+        writer.writerows(rows)
+"""
+
+[[group.probes]]
+id = "cwa-sql-complete-sound"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c is an unsuspended customer with lifetime sales greater than $25 million."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "cwa-sql-complete-iff"
+proposition = "For all c, if c is an unsuspended customer with lifetime sales greater than $25 million in the customers table, then run(conn) writes c to out.csv as a high-value customer."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "cwa-sql-complete-neg-sound"
+proposition = "For all c in the customers table, if out.csv contradicts that c is a high-value customer, then either c is suspended or c does not have lifetime sales greater than $25 million."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "cwa-sql-complete-bad-threshold"
+proposition = "For all c in the customers table, if out.csv contradicts that c is a high-value customer, then c does not have lifetime sales greater than $10 million."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+notes = "A customer with $15M sales is omitted from out.csv (> $25M) yet has sales > $10M."
+
+[[group]]
+id = "cwa-doc-sql-partial-collector"
+kind = "document"
+path = "generators/high_value_customer/run_us_only.py"
+tags = ["synthetic", "cwa-flip", "forall"]
+body = """
+import csv
+
+QUERY = '''
+SELECT c.id AS customer_id, 'high_value_customer' AS classification
+FROM customers c
+WHERE c.region = 'US'
+  AND c.suspended = FALSE
+  AND c.lifetime_sales_usd > 25000000
+'''
+
+def run(conn):
+    rows = conn.execute(QUERY).fetchall()
+    with open("out.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["customer_id", "classification"])
+        writer.writerows(rows)
+"""
+
+[[group.probes]]
+id = "cwa-sql-partial-sound"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c is an unsuspended customer with lifetime sales greater than $25 million."
+expected = "entailed"
+tags = ["plain", "positive"]
+notes = "US-only filter is still sound (=>) for the global high-value definition."
+
+[[group.probes]]
+id = "cwa-sql-partial-complete-bad"
+proposition = "For all c in the customers table, if c is unsuspended and has lifetime sales greater than $25 million, then run(conn) writes c to out.csv as a high-value customer."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+notes = "Non-US customers are filtered out, refuting completeness (<=)."
+
+[[group]]
+id = "cwa-imp-iff-certificate"
+kind = "implication"
+tags = ["deduction", "cwa-flip", "forall"]
+premises = [
+  "query.sql selects all and only customers that are not suspended and that have lifetime sales greater than $25 million.",
+  "pipeline.py runs query.sql and writes every selected customer c into out.csv labeled as a high-value customer, and writes no other rows.",
+  "out.csv was produced by the current run of pipeline.py.",
+]
+
+[[group.probes]]
+id = "cwa-imp-iff-sound"
+proposition = "For all c, if out.csv supports that c is a high-value customer, then c is an unsuspended customer with lifetime sales greater than $25 million."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "cwa-imp-iff-complete"
+proposition = "For all c, if c is an unsuspended customer with lifetime sales greater than $25 million, then out.csv supports that c is a high-value customer."
+expected = "entailed"
+tags = ["plain", "positive"]
+notes = "Contrastive with forall-imp-converse-neutral: 'all and only' flips converse to entailed."
+
+[[group]]
+id = "cwa-wit-surface-closed"
+kind = "document"
+path = "runs/pr-42/surface.json"
+tags = ["synthetic", "cwa-flip", "generated-witness"]
+body = """
+{
+  "complete": true,
+  "description": "Exhaustive list of all traits modified by this git diff. Any trait not listed in modified_traits was not modified by this git diff.",
+  "modified_traits": ["Universe"]
+}
+"""
+
+[[group.probes]]
+id = "cwa-wit-closed-universe"
+proposition = "This diff modifies the Universe trait."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "cwa-wit-closed-oracle-contradicted"
+proposition = "This diff modifies the Oracle trait."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+notes = "Explicit exhaustiveness should flip absent Oracle from neutral to contradicted."
+
+[[group.probes]]
+id = "cwa-wit-closed-oracle-not"
+proposition = "This diff does not modify the Oracle trait."
+expected = "entailed"
+negation_of = "cwa-wit-closed-oracle-contradicted"
+tags = ["plain", "positive", "negation"]
+
+[[group]]
+id = "cwa-wit-surface-closed-empty"
+kind = "document"
+path = "runs/pr-43/surface.json"
+tags = ["synthetic", "cwa-flip", "generated-witness"]
+body = """
+{
+  "complete": true,
+  "description": "Exhaustive list of all traits modified by this git diff. Any trait not listed in modified_traits was not modified by this git diff.",
+  "modified_traits": []
+}
+"""
+
+[[group.probes]]
+id = "cwa-wit-empty-oracle-contradicted"
+proposition = "This diff modifies the Oracle trait."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group.probes]]
+id = "cwa-wit-empty-universe-contradicted"
+proposition = "This diff modifies the Universe trait."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group]]
+id = "cwa-wit-csv-closed"
+kind = "document"
+path = "generators/high_value_customer/out.csv"
+tags = ["synthetic", "cwa-flip", "generated-witness"]
+body = """
+# Exhaustive list of all high-value customers; any customer not listed below is not a high-value customer.
+customer_id,classification
+Acme,high_value_customer
+Globex,high_value_customer
+"""
+
+[[group.probes]]
+id = "cwa-wit-csv-acme"
+proposition = "Acme is a high-value customer."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "cwa-wit-csv-initech-contradicted"
+proposition = "Initech is a high-value customer."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+notes = "Contrastive with wit-csv-pos-initech-absent: explicit exhaustiveness flips neutral to contradicted."
+
+[[group.probes]]
+id = "cwa-wit-csv-initech-not"
+proposition = "Initech is not a high-value customer."
+expected = "entailed"
+negation_of = "cwa-wit-csv-initech-contradicted"
+tags = ["plain", "positive", "negation"]
+
+[[group]]
+id = "cwa-imp-open"
+kind = "implication"
+tags = ["deduction", "cwa-flip"]
+premises = [
+  "surface.json lists Universe under modified_traits.",
+]
+
+[[group.probes]]
+id = "cwa-imp-open-oracle-neutral"
+proposition = "This diff modifies the Oracle trait."
+expected = "neutral"
+tags = ["plain", "closed-world"]
+
+[[group]]
+id = "cwa-imp-closed-only"
+kind = "implication"
+tags = ["deduction", "cwa-flip"]
+premises = [
+  "surface.json lists every trait modified by this git diff.",
+  "surface.json lists only Universe under modified_traits.",
+]
+
+[[group.probes]]
+id = "cwa-imp-closed-only-universe"
+proposition = "This diff modifies the Universe trait."
+expected = "entailed"
+tags = ["plain", "positive"]
+
+[[group.probes]]
+id = "cwa-imp-closed-only-oracle-contradicted"
+proposition = "This diff modifies the Oracle trait."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group]]
+id = "cwa-imp-closed-not"
+kind = "implication"
+tags = ["deduction", "cwa-flip"]
+premises = [
+  "surface.json lists every trait modified by this git diff.",
+  "not (surface.json lists Oracle under modified_traits)",
+]
+
+[[group.probes]]
+id = "cwa-imp-closed-not-oracle-contradicted"
+proposition = "This diff modifies the Oracle trait."
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+
+[[group]]
+id = "cwa-raw-diff-comment-only"
+kind = "document"
+path = "src/oracle/mod.rs"
+tags = ["synthetic", "cwa-flip"]
+body = """
+diff --git a/src/oracle/mod.rs b/src/oracle/mod.rs
+--- a/src/oracle/mod.rs
++++ b/src/oracle/mod.rs
+@@ -12,7 +12,7 @@ pub trait Oracle {
+     /// Submit one classification without waiting.
+     fn submit(&mut self, class: Classification) -> Ticket;
+ 
+-    /// Block until any of `tickets` has an answer, and return that ticket.
++    /// Block until one of `tickets` is answered, then return that ticket.
+     fn wait_any(&mut self, tickets: &[Ticket]) -> Ticket;
+ }
+"""
+
+[[group.probes]]
+id = "cwa-raw-diff-changes-trait"
+proposition = "this git diff changes the Oracle trait itself, by adding, deleting, or renaming it, or by adding, deleting, or changing the signature of one of its methods"
+expected = "contradicted"
+tags = ["plain", "adversarial"]
+notes = "Calibration probe: checks whether Jev clears a comment-only diff inside pub trait Oracle directly."
+
+[[group.probes]]
+id = "cwa-raw-diff-keeps-trait"
+proposition = "the Oracle trait has the same methods with the same signatures before and after this git diff"
+expected = "entailed"
+negation_of = "cwa-raw-diff-changes-trait"
+tags = ["plain", "positive", "negation"]
